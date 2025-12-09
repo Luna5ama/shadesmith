@@ -43,27 +43,24 @@ class IOContext(val inputPath: Path, val tempPath: Path, val outputPath: Path) {
         }.getOrNull()
     }
 
-    fun readAllCompositeStyleShaders() : List<ShaderFile> {
-        return IRIS_PASS_PREFIX.asSequence().flatMap { prefix ->
-            (0..99).asSequence().flatMap { numberSuffix ->
-                sequenceOf(numberSuffix.toString()) +  ('a'..'z').asSequence().map { charSuffix ->
-                    "${numberSuffix}_${charSuffix}"
-                }
-            }.map {
-                "$prefix$it.csh"
-            }
-        }.toList().parallelStream().map {
-            readInputRoot(it)
-        }.filter {
-            it != null
-        }.map {
-            it!!
-        }.toList()
-    }
-
     fun writeOutput(shaderFile: ShaderFile) {
         val actualPath = shaderFile.path.absolute()
         actualPath.parent.createDirectories()
         actualPath.writeText(shaderFile.code)
     }
+}
+
+context(ioContext: IOContext)
+fun Path.toOutputPath(): Path {
+    return ioContext.toOutputPath(this)
+}
+
+context(ioContext: IOContext)
+fun Path.toTempPath(): Path {
+    return ioContext.toTempPath(this)
+}
+
+context(ioContext: IOContext)
+fun ShaderFile.writeOutput() {
+    ioContext.writeOutput(this)
 }

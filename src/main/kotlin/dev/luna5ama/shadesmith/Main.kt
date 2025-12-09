@@ -20,14 +20,13 @@ object Main {
 //        }
 
         val ioContext = IOContext(inputPath, tempPath, outputPath)
-        val inputFiles = ioContext.readAllCompositeStyleShaders()
+        context(ioContext) {
+            val inputFiles = readAllCompositeStyleShaders()
+            val included = resolveIncludes(inputFiles)
 
-        val includeResolver = IncludeResolver(ioContext)
-        val included = includeResolver.resolve(inputFiles)
-
-        included.forEach {
-            val newFile = it.copy(path = ioContext.toOutputPath(it.path))
-            ioContext.writeOutput(newFile)
+            included.forEach {
+                it.copy(path = it.path.toOutputPath()).writeOutput()
+            }
         }
     }
 }

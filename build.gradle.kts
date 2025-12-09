@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode
+
 group = "dev.luna5ama"
 version = "0.0.1-SNAPSHOT"
 
@@ -26,4 +28,12 @@ dependencies {
     implementation(libs.fastutil)
 
     implementation(libs.bundles.kotlinEcosystem)
+}
+
+kotlin {
+    compilerOptions {
+        freeCompilerArgs.addAll(
+            "-Xcontext-parameters"
+        )
+    }
 }
