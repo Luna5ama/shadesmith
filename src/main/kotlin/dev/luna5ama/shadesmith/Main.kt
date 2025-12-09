@@ -22,9 +22,15 @@ object Main {
         val ioContext = IOContext(inputPath, tempPath, outputPath)
         context(ioContext) {
             val inputFiles = readAllCompositeStyleShaders()
-            val included = resolveIncludes(inputFiles)
 
-            included.forEach {
+            val included = resolveIncludes(inputFiles)
+            val cleaned = included.parallelStream()
+                .map { holdComments(it) }
+                .map  { it.copy(first = cleanUnused(it.first)) }
+                .map { restoreComments(it) }
+                .toList()
+
+            cleaned.forEach {
                 it.copy(path = it.path.toOutputPath()).writeOutput()
             }
         }
