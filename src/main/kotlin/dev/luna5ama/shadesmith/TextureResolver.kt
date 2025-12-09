@@ -1,11 +1,12 @@
 package dev.luna5ama.shadesmith
 
+import org.intellij.lang.annotations.Language
 import java.util.*
 import kotlin.io.path.name
 
 private val READ_REGEX =
-    """(imageLoad|texture\w*?|texel\w*?)\(\s*(?:uimg|usam)_((?:transient|pingpong|history)_$IDENTIFIER_REGEX_STR)\s*,\s*(.+?)\s*,\s*(.*?)\)""".toRegex()
-private val WRITE_REGEX = """(imageStore)\((?:uimg|usam)_((?:transient|pingpong|history)_$IDENTIFIER_REGEX_STR)\s*,(.+?)\s*,(.*)\);""".toRegex()
+    """^[^#\n\r]+((?:transient|history)_$IDENTIFIER_REGEX_STR)_(sample|gather|fetch|load)\(""".toRegex(RegexOption.MULTILINE)
+private val WRITE_REGEX = """^[^#\n\r]+((?:transient|history)_$IDENTIFIER_REGEX_STR)_(store)\(""".toRegex(RegexOption.MULTILINE)
 
 
 private sealed class LifeTimeRange {
@@ -24,6 +25,25 @@ private sealed class LifeTimeRange {
         }
     }
 }
+
+@Language("GLSL")
+private val textTileTemplate = """
+#define saturate(x) clamp(x, 0.0, 1.0)
+ivec2 _textile_texelToTexel(ivec2 texelPos, ivec2 tileOffset, ivec2 tileSize) {
+    return clamp(texelPos, ivec2(0), tileSize - 1) + tileOffset;
+}
+
+vec2 _textile_uvToUV(vec2 uv, vec2 tileOffsetF, vec2 tileSizeF, vec2 textureSizeRcp) {
+    vec2 textureTexelPos = clamp(uv * tileSizeF, vec2(0.5), tileSizeF - 0.5) + tileOffsetF;
+    return saturate(textureTexelPos * textureSizeRcp);
+}
+
+vec2 _textile_uvToGatherUV(vec2 uv, vec2 tileOffsetF, vec2 tileSizeF, vec2 textureSizeRcp) {
+    vec2 textureTexelPos = clamp(uv * tileSizeF, vec2(1.0), tileSizeF - 1.0) + tileOffsetF;
+    return saturate(textureTexelPos * textureSizeRcp);
+}
+#undef saturate
+""".trim().trimIndent()
 
 context(ioContext: IOContext)
 fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
@@ -46,11 +66,11 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
     val accessInfos = inputFiles.parallelStream()
         .map { file ->
             val reads = READ_REGEX.findAll(file.code)
-                .map { it.groupValues[2] }
+                .map { it.groupValues[1] }
                 .toSet()
 
             val writes = WRITE_REGEX.findAll(file.code)
-                .map { it.groupValues[2] }
+                .map { it.groupValues[1] }
                 .toSet()
 
             AccessInfo(file, reads, writes)
@@ -70,6 +90,10 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
             )
         }
         .toList()
+
+    accessInfos.forEach {
+        println("${it.first}: reads: ${it.second.reads} writes: ${it.second.writes}")
+    }
 
     val lifeTime = config.formats.keys.associateWith { texName ->
         val typeStr = texName.substringBefore('_')
@@ -105,7 +129,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
         println("${it.key}: ${it.value}" )
     }
 
-    data class AllocationInfo(val usage: BitSet = BitSet(), val tileID: MutableMap<String, Int> = mutableMapOf())
+    data class AllocationInfo(val usage: BitSet = BitSet(), val tileID: MutableMap<String, Int> = mutableMapOf(), var tileCount: Int = 0)
 
     val slots = EnumMap<TextureFormat, AllocationInfo>(TextureFormat::class.java)
 
@@ -125,6 +149,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
             if (texName !in slotInfo.tileID && i in range) {
                 val tileID = slotInfo.usage.nextClearBit(0)
                 slotInfo.usage.set(tileID)
+                slotInfo.tileCount = maxOf(slotInfo.tileCount, tileID + 1)
                 slotInfo.tileID[texName] = tileID
             }
         }
@@ -137,6 +162,146 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
             println("  Tex: $texName -> TileID: $tileID")
         }
     }
+
+    val cxArray = arrayOf(0, 0, 1, 1, 0, 1, 2, 2, 2)
+    val cyArray = arrayOf(0, 1, 0, 1, 2, 2, 0, 1, 2)
+    val xSizeArray = arrayOf(1, 1, 2, 2, 2, 2, 3, 3, 3)
+    val ySizeArray = arrayOf(1, 2, 2, 2, 3, 3, 3, 3, 3)
+
+    val textTileCode = buildString {
+
+        slots.forEach { (format, allocationInfo) ->
+            fun prefix(tileID: Int) = "_${format.name}_$tileID"
+            fun offsetStr(tileID: Int) = "${prefix(tileID)}_OFFSET"
+            fun offsetFStr(tileID: Int) = "${prefix(tileID)}_OFFSET_F"
+            fun sizeStr(tileID: Int) = "${prefix(tileID)}_SIZE"
+            fun sizeFStr(tileID: Int) = "${prefix(tileID)}_SIZE_F"
+            fun sizeRCPStr(tileID: Int) = "${prefix(tileID)}_SIZE_RCP"
+            fun uvToUVStr(tileID: Int) = "${prefix(tileID)}_UV_TO_UV"
+            fun uvToGatherUVStr(tileID: Int) = "${prefix(tileID)}_UV_TO_GATHER_UV"
+            fun texelToTexelStr(tileID: Int) = "${prefix(tileID)}_TEXEL_TO_TEXEL"
+
+            var xSize = 1
+            var ySize = 1
+            repeat(allocationInfo.tileCount) {
+               val cx = cxArray[it]
+               val cy = cyArray[it]
+                xSize = xSizeArray[it]
+                ySize = ySizeArray[it]
+
+                val offsetStr = offsetStr(it)
+                val offsetF = offsetFStr(it)
+                val sizeStr = sizeStr(it)
+                val sizeFStr = sizeFStr(it)
+                val sizeRCPStr = sizeRCPStr(it)
+                append("#define ")
+                append(offsetStr)
+                append(" ivec2(uval_mainImageSizeI.x * ")
+                append(cx)
+                append(", uval_mainImageSizeI.y * ")
+                append(cy)
+                append(")\n")
+
+                append("#define ")
+                append(offsetF)
+                append(" vec2(uval_mainImageSizeI.x * ")
+                append(cx)
+                append(", uval_mainImageSize.y * ")
+                append(cy)
+                append(")\n")
+
+                append("#define ")
+                append(sizeStr)
+                append(" uval_mainImageSizeI\n")
+
+                append("#define ")
+                append(sizeFStr)
+                append(" uval_mainImageSize\n")
+
+                append("#define ")
+                append(sizeRCPStr)
+                append(" uval_mainImageSizeRcp\n")
+
+                append("#define ")
+                append(texelToTexelStr(it))
+                append("(texelPos) _textile_texelToTexel(texelPos, ")
+                append(offsetStr)
+                append(", ")
+                append(sizeStr)
+                append(")\n")
+
+                append("#define ")
+                append(uvToUVStr(it))
+                append("(uv) _textile_uvToUV(uv, ")
+                append(offsetF)
+                append(", ")
+                append(sizeFStr)
+                append(", ")
+                append(sizeRCPStr)
+                append(")\n")
+
+                append("#define ")
+                append(uvToGatherUVStr(it))
+                append("(uv) _textile_uvToGatherUV(uv, ")
+                append(offsetF)
+                append(", ")
+                append(sizeFStr)
+                append(", ")
+                append(sizeRCPStr)
+                append(")\n")
+            }
+
+            val formatLowercase = format.name.lowercase()
+            val usamFormat = "usam_$formatLowercase"
+            val uimgFormat = "uimg_$formatLowercase"
+
+            allocationInfo.tileID.forEach {
+                append("#define ")
+                append(it.key)
+                append("_sample(x) texture(")
+                append(usamFormat)
+                append(", ")
+                append(uvToUVStr(it.value))
+                append("(x))\n")
+
+                append("#define ")
+                append(it.key)
+                append("_gather(x, c) textureGather(")
+                append(usamFormat)
+                append(", ")
+                append(uvToGatherUVStr(it.value))
+                append("(x), c)\n")
+
+                append("#define ")
+                append(it.key)
+                append("_fetch(x) texelFetch(")
+                append(usamFormat)
+                append(", ")
+                append(texelToTexelStr(it.value))
+                append("(x), 0)\n")
+
+                append("#define ")
+                append(it.key)
+                append("_load(x) imageLoad(")
+                append(uimgFormat)
+                append(", ")
+                append(texelToTexelStr(it.value))
+                append("(x))\n")
+
+                append("#define ")
+                append(it.key)
+                append("_store(x, v) imageStore(")
+                append(uimgFormat)
+                append(", ")
+                append(texelToTexelStr(it.value))
+                append("(x), v)\n")
+            }
+
+            println("$format: $xSize x $ySize (${allocationInfo.tileCount})")
+        }
+    }
+
+    ioContext.writeOutput(ShaderFile(ioContext.resolveInputPath("/Base/Textile.glsl"), textTileTemplate + "\n\n" + textTileCode))
 
     return inputFiles
 }

@@ -19,7 +19,7 @@ import kotlin.io.path.relativeTo
 
 class PathResolver(val root: Path) {
     fun resolve(path: String): Path {
-        return PathImpl(this, root.resolve(path))
+        return PathImpl(this, root.resolve(path.removePrefix("/")))
     }
 
     private object DelegateFileSystemProvider : FileSystemProvider() {

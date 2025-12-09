@@ -21,6 +21,10 @@ class IOContext(val inputPath: Path, val tempPath: Path, val outputPath: Path) {
 
     val config = Json.decodeFromString<Config>(inputPath.resolve("shadesmith.json").readText())
 
+    fun resolveInputPath(path: String): Path {
+        return inputPathResolver.resolve(path)
+    }
+
     fun readInputRoot(rootPath: String): ShaderFile? {
         return readInput(inputPathResolver.resolve(rootPath))
     }
