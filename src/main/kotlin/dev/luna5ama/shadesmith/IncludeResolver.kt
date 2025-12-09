@@ -8,15 +8,19 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
     val usedFiles = inputFiles.associateByTo(ConcurrentHashMap()) { it.path }
 
     val includeRegex = """#include\s+"([^"]+)"""".toRegex()
+    val prefix = "#include "
 
     fun resolve(file: ShaderFile) {
-        includeRegex.findAll(file.code).forEach {
-            val includePath = it.groupValues[1]
-            val includedFile = ioContext.readInput(file.path.resolve(includePath))
-            if (includedFile != null && usedFiles.putIfAbsent(includedFile.path, includedFile) == null) {
-                resolve(includedFile)
+        file.code.lineSequence()
+            .filter { it.startsWith(prefix) }
+            .map { it.substring(prefix.length).trim().removeSurrounding("\"") }
+            .toList()
+            .forEach {
+                val includedFile = ioContext.readInput(file.path.resolve(it))
+                if (includedFile != null && usedFiles.putIfAbsent(includedFile.path, includedFile) == null) {
+                    resolve(includedFile)
+                }
             }
-        }
     }
 
     inputFiles.parallelStream().forEach {

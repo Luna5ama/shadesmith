@@ -9,6 +9,7 @@ enum class TextureFormat {
     RGBA16F,
     RGBA8,
     RG32UI,
+    R32UI,
     R32F,
 }
 

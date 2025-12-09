@@ -14,10 +14,8 @@ enum class PassPrefix {
 }
 
 val IRIS_PASS_PREFIX = listOf(
-    "begin",
-    "prepare",
-    "deferred",
-    "composite"
+    PassPrefix.DEFERRED,
+    PassPrefix.COMPOSITE,
 )
 
 val IDENTIFIER_REGEX_STR = """[A-Za-z_][A-Za-z0-9_]*"""
