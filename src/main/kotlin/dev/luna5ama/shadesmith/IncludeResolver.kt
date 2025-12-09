@@ -1,11 +1,96 @@
 package dev.luna5ama.shadesmith
 
-import java.nio.file.Path
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.io.path.absolute
+import kotlin.io.path.absolutePathString
 
-class IncludeResolver(private val path: Path) {
+class IncludeResolver(private val ioContext: IOContext) {
 
+    fun resolve(inputFiles: List<ShaderFile>): List<ShaderFile> {
+        val usedFiles = inputFiles.associateByTo(ConcurrentHashMap()) { it.path }
 
-    fun resolve() {
+        val includeRegex = """#include\s+"([^"]+)"""".toRegex()
 
+        fun resolve(file: ShaderFile) {
+            includeRegex.findAll(file.code).forEach {
+                val includePath = it.groupValues[1]
+                val includedFile = ioContext.readInput(file.path.resolve(includePath))
+                if (includedFile != null && usedFiles.putIfAbsent(includedFile.path, includedFile) == null) {
+                    resolve(includedFile)
+                }
+            }
+        }
+
+        inputFiles.parallelStream().forEach {
+            resolve(it)
+        }
+
+        val includeGuardRegex =
+            """([\s\S]*)(#ifndef INCLUDE_\S*\s+#define INCLUDE_\S*\s+\S*)([\S\s]*)(#endif)([\s\S]*)""".toRegex()
+
+        val protectRegex = """^[\t ]*#(?!include)""".toRegex(RegexOption.MULTILINE)
+
+        val protect = "//DONOTPROCESS"
+        fun prepareForPreprocessor(shaderFile: ShaderFile): ShaderFile {
+            fun protect(content: String): String {
+                return protectRegex.replace(content) {
+                    "$protect${it.value}"
+                }
+            }
+
+            val matchResult = includeGuardRegex.matchEntire(shaderFile.code)
+            var newCode = if (matchResult == null) {
+                protect(shaderFile.code)
+            } else {
+                val (before, guard1, content, guard2, after) = matchResult.destructured
+                buildString {
+                    append(before)
+                    append(guard1)
+
+                    append(protect(content))
+
+                    append(guard2)
+                    append(after)
+                }
+            }
+
+            newCode = includeRegex.replace(newCode) {
+                val includePath = it.groupValues[1]
+                "#include \"${includePath}.c\""
+            }
+
+            return shaderFile.copy(
+                path = ioContext.toTempPath(shaderFile.path.resolve("/${shaderFile.path}.c")),
+                code = newCode
+            )
+        }
+
+        usedFiles.values.parallelStream()
+            .map { prepareForPreprocessor(it) }
+            .forEach {
+                ioContext.writeOutput(it)
+            }
+
+        return inputFiles.stream()
+            .map {
+                val inputPath = ioContext.toTempPath(it.path.resolve("/${it.path}.c"))
+                val proc = ProcessBuilder()
+                    .directory(ioContext.tempPath.toFile())
+                    .command("clang", "-C", "-E", "-Wno-microsoft-include", inputPath.absolutePathString())
+                    .redirectError(ProcessBuilder.Redirect.INHERIT)
+                    .start()
+
+                it to proc
+            }
+            .toList()
+            .parallelStream()
+            .map { (file, proc) ->
+                val newCode = proc.inputStream.bufferedReader().use {
+                    it.readText()
+                }
+
+                file.copy(code = newCode.replace(protect, ""))
+            }
+            .toList()
     }
 }

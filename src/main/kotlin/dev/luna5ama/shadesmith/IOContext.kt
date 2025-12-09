@@ -4,29 +4,42 @@ import java.nio.file.Path
 import java.util.Optional
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.absolute
+import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.name
 import kotlin.io.path.pathString
 import kotlin.io.path.readText
 import kotlin.io.path.relativeTo
+import kotlin.io.path.writeText
 import kotlin.jvm.optionals.getOrNull
 
-class IOContext(val inputPath: Path, val outputPath: Path) {
+class IOContext(val inputPath: Path, val tempPath: Path, val outputPath: Path) {
     private val inputPathResolver = PathResolver(inputPath)
+    private val tempPathResolver = PathResolver(tempPath)
+    private val outputPathResolver = PathResolver(outputPath)
     private val cache = ConcurrentHashMap<Path, Optional<ShaderFile>>()
 
     fun readInputRoot(rootPath: String): ShaderFile? {
         return readInput(inputPathResolver.resolve(rootPath))
     }
 
+    fun toOutputPath(path: Path): Path {
+        val relativePath = path.absolute().relativeTo(inputPath)
+        return outputPathResolver.resolve(relativePath.pathString)
+    }
+
+    fun toTempPath(path: Path): Path {
+        val relativePath = path.absolute().relativeTo(inputPath)
+        return tempPathResolver.resolve(relativePath.pathString)
+    }
+
     fun readInput(path: Path): ShaderFile? {
-        val key = path.normalize().absolute()
-        return cache.computeIfAbsent(key) {
+        return cache.computeIfAbsent(path) {
             if (!it.exists()) return@computeIfAbsent Optional.empty()
             val fileName = it.name
             val fileDir = it.parent.relativeTo(inputPath).pathString
             val code = it.readText()
-            Optional.of(ShaderFile(fileName, fileDir, code))
+            Optional.of(ShaderFile(it,  code))
         }.getOrNull()
     }
 
@@ -39,8 +52,18 @@ class IOContext(val inputPath: Path, val outputPath: Path) {
             }.map {
                 "$prefix$it.csh"
             }
-        }.mapNotNull {
+        }.toList().parallelStream().map {
             readInputRoot(it)
+        }.filter {
+            it != null
+        }.map {
+            it!!
         }.toList()
+    }
+
+    fun writeOutput(shaderFile: ShaderFile) {
+        val actualPath = shaderFile.path.absolute()
+        actualPath.parent.createDirectories()
+        actualPath.writeText(shaderFile.code)
     }
 }

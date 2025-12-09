@@ -6,27 +6,16 @@ import java.net.URI
 import java.nio.channels.AsynchronousFileChannel
 import java.nio.channels.FileChannel
 import java.nio.channels.SeekableByteChannel
-import java.nio.file.AccessMode
-import java.nio.file.CopyOption
-import java.nio.file.DirectoryStream
-import java.nio.file.FileStore
-import java.nio.file.FileSystem
-import java.nio.file.FileSystems
-import java.nio.file.LinkOption
-import java.nio.file.OpenOption
-import java.nio.file.Path
-import java.nio.file.PathMatcher
-import java.nio.file.WatchService
+import java.nio.file.*
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.FileAttribute
 import java.nio.file.attribute.FileAttributeView
 import java.nio.file.attribute.UserPrincipalLookupService
 import java.nio.file.spi.FileSystemProvider
-import java.util.Spliterator
+import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.function.Consumer
-import kotlin.io.path.Path
-import kotlin.io.path.toPath
+import kotlin.io.path.relativeTo
 
 class PathResolver(val root: Path) {
     fun resolve(path: String): Path {
@@ -282,7 +271,7 @@ class PathResolver(val root: Path) {
         }
     }
 
-    private class PathImpl(private val resolver: PathResolver, val delegate: Path) : Path by delegate {
+    private inner class PathImpl(private val resolver: PathResolver, val delegate: Path) : Path by delegate {
         override fun getFileSystem(): FileSystem {
             return DelegateFileSystem(delegate.fileSystem)
         }
@@ -292,6 +281,7 @@ class PathResolver(val root: Path) {
                 other.startsWith("/") -> {
                     resolver.resolve(other.removePrefix("/"))
                 }
+
                 else -> delegate.parent.resolve(other).normalize()
             }
             return PathImpl(resolver, resultRawPath)
@@ -305,8 +295,12 @@ class PathResolver(val root: Path) {
             return delegate.spliterator()
         }
 
+        override fun getRoot(): Path {
+            return PathImpl(resolver, delegate.root)
+        }
+
         override fun toString(): String {
-            return delegate.toString()
+            return delegate.relativeTo(this@PathResolver.root).toString()
         }
     }
 }

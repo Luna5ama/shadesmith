@@ -1,34 +1,33 @@
 package dev.luna5ama.shadesmith
 
-import kotlin.io.path.ExperimentalPathApi
-import kotlin.io.path.Path
-import kotlin.io.path.createDirectories
-import kotlin.io.path.deleteRecursively
-import kotlin.io.path.exists
-import kotlin.io.path.isDirectory
-import kotlin.io.path.listDirectoryEntries
+import kotlin.io.path.*
 
-object Main  {
+object Main {
     @JvmStatic
     @OptIn(ExperimentalPathApi::class)
     fun main(args: Array<String>) {
-        check(args.size >= 2) { "Missing path argument"}
+        check(args.size >= 3) { "Missing path argument" }
 
         val inputPath = Path(args[0]).toAbsolutePath()
-        val outputPath = Path(args[1]).toAbsolutePath()
+        val tempPath = Path(args[1]).toAbsolutePath()
+        val outputPath = Path(args[2]).toAbsolutePath()
 
         check(inputPath.exists() && inputPath.isDirectory())
 
         outputPath.createDirectories()
-        outputPath.listDirectoryEntries().forEach {
-            it.deleteRecursively()
-        }
+//        outputPath.listDirectoryEntries().forEach {
+//            it.deleteRecursively()
+//        }
 
-        val ioContext = IOContext(inputPath, outputPath)
+        val ioContext = IOContext(inputPath, tempPath, outputPath)
         val inputFiles = ioContext.readAllCompositeStyleShaders()
 
-        inputFiles.forEach {
-            println("${it.fileDir}/${it.fileName}")
+        val includeResolver = IncludeResolver(ioContext)
+        val included = includeResolver.resolve(inputFiles)
+
+        included.forEach {
+            val newFile = it.copy(path = ioContext.toOutputPath(it.path))
+            ioContext.writeOutput(newFile)
         }
     }
 }

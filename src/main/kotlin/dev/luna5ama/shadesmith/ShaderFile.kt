@@ -1,5 +1,5 @@
 package dev.luna5ama.shadesmith
 
-data class ShaderFile(val fileName: String, val fileDir: String, val code: String) {
-    val filePath get() = "$fileDir/$fileName"
-}
+import java.nio.file.Path
+
+data class ShaderFile(val path: Path, val code: String)
