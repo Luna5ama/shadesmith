@@ -91,7 +91,9 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
         }
         .toList()
 
+    println("Accesses:")
     accessInfos.forEach {
+        if (it.second.reads.isEmpty() && it.second.writes.isEmpty()) return@forEach
         println("${it.first}: reads: ${it.second.reads} writes: ${it.second.writes}")
     }
 
@@ -124,7 +126,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
         }
     }
 
-    println("Lifetime:")
+    println("\nLifetime:")
     lifeTime.forEach {
         println("${it.key}: ${it.value}" )
     }
@@ -137,7 +139,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
         lifeTime.forEach { (texName, range) ->
             val format = config.formats[texName]!!
             val slotInfo = slots.getOrPut(format, ::AllocationInfo)
-            if (texName in slotInfo.tileID && i !in range) {
+            if (texName in slotInfo.tileID && i !in range && i - 1 in range) {
                 val tileID = slotInfo.tileID[texName]!!
                 slotInfo.usage.clear(tileID)
             }
