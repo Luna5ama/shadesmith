@@ -1,12 +1,12 @@
 package dev.luna5ama.shadesmith
 
+import kotlinx.serialization.json.Json
 import java.nio.file.Path
 import java.util.Optional
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.absolute
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
-import kotlin.io.path.name
 import kotlin.io.path.pathString
 import kotlin.io.path.readText
 import kotlin.io.path.relativeTo
@@ -18,6 +18,8 @@ class IOContext(val inputPath: Path, val tempPath: Path, val outputPath: Path) {
     private val tempPathResolver = PathResolver(tempPath)
     private val outputPathResolver = PathResolver(outputPath)
     private val cache = ConcurrentHashMap<Path, Optional<ShaderFile>>()
+
+    val config = Json.decodeFromString<Config>(inputPath.resolve("shadesmith.json").readText())
 
     fun readInputRoot(rootPath: String): ShaderFile? {
         return readInput(inputPathResolver.resolve(rootPath))
@@ -36,8 +38,6 @@ class IOContext(val inputPath: Path, val tempPath: Path, val outputPath: Path) {
     fun readInput(path: Path): ShaderFile? {
         return cache.computeIfAbsent(path) {
             if (!it.exists()) return@computeIfAbsent Optional.empty()
-            val fileName = it.name
-            val fileDir = it.parent.relativeTo(inputPath).pathString
             val code = it.readText()
             Optional.of(ShaderFile(it,  code))
         }.getOrNull()

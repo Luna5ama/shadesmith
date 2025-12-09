@@ -1,6 +1,5 @@
 package dev.luna5ama.shadesmith
 
-private val IDENTIFIER_REGEX_STR = """[A-Za-z_][A-Za-z0-9_]*"""
 
 private val TOKEN_DELIMITER_REGEX = """\s+|(?=[{}()\[\];,.\-!])|(?<=[{}()\[\];,.\-!])""".toRegex()
 private val DEFINE_REGEX = """^\s*((?://)?)#define\s+($IDENTIFIER_REGEX_STR)(.*)$""".toRegex()

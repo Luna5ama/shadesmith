@@ -30,7 +30,9 @@ object Main {
                 .map { restoreComments(it) }
                 .toList()
 
-            cleaned.forEach {
+            val resolved = resolveTextures(cleaned)
+
+            resolved.forEach {
                 it.copy(path = it.path.toOutputPath()).writeOutput()
             }
         }

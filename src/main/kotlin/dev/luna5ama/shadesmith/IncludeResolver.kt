@@ -74,7 +74,7 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
             val inputPath = ioContext.toTempPath(it.path.resolve("/${it.path}.c"))
             val proc = ProcessBuilder()
                 .directory(ioContext.tempPath.toFile())
-                .command("clang", "-C", "-E", "-Wno-microsoft-include", inputPath.absolutePathString())
+                .command("clang", "-C", "-E", "-P", "-Wno-microsoft-include", inputPath.absolutePathString())
                 .redirectError(ProcessBuilder.Redirect.INHERIT)
                 .start()
 
