@@ -16,6 +16,7 @@ java {
 
 
 repositories {
+    mavenLocal()
     mavenCentral()
     google()
     maven("https://maven.luna5ama.dev")

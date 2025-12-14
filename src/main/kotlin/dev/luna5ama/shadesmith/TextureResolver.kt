@@ -33,14 +33,14 @@ ivec2 _textile_texelToTexel(ivec2 texelPos, ivec2 tileOffset, ivec2 tileSize) {
     return clamp(texelPos, ivec2(0), tileSize - 1) + tileOffset;
 }
 
-vec2 _textile_uvToUV(vec2 uv, vec2 tileOffsetF, vec2 tileSizeF, vec2 textureSizeRcp) {
+vec2 _textile_uvToUV(vec2 uv, vec2 tileOffsetF, vec2 tileSizeF, vec2 atlastSizeRcp) {
     vec2 textureTexelPos = clamp(uv * tileSizeF, vec2(0.5), tileSizeF - 0.5) + tileOffsetF;
-    return saturate(textureTexelPos * textureSizeRcp);
+    return saturate(textureTexelPos * atlastSizeRcp);
 }
 
-vec2 _textile_uvToGatherUV(vec2 uv, vec2 tileOffsetF, vec2 tileSizeF, vec2 textureSizeRcp) {
+vec2 _textile_uvToGatherUV(vec2 uv, vec2 tileOffsetF, vec2 tileSizeF, vec2 atlastSizeRcp) {
     vec2 textureTexelPos = clamp(uv * tileSizeF, vec2(1.0), tileSizeF - 1.0) + tileOffsetF;
-    return saturate(textureTexelPos * textureSizeRcp);
+    return saturate(textureTexelPos * atlastSizeRcp);
 }
 #undef saturate
 """.trim().trimIndent()
@@ -109,14 +109,14 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
             }
 
             "history" -> {
-                val firstWriteIndex = accessInfos.indices.first {
+                val firstWriteIndex = accessInfos.indices.firstOrNull {
                     val accessInfo = accessInfos[it].second
                     texName in accessInfo.writes
-                }
-                val lastReadIndex = accessInfos.indices.last {
+                } ?: accessInfos.lastIndex
+                val lastReadIndex = accessInfos.indices.lastOrNull {
                     val accessInfo = accessInfos[it].second
                     it <= firstWriteIndex && texName in accessInfo.reads
-                }
+                } ?: 0
                 LifeTimeRange.History(lastReadIndex, firstWriteIndex)
 
             }
@@ -128,31 +128,58 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
 
     println("\nLifetime:")
     lifeTime.forEach {
-        println("${it.key}: ${it.value}" )
+        println("${it.key} (${config.formats[it.key]}): ${it.value}" )
     }
 
-    data class AllocationInfo(val usage: BitSet = BitSet(), val tileID: MutableMap<String, Int> = mutableMapOf(), var tileCount: Int = 0)
+    data class AllocationInfo(val tileID: MutableMap<String, Int> = mutableMapOf(), var tileCount: Int = 0)
+
+    data class AllocationEvent(val time: Int, val texName: String, val isStart: Boolean)
 
     val slots = EnumMap<TextureFormat, AllocationInfo>(TextureFormat::class.java)
 
-    for (i in accessInfos.indices) {
-        lifeTime.forEach { (texName, range) ->
-            val format = config.formats[texName]!!
-            val slotInfo = slots.getOrPut(format, ::AllocationInfo)
-            if (texName in slotInfo.tileID && i !in range && i - 1 in range) {
-                val tileID = slotInfo.tileID[texName]!!
-                slotInfo.usage.clear(tileID)
+    // Optimal interval coloring algorithm: process events sorted by time
+    config.formats.keys.groupBy { config.formats[it]!! }.forEach { (format, textures) ->
+        val slotInfo = slots.getOrPut(format, ::AllocationInfo)
+        val usage = BitSet()
+
+        // Build all allocation/deallocation events
+        val events = mutableListOf<AllocationEvent>()
+
+        textures.forEach { texName ->
+            val range = lifeTime[texName]!!
+            when (range) {
+                is LifeTimeRange.Transient -> {
+                    events.add(AllocationEvent(range.range.first, texName, true))
+                    events.add(AllocationEvent(range.range.last + 1, texName, false))
+                }
+                is LifeTimeRange.History -> {
+                    // History textures wrap around: active [0, lastRead] and [firstWrite, end]
+                    // So they deallocate after lastRead and reallocate before firstWrite
+                    events.add(AllocationEvent(0, texName, true))
+                    events.add(AllocationEvent(range.lastRead + 1, texName, false))
+                    events.add(AllocationEvent(range.firstWrite, texName, true))
+                    events.add(AllocationEvent(accessInfos.size, texName, false))
+                }
             }
         }
 
-        lifeTime.forEach { (texName, range) ->
-            val format = config.formats[texName]!!
-            val slotInfo = slots.getOrPut(format, ::AllocationInfo)
-            if (texName !in slotInfo.tileID && i in range) {
-                val tileID = slotInfo.usage.nextClearBit(0)
-                slotInfo.usage.set(tileID)
+        // Sort by time, with deallocations before allocations at same time
+        events.sortWith(compareBy({ it.time }, { !it.isStart }))
+
+        // Process events in order
+        events.forEach { event ->
+            if (event.isStart) {
+                // Allocate: find lowest available slot
+                val tileID = usage.nextClearBit(0)
+                usage.set(tileID)
+                slotInfo.tileID[event.texName] = tileID
                 slotInfo.tileCount = maxOf(slotInfo.tileCount, tileID + 1)
-                slotInfo.tileID[texName] = tileID
+            } else {
+                // Deallocate: free the slot
+                val tileID = slotInfo.tileID[event.texName]
+                if (tileID != null) {
+                    usage.clear(tileID)
+                }
             }
         }
     }
@@ -198,17 +225,17 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
                 val sizeRCPStr = sizeRCPStr(it)
                 append("#define ")
                 append(offsetStr)
-                append(" ivec2(uval_mainImageSizeI.x * ")
+                append(" uval_mainImageSizeI * ivec2(")
                 append(cx)
-                append(", uval_mainImageSizeI.y * ")
+                append(", ")
                 append(cy)
                 append(")\n")
 
                 append("#define ")
                 append(offsetF)
-                append(" vec2(uval_mainImageSizeI.x * ")
+                append(" uval_mainImageSize * vec2(")
                 append(cx)
-                append(", uval_mainImageSize.y * ")
+                append(", ")
                 append(cy)
                 append(")\n")
 
