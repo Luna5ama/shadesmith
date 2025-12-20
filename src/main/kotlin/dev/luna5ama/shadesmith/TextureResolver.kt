@@ -9,20 +9,43 @@ private val READ_REGEX =
 private val WRITE_REGEX = """^[^#\n\r]+((?:transient|history)_$IDENTIFIER_REGEX_STR)_(store)\(""".toRegex(RegexOption.MULTILINE)
 
 
-private sealed class LifeTimeRange {
-    abstract operator fun contains(index: Int): Boolean
+private sealed interface LifeTimeRange {
+    val sortOrder: Int
+    fun rangeBitSet(): BitSet
 
-    data class Transient(val range: IntRange) : LifeTimeRange() {
-        override fun contains(index: Int): Boolean {
-            return index in range
+    data class Transient(val range: IntRange) : LifeTimeRange {
+        override val sortOrder get() = range.first
+
+        override fun rangeBitSet(): BitSet {
+            val bitSet = BitSet()
+            bitSet.set(range.first, range.last + 1)
+            return bitSet
         }
     }
-    data class History(val lastRead: Int, val firstWrite: Int) : LifeTimeRange() {
-        override fun contains(index: Int): Boolean {
-            if (firstWrite - lastRead <= 1) return true
-            @Suppress("ReplaceRangeToWithRangeUntil")
-            return index !in (lastRead + 1) .. (firstWrite - 1)
+    data class History(val lastRead: Int, val firstWrite: Int, val total: Int) : LifeTimeRange {
+        override val sortOrder get() = -1
+
+        override fun rangeBitSet(): BitSet {
+            val bitSet = BitSet()
+            bitSet.set(0, lastRead + 1)
+            bitSet.set(firstWrite, total)
+            return bitSet
         }
+    }
+}
+
+private tailrec fun findSlot(tiles: MutableList<BitSet>, allocateBitSet: BitSet, currSlot: Int): Int {
+    while (tiles.lastIndex < currSlot) {
+        tiles.add(BitSet())
+    }
+    val slotBitSet = tiles[currSlot]
+    val intersection = allocateBitSet.clone() as BitSet
+    intersection.and(slotBitSet)
+    if (intersection.isEmpty) {
+        slotBitSet.or(allocateBitSet)
+        return currSlot
+    } else {
+        return findSlot(tiles, allocateBitSet, currSlot + 1)
     }
 }
 
@@ -123,7 +146,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
                     val accessInfo = accessInfos[it].second
                     it <= firstWriteIndex && texName in accessInfo.reads
                 } ?: 0
-                LifeTimeRange.History(lastReadIndex, firstWriteIndex)
+                LifeTimeRange.History(lastReadIndex, firstWriteIndex, accessInfos.size)
 
             }
             else -> {
@@ -137,58 +160,24 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
         println("${it.key} (${config.formats[it.key]}): ${it.value}" )
     }
 
-    data class AllocationInfo(val tileID: MutableMap<String, Int> = mutableMapOf(), var tileCount: Int = 0)
+    data class AllocationInfo(val tileID: MutableMap<String, Int>, val tileCount: Int)
 
-    data class AllocationEvent(val time: Int, val texName: String, val isStart: Boolean)
+    val slots = config.formats.entries.groupBy { it.value }
+        .mapValues { entry -> entry.value.map { it.key } }
+        .mapValues { (format, texNames) ->
+            val tileID = mutableMapOf<String, Int>()
+            val tiles = mutableListOf<BitSet>()
 
-    val slots = EnumMap<TextureFormat, AllocationInfo>(TextureFormat::class.java)
-
-    // Optimal interval coloring algorithm: process events sorted by time
-    config.formats.keys.groupBy { config.formats[it]!! }.forEach { (format, textures) ->
-        val slotInfo = slots.getOrPut(format, ::AllocationInfo)
-        val usage = BitSet()
-
-        // Build all allocation/deallocation events
-        val events = mutableListOf<AllocationEvent>()
-
-        textures.forEach { texName ->
-            val range = lifeTime[texName]!!
-            when (range) {
-                is LifeTimeRange.Transient -> {
-                    events.add(AllocationEvent(range.range.first, texName, true))
-                    events.add(AllocationEvent(range.range.last + 1, texName, false))
+            texNames.asSequence()
+                .map { it to lifeTime[it]!! }
+                .sortedBy { it.second.sortOrder }
+                .forEach {
+                    tileID[it.first] = findSlot(tiles, it.second.rangeBitSet(), 0)
                 }
-                is LifeTimeRange.History -> {
-                    // History textures wrap around: active [0, lastRead] and [firstWrite, end]
-                    // So they deallocate after lastRead and reallocate before firstWrite
-                    events.add(AllocationEvent(0, texName, true))
-                    events.add(AllocationEvent(range.lastRead + 1, texName, false))
-                    events.add(AllocationEvent(range.firstWrite, texName, true))
-                    events.add(AllocationEvent(accessInfos.size, texName, false))
-                }
-            }
+
+            AllocationInfo(tileID, tiles.size)
         }
-
-        // Sort by time, with deallocations before allocations at same time
-        events.sortWith(compareBy({ it.time }, { !it.isStart }))
-
-        // Process events in order
-        events.forEach { event ->
-            if (event.isStart) {
-                // Allocate: find lowest available slot
-                val tileID = usage.nextClearBit(0)
-                usage.set(tileID)
-                slotInfo.tileID[event.texName] = tileID
-                slotInfo.tileCount = maxOf(slotInfo.tileCount, tileID + 1)
-            } else {
-                // Deallocate: free the slot
-                val tileID = slotInfo.tileID[event.texName]
-                if (tileID != null) {
-                    usage.clear(tileID)
-                }
-            }
-        }
-    }
+        .toMap(EnumMap(TextureFormat::class.java))
 
     println("\nAllocations:")
     slots.forEach {
