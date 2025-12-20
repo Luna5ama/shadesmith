@@ -42,6 +42,11 @@ vec2 _textile_uvToGatherUV(vec2 uv, vec2 tileOffsetF, vec2 tileSizeF, vec2 atlas
     vec2 textureTexelPos = clamp(uv * tileSizeF, vec2(1.0), tileSizeF - 1.0) + tileOffsetF;
     return saturate(textureTexelPos * atlastSizeRcp);
 }
+
+vec2 _textile_texelToGatherUV(vec2 texelPos, vec2 tileOffsetF, vec2 tileSizeF, vec2 atlastSizeRcp) {
+    vec2 textureTexelPos = clamp(texelPos, vec2(1.0), tileSizeF - 1.0) + tileOffsetF;
+    return saturate(textureTexelPos * atlastSizeRcp);
+}
 #undef saturate
 """.trim().trimIndent()
 
@@ -105,6 +110,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
                     val accessInfo = accessInfos[it].second
                     texName in accessInfo.reads || texName in accessInfo.writes
                 }
+                check(exists.size >= 2) { "Transient texture $texName must be read/written at least twice." }
                 LifeTimeRange.Transient(exists.min()..exists.max())
             }
 
@@ -192,10 +198,10 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
         }
     }
 
-    val cxArray = arrayOf(0, 0, 1, 1, 0, 1, 2, 2, 2)
-    val cyArray = arrayOf(0, 1, 0, 1, 2, 2, 0, 1, 2)
-    val xSizeArray = arrayOf(1, 1, 2, 2, 2, 2, 3, 3, 3)
-    val ySizeArray = arrayOf(1, 2, 2, 2, 3, 3, 3, 3, 3)
+    val cxArray = arrayOf(0, 0, 1, 1, 0, 1, 2, 2, 2, 0, 1, 2)
+    val cyArray = arrayOf(0, 1, 0, 1, 2, 2, 0, 1, 2, 3 , 3, 3)
+    val xSizeArray = arrayOf(1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3)
+    val ySizeArray = arrayOf(1, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4)
 
     val textTileCode = buildString {
 
@@ -205,39 +211,65 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
             fun offsetFStr(tileID: Int) = "${prefix(tileID)}_OFFSET_F"
             fun sizeStr(tileID: Int) = "${prefix(tileID)}_SIZE"
             fun sizeFStr(tileID: Int) = "${prefix(tileID)}_SIZE_F"
-            fun sizeRCPStr(tileID: Int) = "${prefix(tileID)}_SIZE_RCP"
             fun uvToUVStr(tileID: Int) = "${prefix(tileID)}_UV_TO_UV"
+            fun texelToGatherUVStr(tileID: Int) = "${prefix(tileID)}_TEXEL_TO_GATHER_UV"
             fun uvToGatherUVStr(tileID: Int) = "${prefix(tileID)}_UV_TO_GATHER_UV"
             fun texelToTexelStr(tileID: Int) = "${prefix(tileID)}_TEXEL_TO_TEXEL"
 
-            var xSize = 1
-            var ySize = 1
+
+            val xSize = xSizeArray[allocationInfo.tileCount - 1]
+            val ySize = ySizeArray[allocationInfo.tileCount - 1]
+
+            val atlasSize = "_${format.name}_ATLAS_SIZE"
+            val atlasSizeI = "${atlasSize}_I"
+            val atlasSizeRcp = "${atlasSize}_RCP"
+
+            append("#define ")
+            append(atlasSizeI)
+            append(" (uval_mainImageSizeI * ivec2(")
+            append(xSize)
+            append(", ")
+            append(ySize)
+            append("))\n")
+
+            append("#define ")
+            append(atlasSize)
+            append(" (uval_mainImageSize * vec2(")
+            append(xSize)
+            append(", ")
+            append(ySize)
+            append("))\n")
+
+            append("#define ")
+            append(atlasSizeRcp)
+            append(" (vec2(1.0) / ")
+            append(atlasSize)
+            append(")\n")
+
+
             repeat(allocationInfo.tileCount) {
                val cx = cxArray[it]
                val cy = cyArray[it]
-                xSize = xSizeArray[it]
-                ySize = ySizeArray[it]
 
                 val offsetStr = offsetStr(it)
                 val offsetF = offsetFStr(it)
                 val sizeStr = sizeStr(it)
                 val sizeFStr = sizeFStr(it)
-                val sizeRCPStr = sizeRCPStr(it)
                 append("#define ")
                 append(offsetStr)
-                append(" uval_mainImageSizeI * ivec2(")
+                append(" (uval_mainImageSizeI * ivec2(")
                 append(cx)
                 append(", ")
                 append(cy)
-                append(")\n")
+                append("))\n")
 
                 append("#define ")
                 append(offsetF)
-                append(" uval_mainImageSize * vec2(")
+                append(" (uval_mainImageSize * vec2(")
                 append(cx)
                 append(", ")
                 append(cy)
-                append(")\n")
+                append("))\n")
 
                 append("#define ")
                 append(sizeStr)
@@ -246,10 +278,6 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
                 append("#define ")
                 append(sizeFStr)
                 append(" uval_mainImageSize\n")
-
-                append("#define ")
-                append(sizeRCPStr)
-                append(" uval_mainImageSizeRcp\n")
 
                 append("#define ")
                 append(texelToTexelStr(it))
@@ -266,7 +294,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
                 append(", ")
                 append(sizeFStr)
                 append(", ")
-                append(sizeRCPStr)
+                append(atlasSizeRcp)
                 append(")\n")
 
                 append("#define ")
@@ -276,7 +304,17 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
                 append(", ")
                 append(sizeFStr)
                 append(", ")
-                append(sizeRCPStr)
+                append(atlasSizeRcp)
+                append(")\n")
+
+                append("#define ")
+                append(texelToGatherUVStr(it))
+                append("(texelPos) _textile_texelToGatherUV(texelPos, ")
+                append(offsetF)
+                append(", ")
+                append(sizeFStr)
+                append(", ")
+                append(atlasSizeRcp)
                 append(")\n")
             }
 
@@ -299,6 +337,14 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
                 append(usamFormat)
                 append(", ")
                 append(uvToGatherUVStr(it.value))
+                append("(x), c)\n")
+
+                append("#define ")
+                append(it.key)
+                append("_gatherTexel(x, c) textureGather(")
+                append(usamFormat)
+                append(", ")
+                append(texelToGatherUVStr(it.value))
                 append("(x), c)\n")
 
                 append("#define ")
