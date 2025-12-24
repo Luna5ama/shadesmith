@@ -1,10 +1,12 @@
 package dev.luna5ama.shadesmith
 
 enum class PassPrefix {
+    SETUP,
     BEGIN,
+    SHADOWCOMP,
+    PREPARE,
     DEFERRED,
-    COMPOSITE,
-    PREPARE;
+    COMPOSITE;
 
     val actualName = this.name.lowercase()
 
@@ -14,6 +16,7 @@ enum class PassPrefix {
 }
 
 val IRIS_PASS_PREFIX = listOf(
+    PassPrefix.BEGIN,
     PassPrefix.DEFERRED,
     PassPrefix.COMPOSITE,
 )
@@ -21,3 +24,6 @@ val IRIS_PASS_PREFIX = listOf(
 val IDENTIFIER_REGEX_STR = """[A-Za-z_][A-Za-z0-9_]*"""
 
 val PASS_NAME_REGEX = ( "(${IRIS_PASS_PREFIX.joinToString("|")})(\\d+)((?:_[a-z])?)").toRegex()
+val LINE_COMMENT_REGEX = "//.*$".toRegex(RegexOption.MULTILINE)
+val BLOCK_COMMENT_REGEX = """/\*[\s\S]*?\*/""".toRegex(RegexOption.MULTILINE)
+val COMMENT_PLACE_HOLDER_REGEX = "#__COMMENT_([0-9]+)__#".toRegex()

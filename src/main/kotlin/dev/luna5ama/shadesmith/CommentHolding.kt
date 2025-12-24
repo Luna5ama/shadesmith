@@ -1,8 +1,5 @@
 package dev.luna5ama.shadesmith
 
-private val LINE_COMMENT_REGEX = "//.*$".toRegex(RegexOption.MULTILINE)
-private val BLOCK_COMMENT_REGEX = """/\*[\s\S]*?\*/""".toRegex(RegexOption.MULTILINE)
-private val COMMENT_PLACE_HOLDER_REGEX = "#__COMMENT_([0-9]+)__#".toRegex()
 
 fun holdComments(file: ShaderFile): Pair<ShaderFile, List<String>> {
     val comments = mutableListOf<String>()

@@ -1,5 +1,7 @@
 package dev.luna5ama.shadesmith
 
+import kotlin.io.path.nameWithoutExtension
+
 
 private val TOKEN_DELIMITER_REGEX = """\s+|(?=[{}()\[\];,.\-!])|(?<=[{}()\[\];,.\-!])""".toRegex()
 private val DEFINE_REGEX = """^\s*((?://)?)#define\s+($IDENTIFIER_REGEX_STR)(.*)$""".toRegex()
@@ -7,14 +9,16 @@ private val DEFINE_REGEX = """^\s*((?://)?)#define\s+($IDENTIFIER_REGEX_STR)(.*)
 private val FUNCTION_HEADER_REGEX =
     """^\s*($IDENTIFIER_REGEX_STR)\s+($IDENTIFIER_REGEX_STR)\s*(\([\s\w_,]*?\))\s*\{""".toRegex(RegexOption.MULTILINE)
 
-private val COMMENT_PLACE_HOLDER_REGEX = "__COMMENT_([0-9]+)__".toRegex()
-
 private val UNIFORM_REGEX =
     """^\s*uniform\s+($IDENTIFIER_REGEX_STR)\s+($IDENTIFIER_REGEX_STR)\s*;.*$""".toRegex(RegexOption.MULTILINE)
 
 private val FUNC_EXCLUDE_PREFIX = listOf("colors2")
 
 fun cleanUnused(file: ShaderFile): ShaderFile {
+    if (file.path.nameWithoutExtension == "begin99") {
+        return file
+    }
+
     var newCode = file.code
     var tokenCounts = newCode.split(TOKEN_DELIMITER_REGEX)
         .groupingBy { it }
@@ -148,7 +152,6 @@ fun cleanUnused(file: ShaderFile): ShaderFile {
             val (_, name) = it.destructured
 
             if (tokenCounts[name]!! < 2) {
-//                println("Removing unused uniform: $name")
                 ""
             } else {
                 it.value

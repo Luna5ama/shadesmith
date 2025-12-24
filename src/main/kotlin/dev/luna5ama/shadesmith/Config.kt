@@ -16,5 +16,5 @@ enum class TextureFormat {
 
 @Serializable
 data class Config(
-    val formats: Map<String, TextureFormat>
+    val formats: Map<String, TextureFormat> = emptyMap(),
 )

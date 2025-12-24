@@ -2,9 +2,11 @@ package dev.luna5ama.shadesmith
 
 import kotlinx.serialization.json.Json
 import java.nio.file.Path
+import java.util.Collections
 import java.util.Optional
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.absolute
+import kotlin.io.path.absolutePathString
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.pathString
@@ -19,7 +21,13 @@ class IOContext(val inputPath: Path, val tempPath: Path, val outputPath: Path) {
     private val outputPathResolver = PathResolver(outputPath)
     private val cache = ConcurrentHashMap<Path, Optional<ShaderFile>>()
 
-    val config = Json.decodeFromString<Config>(inputPath.resolve("shadesmith.json").readText())
+    private val directoryCreated = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
+    val config = runCatching {
+        Json.decodeFromString<Config>(inputPath.resolve("shadesmith.json").readText())
+    }.getOrElse {
+        Config()
+    }
 
     fun resolveInputPath(path: String): Path {
         return inputPathResolver.resolve(path)
@@ -49,7 +57,10 @@ class IOContext(val inputPath: Path, val tempPath: Path, val outputPath: Path) {
 
     fun writeOutput(shaderFile: ShaderFile) {
         val actualPath = shaderFile.path.absolute()
-        actualPath.parent.createDirectories()
+        val parentPath = actualPath.parent
+        if (!directoryCreated.add(parentPath.absolutePathString())) {
+            parentPath.createDirectories()
+        }
         actualPath.writeText(shaderFile.code)
     }
 }

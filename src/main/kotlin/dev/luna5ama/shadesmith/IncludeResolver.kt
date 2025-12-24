@@ -2,37 +2,17 @@ package dev.luna5ama.shadesmith
 
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.absolutePathString
+import kotlin.io.path.name
+import kotlin.io.path.nameWithoutExtension
 
 context(ioContext: IOContext)
 fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
-    val usedFiles = inputFiles.associateByTo(ConcurrentHashMap()) { it.path }
-
-    val includeRegex = """#include\s+"([^"]+)"""".toRegex()
-    val prefix = "#include "
-
-    fun resolve(file: ShaderFile) {
-        file.code.lineSequence()
-            .filter { it.startsWith(prefix) }
-            .map { it.substring(prefix.length).trim().removeSurrounding("\"") }
-            .toList()
-            .forEach {
-                val includedFile = ioContext.readInput(file.path.resolve(it))
-                if (includedFile != null && usedFiles.putIfAbsent(includedFile.path, includedFile) == null) {
-                    resolve(includedFile)
-                }
-            }
-    }
-
-    inputFiles.parallelStream().forEach {
-        resolve(it)
-    }
-
     val includeGuardRegex =
         """([\s\S]*)(#ifndef INCLUDE_\S*\s+#define INCLUDE_\S*\s+\S*)([\S\s]*)(#endif)([\s\S]*)""".toRegex()
-
     val protectRegex = """^[\t ]*#(?!include)""".toRegex(RegexOption.MULTILINE)
-
     val protect = "//DONOTPROCESS"
+    val excluded = setOf("Options", "TextOptions")
+
     fun prepareForPreprocessor(shaderFile: ShaderFile): ShaderFile {
         fun protect(content: String): String {
             return protectRegex.replace(content) {
@@ -41,8 +21,15 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
         }
 
         val matchResult = includeGuardRegex.matchEntire(shaderFile.code)
-        var newCode = if (matchResult == null) {
-            protect(shaderFile.code)
+
+        val name = shaderFile.path.nameWithoutExtension
+        var newCode= shaderFile.code
+        if (name !in excluded) {
+            newCode = newCode.replace(LINE_COMMENT_REGEX, "")
+        }
+
+        newCode = if (matchResult == null) {
+            protect(newCode)
         } else {
             val (before, guard1, content, guard2, after) = matchResult.destructured
             buildString {
@@ -56,37 +43,55 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
             }
         }
 
-        newCode = includeRegex.replace(newCode) {
-            val includePath = it.groupValues[1]
-            "#include \"${includePath}.c\""
-        }
-
         return shaderFile.copy(
-            path = ioContext.toTempPath(shaderFile.path.resolve("/${shaderFile.path}.c")),
             code = newCode
         )
     }
 
-    usedFiles.values.parallelStream()
-        .map { prepareForPreprocessor(it) }
-        .forEach {
-            ioContext.writeOutput(it)
-        }
+    val usedFiles = inputFiles.associateTo(ConcurrentHashMap()) { it.path.absolutePathString() to prepareForPreprocessor(it) }
 
-    return inputFiles.stream()
-        .map {
-            val inputPath = ioContext.toTempPath(it.path.resolve("/${it.path}.c"))
+    val prefix = "#include "
+
+    fun resolve(file: ShaderFile, included: MutableSet<String>): ShaderFile {
+        val newFile = prepareForPreprocessor(file)
+        val newCode = newFile.code.lineSequence()
+            .map {
+                if (!it.startsWith(prefix)) {
+                    return@map it
+                }
+
+                val includePath = it.substring(prefix.length).trim().removeSurrounding("\"")
+                val includedFile = ioContext.readInput(file.path.resolve(includePath))
+                    ?: throw IllegalStateException("Included file not found: $includePath included from ${file.path.absolutePathString()}")
+                val resolvedFile = usedFiles.getOrPut(includedFile.path.absolutePathString()) {
+                    resolve(includedFile, included)
+                }
+
+                return@map resolvedFile.code
+            }
+            .joinToString("\n")
+
+        return newFile.copy(code = newCode)
+    }
+
+    return inputFiles.parallelStream()
+        .map { file ->
             val proc = ProcessBuilder()
                 .directory(ioContext.tempPath.toFile())
-                .command("clang", "-C", "-E", "-P", "-Wno-microsoft-include", inputPath.absolutePathString())
+                .command("clang", "-C", "-E", "-P", "-Wno-microsoft-include", "-")
                 .redirectError(ProcessBuilder.Redirect.INHERIT)
                 .start()
 
-            it to proc
+            proc.outputStream.writer().use {
+                it.write(resolve(file, mutableSetOf()).code)
+            }
+
+            file to proc
         }
         .toList()
         .parallelStream()
         .map { (file, proc) ->
+
             val newCode = proc.inputStream.bufferedReader().use {
                 it.readText()
             }
