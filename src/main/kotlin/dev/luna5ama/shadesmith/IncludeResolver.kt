@@ -11,25 +11,32 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
     val protectRegex = """^[\t ]*#(?!include)""".toRegex(RegexOption.MULTILINE)
     val protect = "//DONOTPROCESS"
     val excluded = setOf("Options", "TextOptions")
+    val constFlag = "/*const*/"
 
     fun prepareForPreprocessor(shaderFile: ShaderFile): ShaderFile {
         fun protect(content: String): String {
-            return protectRegex.replace(content) {
-                val defineMatch = DEFINE_REGEX_N.matchAt(content, it.range.first)
-                if (defineMatch == null) {
-                    "$protect${it.value}"
-                } else {
-                    val (_, defineName, defineValue) = defineMatch.destructured
-                    if (!defineName.startsWith("usam_") && !defineName.startsWith("uimg_")) {
-                        "$protect${it.value}"
+
+            return buildString {
+                val lines = content.lines()
+                var constFlagState = false
+
+                for (line in lines) {
+                    if (line == constFlag) {
+                        constFlagState = !constFlagState
+                        continue
+                    }
+
+                    if (!constFlagState) {
+                        appendLine(protectRegex.replace(line) {
+                            "$protect${it.value}"
+                        })
                     } else {
-                        it.value
+                        appendLine(line)
                     }
                 }
             }
         }
 
-        val matchResult = includeGuardRegex.matchEntire(shaderFile.code)
 
         val name = shaderFile.path.nameWithoutExtension
         var newCode = shaderFile.code
@@ -37,6 +44,7 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
             newCode = newCode.replace(LINE_COMMENT_REGEX, "")
         }
 
+        val matchResult = includeGuardRegex.matchEntire(newCode)
         newCode = if (matchResult == null) {
             protect(newCode)
         } else {
