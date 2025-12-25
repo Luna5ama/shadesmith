@@ -4,7 +4,6 @@ import kotlin.io.path.nameWithoutExtension
 
 
 private val TOKEN_DELIMITER_REGEX = """\s+|(?=[{}()\[\];,.\-!])|(?<=[{}()\[\];,.\-!])""".toRegex()
-private val DEFINE_REGEX = """^\s*((?://)?)#define\s+($IDENTIFIER_REGEX_STR)(.*)$""".toRegex()
 
 private val FUNCTION_HEADER_REGEX =
     """^\s*($IDENTIFIER_REGEX_STR)\s+($IDENTIFIER_REGEX_STR)\s*(\([\s\w_,]*?\))\s*\{""".toRegex(RegexOption.MULTILINE)

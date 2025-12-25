@@ -2,7 +2,6 @@ package dev.luna5ama.shadesmith
 
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.absolutePathString
-import kotlin.io.path.name
 import kotlin.io.path.nameWithoutExtension
 
 context(ioContext: IOContext)
@@ -16,14 +15,24 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
     fun prepareForPreprocessor(shaderFile: ShaderFile): ShaderFile {
         fun protect(content: String): String {
             return protectRegex.replace(content) {
-                "$protect${it.value}"
+                val defineMatch = DEFINE_REGEX_N.matchAt(content, it.range.first)
+                if (defineMatch == null) {
+                    "$protect${it.value}"
+                } else {
+                    val (_, defineName, defineValue) = defineMatch.destructured
+                    if (!defineName.startsWith("usam_") && !defineName.startsWith("uimg_")) {
+                        "$protect${it.value}"
+                    } else {
+                        it.value
+                    }
+                }
             }
         }
 
         val matchResult = includeGuardRegex.matchEntire(shaderFile.code)
 
         val name = shaderFile.path.nameWithoutExtension
-        var newCode= shaderFile.code
+        var newCode = shaderFile.code
         if (name !in excluded) {
             newCode = newCode.replace(LINE_COMMENT_REGEX, "")
         }
@@ -48,7 +57,8 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
         )
     }
 
-    val usedFiles = inputFiles.associateTo(ConcurrentHashMap()) { it.path.absolutePathString() to prepareForPreprocessor(it) }
+    val usedFiles =
+        inputFiles.associateTo(ConcurrentHashMap()) { it.path.absolutePathString() to prepareForPreprocessor(it) }
 
     val prefix = "#include "
 
