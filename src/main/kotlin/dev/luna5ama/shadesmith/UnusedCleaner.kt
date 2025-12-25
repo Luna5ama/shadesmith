@@ -1,5 +1,6 @@
 package dev.luna5ama.shadesmith
 
+import kotlin.io.path.name
 import kotlin.io.path.nameWithoutExtension
 
 
@@ -14,10 +15,6 @@ private val UNIFORM_REGEX =
 private val FUNC_EXCLUDE_PREFIX = listOf("colors2")
 
 fun cleanUnused(file: ShaderFile): ShaderFile {
-    if (file.path.nameWithoutExtension == "begin99") {
-        return file
-    }
-
     var newCode = file.code
     var tokenCounts = newCode.split(TOKEN_DELIMITER_REGEX)
         .groupingBy { it }
@@ -98,52 +95,53 @@ fun cleanUnused(file: ShaderFile): ShaderFile {
         .groupingBy { it }
         .eachCount()
 
+    if (file.path.nameWithoutExtension != "final") {
+        newCode = run {
+            val currCode = newCode
+            val newTokenCounts = tokenCounts.toMutableMap()
+            val newLines = currCode.lineSequence().toMutableList()
 
-    newCode = run {
-        val currCode = newCode
-        val newTokenCounts = tokenCounts.toMutableMap()
-        val newLines = currCode.lineSequence().toMutableList()
-
-        val lineWithDefines = newLines.indices.mapNotNullTo(mutableListOf()) { index ->
-            DEFINE_REGEX.find(newLines[index])?.let {
-                val (_, name, _) = it.destructured
-                newTokenCounts[name] = newTokenCounts[name]!! - 1
-                index to it
-            }
-        }
-
-
-        lineWithDefines.asSequence()
-            .forEach { (lineIndex, matchResult) ->
-                val (_, name, rest) = matchResult.destructured
-                if (!name.startsWith("SETTING_")) return@forEach
-
-                val booleanSetting = name.startsWith("SETTING_") && rest.isBlank()
-                val requiredCount = if (booleanSetting) 2 else 1
-
-                if (newTokenCounts[name]!! < requiredCount) {
-                    newLines[lineIndex] = ""
-                    if (booleanSetting) {
-                        newLines[lineIndex + 1] = ""
-                        newLines[lineIndex + 2] = ""
-                    }
-
-                    matchResult.value.split(TOKEN_DELIMITER_REGEX)
-                        .groupingBy { it }
-                        .eachCount()
-                        .forEach { (token, count) ->
-                            val newCount = if (token == name) count - 1 else count
-                            newTokenCounts[token] = newTokenCounts[token]!! - newCount
-                        }
+            val lineWithDefines = newLines.indices.mapNotNullTo(mutableListOf()) { index ->
+                DEFINE_REGEX.find(newLines[index])?.let {
+                    val (_, name, _) = it.destructured
+                    newTokenCounts[name] = newTokenCounts[name]!! - 1
+                    index to it
                 }
             }
 
-        newLines.filter { it.isNotBlank() }.joinToString("\n")
-    }
 
-    tokenCounts = newCode.split(TOKEN_DELIMITER_REGEX)
-        .groupingBy { it }
-        .eachCount()
+            lineWithDefines.asSequence()
+                .forEach { (lineIndex, matchResult) ->
+                    val (_, name, rest) = matchResult.destructured
+                    if (!name.startsWith("SETTING_")) return@forEach
+
+                    val booleanSetting = name.startsWith("SETTING_") && rest.isBlank()
+                    val requiredCount = if (booleanSetting) 2 else 1
+
+                    if (newTokenCounts[name]!! < requiredCount) {
+                        newLines[lineIndex] = ""
+                        if (booleanSetting) {
+                            newLines[lineIndex + 1] = ""
+                            newLines[lineIndex + 2] = ""
+                        }
+
+                        matchResult.value.split(TOKEN_DELIMITER_REGEX)
+                            .groupingBy { it }
+                            .eachCount()
+                            .forEach { (token, count) ->
+                                val newCount = if (token == name) count - 1 else count
+                                newTokenCounts[token] = newTokenCounts[token]!! - newCount
+                            }
+                    }
+                }
+
+            newLines.filter { it.isNotBlank() }.joinToString("\n")
+        }
+
+        tokenCounts = newCode.split(TOKEN_DELIMITER_REGEX)
+            .groupingBy { it }
+            .eachCount()
+    }
 
     newCode = run {
         val currCode = newCode

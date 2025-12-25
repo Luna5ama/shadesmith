@@ -21,7 +21,9 @@ object Main {
 
         val ioContext = IOContext(inputPath, tempPath, outputPath)
         context(ioContext) {
-            val inputFiles = readAllCompositeStyleShaders()
+            val composites = readAllCompositeStyleShaders()
+            val others = readOtherShaders()
+            val inputFiles = composites + others
 
             val included = resolveIncludes(inputFiles)
             val cleaned = included.parallelStream()
@@ -30,9 +32,9 @@ object Main {
                 .map { restoreComments(it) }
                 .toList()
 
-            val resolved = resolveTextures(cleaned)
+            resolveTextures(cleaned)
 
-            resolved.forEach {
+            cleaned.forEach {
                 it.copy(path = it.path.toOutputPath()).writeOutput()
             }
         }

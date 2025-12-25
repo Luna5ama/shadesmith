@@ -74,7 +74,7 @@ vec2 _textile_texelToGatherUV(vec2 texelPos, vec2 tileOffsetF, vec2 tileSizeF, v
 """.trim().trimIndent()
 
 context(ioContext: IOContext)
-fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
+fun resolveTextures(inputFiles: List<ShaderFile>) {
     data class AccessInfo(val file: ShaderFile, val reads: Set<String>, val writes: Set<String>)
 
     val config = ioContext.config
@@ -92,6 +92,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
     }
 
     val accessInfos = inputFiles.parallelStream()
+        .filter { it.compositeStyle }
         .map { file ->
             val reads = READ_REGEX.findAll(file.code)
                 .map { it.groupValues[1] }
@@ -366,6 +367,4 @@ fun resolveTextures(inputFiles: List<ShaderFile>): List<ShaderFile> {
     }
 
     ioContext.writeOutput(ShaderFile(ioContext.resolveInputPath("/Base/Textile.glsl"), textTileTemplate + "\n\n" + textTileCode))
-
-    return inputFiles
 }
