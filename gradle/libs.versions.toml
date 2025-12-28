@@ -6,10 +6,12 @@ kotlinx-coroutines = "1.9.0"
 fastutil = "8.5.18"
 
 lwjgl = "3.3.6"
+jarOptimizer = "1.2.2"
 
 [plugins]
 kotlinxSerialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 kotlin = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+jarOptimizer = { id = "dev.luna5ama.jar-optimizer", version.ref = "jarOptimizer" }
 
 [libraries]
 kotlin-reflect = { module = "org.jetbrains.kotlin:kotlin-reflect", version.ref = "kotlin" }

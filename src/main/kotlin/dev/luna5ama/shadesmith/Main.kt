@@ -15,7 +15,7 @@ object Main {
 
         outputPath.createDirectories()
         outputPath.listDirectoryEntries().forEach {
-            it.deleteRecursively()
+             runCatching{ it.deleteRecursively() }
         }
 
         val ioContext = IOContext(inputPath, outputPath)

@@ -52,34 +52,27 @@ fun cleanUnused(file: ShaderFile): ShaderFile {
         val remainingFuncIndices = funcInfo.indices.filterTo(mutableListOf()) {
             val func = funcInfo[it]
             if (func.name == "main") return@filterTo false
-            FUNC_EXCLUDE_PREFIX.none { prefix -> func.name.startsWith(prefix)  }
+            FUNC_EXCLUDE_PREFIX.none { prefix -> func.name.startsWith(prefix) }
         }
 
         do {
-            var removedAny = false
-
-            remainingFuncIndices.removeIf { index ->
+            val removedAny = remainingFuncIndices.removeIf { index ->
                 val funcInfo = funcInfo[index]
-                if (tokenCountWithoutFuncNameInHeader[funcInfo.name]!! < 1) {
-//                    println("Removing unused function: ${funcInfo.name}")
+                if (tokenCountWithoutFuncNameInHeader[funcInfo.name]!! >= 1) return@removeIf false
 
-                    val funcText = currCode.substring(funcInfo.fullRange)
+                val funcText = currCode.substring(funcInfo.fullRange)
 
-                    funcText.split(TOKEN_DELIMITER_REGEX)
-                        .groupingBy { it }
-                        .eachCount()
-                        .forEach { (token, count) ->
-                            val newCount = if (token == funcInfo.name) count - 1 else count
-                            tokenCountWithoutFuncNameInHeader[token] =
-                                tokenCountWithoutFuncNameInHeader[token]!! - newCount
-                        }
+                funcText.split(TOKEN_DELIMITER_REGEX)
+                    .groupingBy { it }
+                    .eachCount()
+                    .forEach { (token, count) ->
+                        val newCount = if (token == funcInfo.name) count - 1 else count
+                        tokenCountWithoutFuncNameInHeader[token] =
+                            tokenCountWithoutFuncNameInHeader[token]!! - newCount
+                    }
 
-                    removedFuncIndices.add(index)
-                    removedAny = true
-                    true
-                } else {
-                    false
-                }
+                removedFuncIndices.add(index)
+                true
             }
         } while (removedAny)
 
@@ -95,45 +88,60 @@ fun cleanUnused(file: ShaderFile): ShaderFile {
         .groupingBy { it }
         .eachCount()
 
-    if (file.path.nameWithoutExtension != "final") {
+    val isFinalShader = file.path.name.lowercase() == "final.fsh"
         newCode = run {
             val currCode = newCode
             val newTokenCounts = tokenCounts.toMutableMap()
             val newLines = currCode.lineSequence().toMutableList()
 
-            val lineWithDefines = newLines.indices.mapNotNullTo(mutableListOf()) { index ->
+            val lineWithDefines = newLines.indices.asSequence().mapNotNull { index ->
                 DEFINE_REGEX.find(newLines[index])?.let {
                     val (_, name, _) = it.destructured
                     newTokenCounts[name] = newTokenCounts[name]!! - 1
                     index to it
                 }
-            }
+            }.filter { (_, matchResult) ->
+                val (_, name, rest) = matchResult.destructured
+
+                if (name.startsWith("_shadesmith_")
+                    || name.startsWith("history_")
+                    || name.startsWith("transient_")) {
+                    return@filter true
+                }
+
+                if (!isFinalShader && name.startsWith("SETTING_")) {
+                    return@filter true
+                }
+
+                false
+            }.toMutableList()
 
 
-            lineWithDefines.asSequence()
-                .forEach { (lineIndex, matchResult) ->
+            do {
+                val removedSome = lineWithDefines.removeIf { (lineIndex, matchResult) ->
                     val (_, name, rest) = matchResult.destructured
-                    if (!name.startsWith("SETTING_")) return@forEach
 
                     val booleanSetting = name.startsWith("SETTING_") && rest.isBlank()
                     val requiredCount = if (booleanSetting) 2 else 1
 
-                    if (newTokenCounts[name]!! < requiredCount) {
-                        newLines[lineIndex] = ""
-                        if (booleanSetting) {
-                            newLines[lineIndex + 1] = ""
-                            newLines[lineIndex + 2] = ""
-                        }
+                    if (newTokenCounts[name]!! >= requiredCount) return@removeIf false
 
-                        matchResult.value.split(TOKEN_DELIMITER_REGEX)
-                            .groupingBy { it }
-                            .eachCount()
-                            .forEach { (token, count) ->
-                                val newCount = if (token == name) count - 1 else count
-                                newTokenCounts[token] = newTokenCounts[token]!! - newCount
-                            }
+                    newLines[lineIndex] = ""
+                    if (booleanSetting) {
+                        newLines[lineIndex + 1] = ""
+                        newLines[lineIndex + 2] = ""
                     }
+
+                    matchResult.value.split(TOKEN_DELIMITER_REGEX)
+                        .groupingBy { it }
+                        .eachCount()
+                        .forEach { (token, count) ->
+                            val newCount = if (token == name) count - 1 else count
+                            newTokenCounts[token] = newTokenCounts[token]!! - newCount
+                        }
+                    true
                 }
+            } while (removedSome)
 
             newLines.filter { it.isNotBlank() }.joinToString("\n")
         }
@@ -141,7 +149,6 @@ fun cleanUnused(file: ShaderFile): ShaderFile {
         tokenCounts = newCode.split(TOKEN_DELIMITER_REGEX)
             .groupingBy { it }
             .eachCount()
-    }
 
     newCode = run {
         val currCode = newCode

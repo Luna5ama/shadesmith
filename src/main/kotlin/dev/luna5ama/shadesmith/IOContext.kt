@@ -52,7 +52,7 @@ class IOContext(val inputPath: Path, val outputPath: Path) {
     fun writeOutput(shaderFile: ShaderFile) {
         val actualPath = shaderFile.path.absolute()
         val parentPath = actualPath.parent
-        if (!directoryCreated.add(parentPath.absolutePathString())) {
+        if (directoryCreated.add(parentPath.absolutePathString())) {
             parentPath.createDirectories()
         }
         actualPath.writeText(shaderFile.code)

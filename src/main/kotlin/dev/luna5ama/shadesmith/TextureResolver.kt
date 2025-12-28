@@ -198,7 +198,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
     val textTileCode = buildString {
 
         slots.forEach { (format, allocationInfo) ->
-            fun prefix(tileID: Int) = "_${format.name}_$tileID"
+            fun prefix(tileID: Int) = "_shadesmith_${format.name}_$tileID"
             fun offsetStr(tileID: Int) = "${prefix(tileID)}_OFFSET"
             fun offsetFStr(tileID: Int) = "${prefix(tileID)}_OFFSET_F"
             fun sizeStr(tileID: Int) = "${prefix(tileID)}_SIZE"
@@ -212,7 +212,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
             val xSize = xSizeArray[allocationInfo.tileCount - 1]
             val ySize = ySizeArray[allocationInfo.tileCount - 1]
 
-            val atlasSize = "_${format.name}_ATLAS_SIZE"
+            val atlasSize = "_shadesmith_${format.name}_ATLAS_SIZE"
             val atlasSizeI = "${atlasSize}_I"
             val atlasSizeRcp = "${atlasSize}_RCP"
 
@@ -396,5 +396,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
         }
     }
 
-    ioContext.writeOutput(ShaderFile(ioContext.resolveInputPath("/Base/Textile.glsl"), textTileTemplate + "\n\n" + textTileCode))
+    val textileCode = textTileTemplate + "\n\n" + textTileCode
+    val textileInputPath = ioContext.resolveInputPath("/base/Textile.glsl")
+    ioContext.writeOutput(ShaderFile(textileInputPath, textileCode))
 }

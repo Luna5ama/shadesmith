@@ -2,6 +2,7 @@ package dev.luna5ama.shadesmith
 
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.absolutePathString
+import kotlin.io.path.name
 import kotlin.io.path.nameWithoutExtension
 
 context(ioContext: IOContext)
@@ -78,9 +79,11 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
                     return@map it
                 }
 
-                val includePath = it.substring(prefix.length).trim().removeSurrounding("\"")
-                val includedFile = ioContext.readInput(file.path.resolve(includePath))
-                    ?: throw IllegalStateException("Included file not found: $includePath included from ${file.path.absolutePathString()}")
+                val includePathStr = it.substring(prefix.length).trim().removeSurrounding("\"")
+                val includePath = file.path.resolve(includePathStr)
+
+                val includedFile = ioContext.readInput(includePath)
+                    ?: throw IllegalStateException("Included file not found: $includePathStr included from ${file.path.absolutePathString()}")
                 val resolvedFile = usedFiles.getOrPut(includedFile.path.absolutePathString()) {
                     resolve(includedFile, included)
                 }
