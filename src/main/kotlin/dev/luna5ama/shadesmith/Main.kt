@@ -6,7 +6,7 @@ object Main {
     @JvmStatic
     @OptIn(ExperimentalPathApi::class)
     fun main(args: Array<String>) {
-        check(args.size != 2) { "Missing path argument" }
+        check(args.size == 2) { "Missing path argument" }
 
         val inputPath = Path(args[0]).toAbsolutePath()
         val outputPath = Path(args[1]).toAbsolutePath()
@@ -14,9 +14,9 @@ object Main {
         check(inputPath.exists() && inputPath.isDirectory())
 
         outputPath.createDirectories()
-//        outputPath.listDirectoryEntries().forEach {
-//            it.deleteRecursively()
-//        }
+        outputPath.listDirectoryEntries().forEach {
+            it.deleteRecursively()
+        }
 
         val ioContext = IOContext(inputPath, outputPath)
         context(ioContext) {

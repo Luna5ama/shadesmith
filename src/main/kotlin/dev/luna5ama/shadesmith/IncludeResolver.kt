@@ -95,7 +95,6 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
     return inputFiles.parallelStream()
         .map { file ->
             val proc = ProcessBuilder()
-                .directory(ioContext.tempPath.toFile())
                 .command("clang", "-C", "-E", "-P", "-Wno-microsoft-include", "-")
                 .redirectError(ProcessBuilder.Redirect.INHERIT)
                 .start()
