@@ -15,9 +15,8 @@ import kotlin.io.path.relativeTo
 import kotlin.io.path.writeText
 import kotlin.jvm.optionals.getOrNull
 
-class IOContext(val inputPath: Path, val tempPath: Path, val outputPath: Path) {
+class IOContext(val inputPath: Path, val outputPath: Path) {
     private val inputPathResolver = PathResolver(inputPath)
-    private val tempPathResolver = PathResolver(tempPath)
     private val outputPathResolver = PathResolver(outputPath)
     private val cache = ConcurrentHashMap<Path, Optional<ShaderFile>>()
 
@@ -42,11 +41,6 @@ class IOContext(val inputPath: Path, val tempPath: Path, val outputPath: Path) {
         return outputPathResolver.resolve(relativePath.pathString)
     }
 
-    fun toTempPath(path: Path): Path {
-        val relativePath = path.absolute().relativeTo(inputPath)
-        return tempPathResolver.resolve(relativePath.pathString)
-    }
-
     fun readInput(path: Path): ShaderFile? {
         return cache.computeIfAbsent(path) {
             if (!it.exists()) return@computeIfAbsent Optional.empty()
@@ -68,11 +62,6 @@ class IOContext(val inputPath: Path, val tempPath: Path, val outputPath: Path) {
 context(ioContext: IOContext)
 fun Path.toOutputPath(): Path {
     return ioContext.toOutputPath(this)
-}
-
-context(ioContext: IOContext)
-fun Path.toTempPath(): Path {
-    return ioContext.toTempPath(this)
 }
 
 context(ioContext: IOContext)

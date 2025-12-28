@@ -6,11 +6,10 @@ object Main {
     @JvmStatic
     @OptIn(ExperimentalPathApi::class)
     fun main(args: Array<String>) {
-        check(args.size >= 3) { "Missing path argument" }
+        check(args.size != 2) { "Missing path argument" }
 
         val inputPath = Path(args[0]).toAbsolutePath()
-        val tempPath = Path(args[1]).toAbsolutePath()
-        val outputPath = Path(args[2]).toAbsolutePath()
+        val outputPath = Path(args[1]).toAbsolutePath()
 
         check(inputPath.exists() && inputPath.isDirectory())
 
@@ -19,7 +18,7 @@ object Main {
 //            it.deleteRecursively()
 //        }
 
-        val ioContext = IOContext(inputPath, tempPath, outputPath)
+        val ioContext = IOContext(inputPath, outputPath)
         context(ioContext) {
             val composites = readAllCompositeStyleShaders()
             val others = readOtherShaders()
