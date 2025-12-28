@@ -4,9 +4,11 @@ import org.intellij.lang.annotations.Language
 import java.util.*
 import kotlin.io.path.name
 
+private val REGEX_PREFIX = """^[^#\n\r]+((?:transient|history)_$IDENTIFIER_REGEX_STR)""".toRegex()
+private val ATOMIC_REGEX = """atomic(?:Add|Min|Max|And|Or|Xor|Exchange|CompSwap)""".toRegex()
 private val READ_REGEX =
-    """^[^#\n\r]+((?:transient|history)_$IDENTIFIER_REGEX_STR)_(sample|gather|fetch|load)\(""".toRegex(RegexOption.MULTILINE)
-private val WRITE_REGEX = """^[^#\n\r]+((?:transient|history)_$IDENTIFIER_REGEX_STR)_(store)\(""".toRegex(RegexOption.MULTILINE)
+    """${REGEX_PREFIX.pattern}_(sample|gather|fetch|load|${ATOMIC_REGEX.pattern})\(""".toRegex(RegexOption.MULTILINE)
+private val WRITE_REGEX = """^${REGEX_PREFIX.pattern}_(store|${ATOMIC_REGEX.pattern})\(""".toRegex(RegexOption.MULTILINE)
 
 
 private sealed interface LifeTimeRange {
@@ -134,7 +136,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
                     val accessInfo = accessInfos[it].second
                     texName in accessInfo.reads || texName in accessInfo.writes
                 }
-                check(exists.size >= 2) { "Transient texture $texName must be read/written at least twice." }
+                check(exists.size >= 1) { "Transient texture $texName must be read/written at least onrce." }
                 LifeTimeRange.Transient(exists.min()..exists.max())
             }
 
@@ -360,6 +362,34 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
                 append(", ")
                 append(texelToTexelStr(it.value))
                 append("(x), v)\n")
+
+                listOf("Add", "Min", "Max", "And", "Or", "Xor", "Exchange").forEach { atomicOp ->
+                    append("#define ")
+                    append(it.key)
+                    append("_atomic")
+                    append(atomicOp)
+                    append("(x, v) imageAtomic")
+                    append(atomicOp)
+                    append("(")
+                    append(uimgFormat)
+                    append(", ")
+                    append(texelToTexelStr(it.value))
+                    append("(x), v)\n")
+                }
+
+                listOf("CompSwap").forEach { atomicOp ->
+                    append("#define ")
+                    append(it.key)
+                    append("_atomic")
+                    append(atomicOp)
+                    append("(x, v1, v2) imageAtomic")
+                    append(atomicOp)
+                    append("(")
+                    append(uimgFormat)
+                    append(", ")
+                    append(texelToTexelStr(it.value))
+                    append("(x), v1, v2)\n")
+                }
             }
 
             println("$format: $xSize x $ySize (${allocationInfo.tileCount})")
