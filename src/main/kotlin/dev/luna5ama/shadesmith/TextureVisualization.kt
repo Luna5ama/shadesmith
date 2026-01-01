@@ -253,43 +253,19 @@ object TextureVisualization {
             .groupBy { (texName, _) -> config.formats[texName] ?: TextureFormat.RGBA8 }
             .toSortedMap()
 
-        val sortedTextures = texturesByFormat.flatMap { (format, entries) ->
-            entries.sortedBy { it.key }.map { it.key to it.value to format }
-        }
+        texturesByFormat.forEach { (format, entries) ->
+            val textures = entries.sortedBy { it.key }.map { it.key to it.value to format }
+            textures.forEach { (pair, format) ->
+                val (texName, range) = pair
+                val texNameWithFormat = "$texName\t\t[${format.name}]"  // Add format suffix
 
-        sortedTextures.forEach { (pair, format) ->
-            val (texName, range) = pair
-            val texNameWithFormat = "$texName\t\t[${format.name}]"  // Add format suffix
-            when (range) {
-                is LifeTimeRange.Transient -> {
-                    range.range.forEach { pass ->
-                        val accessInfo = accessInfos[pass].second
-                        val hasRead = texName in accessInfo.reads
-                        val hasWrite = texName in accessInfo.writes
+                when (range) {
+                    is LifeTimeRange.Transient -> {
+                        range.range.forEach { pass ->
+                            val accessInfo = accessInfos[pass].second
+                            val hasRead = texName in accessInfo.reads
+                            val hasWrite = texName in accessInfo.writes
 
-                        val state = when {
-                            hasRead && hasWrite -> "ReadWrite"
-                            hasRead -> "Read"
-                            hasWrite -> "Write"
-                            else -> "Active"
-                        }
-
-                        textureNames.add(texNameWithFormat)
-                        passIndices.add(pass)
-                        passLabels.add(passNames.getOrElse(pass) { "Pass$pass" })
-                        states.add(state)
-                        formats.add(format.name)
-                    }
-                }
-                is LifeTimeRange.History -> {
-                    (0..<range.total).forEach { pass ->
-                        val accessInfo = accessInfos[pass].second
-                        val hasRead = texName in accessInfo.reads
-                        val hasWrite = texName in accessInfo.writes
-
-                        val isActive = pass <= range.lastRead || pass >= range.firstWrite
-
-                        if (isActive) {
                             val state = when {
                                 hasRead && hasWrite -> "ReadWrite"
                                 hasRead -> "Read"
@@ -304,8 +280,42 @@ object TextureVisualization {
                             formats.add(format.name)
                         }
                     }
+                    is LifeTimeRange.History -> {
+                        (0..<range.total).forEach { pass ->
+                            val accessInfo = accessInfos[pass].second
+                            val hasRead = texName in accessInfo.reads
+                            val hasWrite = texName in accessInfo.writes
+
+                            val isActive = pass <= range.lastRead || pass >= range.firstWrite
+
+                            if (isActive) {
+                                val state = when {
+                                    hasRead && hasWrite -> "ReadWrite"
+                                    hasRead -> "Read"
+                                    hasWrite -> "Write"
+                                    else -> "Active"
+                                }
+
+                                textureNames.add(texNameWithFormat)
+                                passIndices.add(pass)
+                                passLabels.add(passNames.getOrElse(pass) { "Pass$pass" })
+                                states.add(state)
+                                formats.add(format.name)
+                            }
+                        }
+                    }
                 }
             }
+
+            // Add separator rows between formats
+            val sepTotalLength = 32 - format.name.length
+            val firstSepLength = sepTotalLength / 2
+            val secondSepLength = sepTotalLength - firstSepLength
+            textureNames.add("${"─".repeat(firstSepLength)} ${format.name} ${"─".repeat(secondSepLength)}")  // Separator line
+            passIndices.add(passNames.size)
+            passLabels.add("")
+            states.add("Active")  // Use Active color for separator
+            formats.add(format.name)
         }
 
         data["texture"] = textureNames
@@ -313,8 +323,6 @@ object TextureVisualization {
         data["passLabel"] = passLabels
         data["state"] = states
         data["format"] = formats
-
-        val totalTextures = sortedTextures.size
 
         return letsPlot(data) +
                 geomTile(color = "white", size = 2.0) {  // 2x larger blocks
@@ -418,6 +426,7 @@ object TextureVisualization {
         // Process all formats, sorted by format name
         val sortedFormats = slots.toSortedMap()
         var totalTiles = 0
+        var isFirstFormat = true
 
         sortedFormats.forEach { (format, allocInfoAny) ->
             val allocInfo = allocInfoAny!!
@@ -472,8 +481,20 @@ object TextureVisualization {
                         states.add(state)
                     }
                 }
+
                 totalTiles++
             }
+
+            // Add separator rows between formats
+            val sepTotalLength = 16 - format.name.length
+            val firstSepLength = sepTotalLength / 2
+            val secondSepLength = sepTotalLength - firstSepLength
+            tileLabels.add("${"─".repeat(firstSepLength)} ${format.name} ${"─".repeat(secondSepLength)}")  // Separator line
+            passIndices.add(passNames.size)
+            passLabels.add("")
+            textureTooltips.add("")
+            states.add("Active")  // Use Active color for separator
+            totalTiles++
         }
 
         data["tile"] = tileLabels
