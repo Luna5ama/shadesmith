@@ -8,7 +8,8 @@ private val REGEX_PREFIX = """^[^#\n\r]+((?:transient|history)_$IDENTIFIER_REGEX
 private val ATOMIC_REGEX = """atomic(?:Add|Min|Max|And|Or|Xor|Exchange|CompSwap)""".toRegex()
 private val READ_REGEX =
     """${REGEX_PREFIX.pattern}_(sample|gather|fetch|load|${ATOMIC_REGEX.pattern})\(""".toRegex(RegexOption.MULTILINE)
-private val WRITE_REGEX = """^${REGEX_PREFIX.pattern}_(store|${ATOMIC_REGEX.pattern})\(""".toRegex(RegexOption.MULTILINE)
+private val WRITE_REGEX =
+    """^${REGEX_PREFIX.pattern}_(store|${ATOMIC_REGEX.pattern})\(""".toRegex(RegexOption.MULTILINE)
 
 
 private sealed interface LifeTimeRange {
@@ -24,6 +25,7 @@ private sealed interface LifeTimeRange {
             return bitSet
         }
     }
+
     data class History(val lastRead: Int, val firstWrite: Int, val total: Int) : LifeTimeRange {
         override val sortOrder get() = -1
 
@@ -152,6 +154,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
                 LifeTimeRange.History(lastReadIndex, firstWriteIndex, accessInfos.size)
 
             }
+
             else -> {
                 error("Unknown texture type prefix for texture: $texName")
             }
@@ -160,7 +163,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
 
     println("\nLifetime:")
     lifeTime.forEach {
-        println("${it.key} (${config.formats[it.key]}): ${it.value}" )
+        println("${it.key} (${config.formats[it.key]}): ${it.value}")
     }
 
     data class AllocationInfo(val tileID: MutableMap<String, Int>, val tileCount: Int)
@@ -190,10 +193,10 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
         }
     }
 
-    val cxArray = arrayOf(0, 0, 1, 1, 0, 1, 2, 2, 2, 0, 1, 2)
-    val cyArray = arrayOf(0, 1, 0, 1, 2, 2, 0, 1, 2, 3 , 3, 3)
-    val xSizeArray = arrayOf(1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3)
-    val ySizeArray = arrayOf(1, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4)
+    val cxArray = arrayOf(0, 0, 1, 1, 0, 1, 2, 2, 2, 0, 1, 2, 3, 3, 3, 3, 0, 1, 2, 3)
+    val cyArray = arrayOf(0, 1, 0, 1, 2, 2, 0, 1, 2, 3, 3, 3, 0, 1, 2, 3, 4, 4, 4, 4)
+    val xSizeArray = arrayOf(1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4)
+    val ySizeArray = arrayOf(1, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5)
 
     val textTileCode = buildString {
 
@@ -240,8 +243,8 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
 
 
             repeat(allocationInfo.tileCount) {
-               val cx = cxArray[it]
-               val cy = cyArray[it]
+                val cx = cxArray[it]
+                val cy = cyArray[it]
 
                 val offsetStr = offsetStr(it)
                 val offsetF = offsetFStr(it)
