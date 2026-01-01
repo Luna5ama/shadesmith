@@ -1,7 +1,7 @@
 [versions]
-kotlin = "2.2.21"
-kotlinxSerialization = "1.8.1"
-kotlinx-coroutines = "1.9.0"
+kotlin = "2.3.0"
+kotlinxSerialization = "1.9.0"
+kotlinx-coroutines = "1.10.2"
 
 fastutil = "8.5.18"
 
@@ -19,8 +19,9 @@ kotlinx-coroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core",
 
 kotlinxSerializationCore = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
 kotlinxSerializationJson = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
+letsPlot = { module = "org.jetbrains.lets-plot:lets-plot-kotlin-jvm", version = "4.4.1" }
 
 fastutil = { module = "it.unimi.dsi:fastutil", version.ref = "fastutil" }
 
 [bundles]
-kotlinEcosystem = ["kotlin-reflect", "kotlinx-coroutines"]
+kotlinEcosystem = ["kotlin-reflect", "kotlinx-coroutines", "letsPlot"]

@@ -11,33 +11,6 @@ private val READ_REGEX =
 private val WRITE_REGEX =
     """^${REGEX_PREFIX.pattern}_(store|${ATOMIC_REGEX.pattern})\(""".toRegex(RegexOption.MULTILINE)
 
-
-private sealed interface LifeTimeRange {
-    val sortOrder: Int
-    fun rangeBitSet(): BitSet
-
-    data class Transient(val range: IntRange) : LifeTimeRange {
-        override val sortOrder get() = range.first
-
-        override fun rangeBitSet(): BitSet {
-            val bitSet = BitSet()
-            bitSet.set(range.first, range.last + 1)
-            return bitSet
-        }
-    }
-
-    data class History(val lastRead: Int, val firstWrite: Int, val total: Int) : LifeTimeRange {
-        override val sortOrder get() = -1
-
-        override fun rangeBitSet(): BitSet {
-            val bitSet = BitSet()
-            bitSet.set(0, lastRead + 1)
-            bitSet.set(firstWrite, total)
-            return bitSet
-        }
-    }
-}
-
 private tailrec fun findSlot(tiles: MutableList<BitSet>, allocateBitSet: BitSet, currSlot: Int): Int {
     while (tiles.lastIndex < currSlot) {
         tiles.add(BitSet())
@@ -124,11 +97,11 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
         }
         .toList()
 
-    println("Accesses:")
-    accessInfos.forEach {
-        if (it.second.reads.isEmpty() && it.second.writes.isEmpty()) return@forEach
-        println("${it.first}: reads: ${it.second.reads} writes: ${it.second.writes}")
-    }
+//    println("Accesses:")
+//    accessInfos.forEach {
+//        if (it.second.reads.isEmpty() && it.second.writes.isEmpty()) return@forEach
+//        println("${it.first}: reads: ${it.second.reads} writes: ${it.second.writes}")
+//    }
 
     val lifeTime = config.formats.keys.associateWith { texName ->
         val typeStr = texName.substringBefore('_')
@@ -161,10 +134,10 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
         }
     }
 
-    println("\nLifetime:")
-    lifeTime.forEach {
-        println("${it.key} (${config.formats[it.key]}): ${it.value}")
-    }
+//    println("\nLifetime:")
+//    lifeTime.forEach {
+//        println("${it.key} (${config.formats[it.key]}): ${it.value}")
+//    }
 
     data class AllocationInfo(val tileID: MutableMap<String, Int>, val tileCount: Int)
 
@@ -185,12 +158,39 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
         }
         .toMap(EnumMap(TextureFormat::class.java))
 
-    println("\nAllocations:")
-    slots.forEach {
-        println("Format: ${it.key}")
-        it.value.tileID.forEach { (texName, tileID) ->
-            println("  Tex: $texName -> TileID: $tileID")
+//    println("\nAllocations:")
+//    slots.forEach {
+//        println("Format: ${it.key}")
+//        it.value.tileID.forEach { (texName, tileID) ->
+//            println("  Tex: $texName -> TileID: $tileID")
+//        }
+//    }
+
+    // Generate visualizations
+    val passNames = accessInfos.map { it.first.toString() }
+
+    // Convert accessInfos to the format expected by visualization
+    val accessInfosForViz = accessInfos.map { (sortKey, accessInfo) ->
+        sortKey to TextureVisualization.AccessInfo(accessInfo.reads, accessInfo.writes)
+    }
+
+    // ASCII visualizations (printed to console)
+    println("\n" + TextureVisualization.generateASCIITimeline(lifeTime, accessInfos.size, passNames))
+    println("\n" + TextureVisualization.generateASCIIAtlasPacking(slots, config))
+
+    // Try to generate HTML visualizations
+    try {
+        val outputPath = ioContext.outputPath.parent ?: ioContext.outputPath
+        TextureVisualization.generateHTMLVisualizations(lifeTime, slots, passNames, outputPath, config, accessInfosForViz)
+        println("\nHTML visualizations saved to: $outputPath")
+        println("  - texture_lifetime.html (combined timeline for all formats)")
+        println("  - tile_lifetime.html (combined tile view for all formats)")
+        slots.keys.forEach { format ->
+            println("  - atlas_packing_${format.name}.html")
         }
+    } catch (e: Exception) {
+        println("\nWarning: Could not generate HTML visualizations: ${e.message}")
+        e.printStackTrace()
     }
 
     val cxArray = arrayOf(0, 0, 1, 1, 0, 1, 2, 2, 2, 0, 1, 2, 3, 3, 3, 3, 0, 1, 2, 3)
