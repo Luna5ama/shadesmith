@@ -175,8 +175,8 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
     }
 
     // ASCII visualizations (printed to console)
-    println("\n" + TextureVisualization.generateASCIITimeline(lifeTime, accessInfos.size, passNames))
-    println("\n" + TextureVisualization.generateASCIIAtlasPacking(slots, config))
+//    println("\n" + TextureVisualization.generateASCIITimeline(lifeTime, accessInfos.size, passNames))
+//    println("\n" + TextureVisualization.generateASCIIAtlasPacking(slots, config))
 
     // Try to generate HTML visualizations
     try {

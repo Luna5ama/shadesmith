@@ -106,12 +106,6 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
                 it.write(resolve(file, mutableSetOf()).code)
             }
 
-            file to proc
-        }
-        .toList()
-        .parallelStream()
-        .map { (file, proc) ->
-
             val newCode = proc.inputStream.bufferedReader().use {
                 it.readText()
             }
