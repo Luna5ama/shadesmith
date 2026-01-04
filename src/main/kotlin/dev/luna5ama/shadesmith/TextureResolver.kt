@@ -7,7 +7,7 @@ import kotlin.io.path.name
 private val REGEX_PREFIX = """^[^#\n\r]+((?:transient|history|persistent)_$IDENTIFIER_REGEX_STR)""".toRegex()
 private val ATOMIC_REGEX = """atomic(?:Add|Min|Max|And|Or|Xor|Exchange|CompSwap)""".toRegex()
 private val READ_REGEX =
-    """${REGEX_PREFIX.pattern}_(sample|gather|fetch|load|${ATOMIC_REGEX.pattern})\(""".toRegex(RegexOption.MULTILINE)
+    """${REGEX_PREFIX.pattern}_(sample|gather|gatherTexel|fetch|load|${ATOMIC_REGEX.pattern})\(""".toRegex(RegexOption.MULTILINE)
 private val WRITE_REGEX =
     """^${REGEX_PREFIX.pattern}_(store|${ATOMIC_REGEX.pattern})\(""".toRegex(RegexOption.MULTILINE)
 
