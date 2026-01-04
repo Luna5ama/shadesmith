@@ -112,10 +112,15 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
                 .redirectError(ProcessBuilder.Redirect.INHERIT)
                 .start()
 
-            proc.outputStream.writer().use {
-                it.write(file.code)
+            proc.outputStream.use {
+                it.write(file.code.encodeToByteArray())
             }
 
+            file to proc
+        }
+        .toList()
+        .parallelStream()
+        .map { (file, proc) ->
             val newCode = proc.inputStream.bufferedReader().use {
                 it.readText()
             }
