@@ -16,6 +16,14 @@ enum class TextureFormat {
 }
 
 @Serializable
+data class FixedSizedTexture(
+    val format: TextureFormat,
+    val width: Int,
+    val height: Int,
+)
+
+@Serializable
 data class Config(
-    val formats: Map<String, TextureFormat> = emptyMap(),
+    val screen: Map<String, TextureFormat> = emptyMap(),
+    val fixed: Map<String, FixedSizedTexture> = emptyMap(),
 )

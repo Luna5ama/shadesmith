@@ -5,12 +5,9 @@ import org.jetbrains.letsPlot.export.ggsave
 import org.jetbrains.letsPlot.geom.*
 import org.jetbrains.letsPlot.label.labs
 import org.jetbrains.letsPlot.intern.Plot
-import org.jetbrains.letsPlot.intern.toSpec
 import org.jetbrains.letsPlot.tooltips.layerTooltips
 import java.nio.file.Path
-import java.util.*
 import kotlin.io.path.div
-import kotlin.io.path.writeText
 
 /**
  * Generates visualizations for texture allocation and usage patterns
@@ -250,7 +247,7 @@ object TextureVisualization {
 
         // Group textures by format, then sort by format then name
         val texturesByFormat = lifeTime.entries
-            .groupBy { (texName, _) -> config.formats[texName] ?: TextureFormat.RGBA8 }
+            .groupBy { (texName, _) -> config.screen[texName] ?: TextureFormat.RGBA8 }
             .toSortedMap()
 
         texturesByFormat.forEach { (format, entries) ->
@@ -437,7 +434,7 @@ object TextureVisualization {
 
             // Filter lifeTime to only include textures of this format
             val formatLifeTime = lifeTime.filter { (texName, _) ->
-                config.formats[texName] == format
+                config.screen[texName] == format
             }
 
             // Invert the mapping: tileID -> textures

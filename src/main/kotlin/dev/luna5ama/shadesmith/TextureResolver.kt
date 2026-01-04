@@ -103,7 +103,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
 //        println("${it.first}: reads: ${it.second.reads} writes: ${it.second.writes}")
 //    }
 
-    val lifeTime = config.formats.keys.associateWith { texName ->
+    val lifeTime = config.screen.keys.associateWith { texName ->
         val typeStr = texName.substringBefore('_')
         when (typeStr) {
             "transient" -> {
@@ -141,7 +141,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
 
     data class AllocationInfo(val tileID: MutableMap<String, Int>, val tileCount: Int)
 
-    val slots = config.formats.entries.groupBy { it.value }
+    val slots = config.screen.entries.groupBy { it.value }
         .mapValues { entry -> entry.value.map { it.key } }
         .mapValues { (format, texNames) ->
             val tileID = mutableMapOf<String, Int>()

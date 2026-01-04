@@ -105,7 +105,8 @@ fun cleanUnused(file: ShaderFile): ShaderFile {
 
                 if (name.startsWith("_shadesmith_")
                     || name.startsWith("history_")
-                    || name.startsWith("transient_")) {
+                    || name.startsWith("transient_")
+                    || name.startsWith("persistent_")) {
                     return@filter true
                 }
 
