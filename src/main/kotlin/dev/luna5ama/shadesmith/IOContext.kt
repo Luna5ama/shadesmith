@@ -45,7 +45,7 @@ class IOContext(val inputPath: Path, val outputPath: Path) {
         return cache.computeIfAbsent(path) {
             if (!it.exists()) return@computeIfAbsent Optional.empty()
             val code = it.readText()
-            Optional.of(ShaderFile(it,  code))
+            Optional.of(ShaderFile(it,  code, includeGuarded = code.contains("#define INCLUDE_")))
         }.getOrNull()
     }
 

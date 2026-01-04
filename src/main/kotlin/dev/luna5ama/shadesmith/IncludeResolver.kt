@@ -1,5 +1,6 @@
 package dev.luna5ama.shadesmith
 
+import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.absolutePathString
 import kotlin.io.path.name
@@ -66,14 +67,20 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
         )
     }
 
-    val usedFiles =
-        inputFiles.associateTo(ConcurrentHashMap()) { it.path.absolutePathString() to prepareForPreprocessor(it) }
-
     val prefix = "#include "
 
+    val cache = ConcurrentHashMap<String, ShaderFile>()
+
+    fun resolveDirect(path: Path): ShaderFile {
+        return cache.getOrPut(path.absolutePathString()) {
+            val includedFile = ioContext.readInput(path)
+                ?: throw IllegalStateException("Included file not found: ${path.name}")
+            prepareForPreprocessor(includedFile)
+        }
+    }
+
     fun resolve(file: ShaderFile, included: MutableSet<String>): ShaderFile {
-        val newFile = prepareForPreprocessor(file)
-        val newCode = newFile.code.lineSequence()
+        val newCode = file.code.lineSequence()
             .map {
                 if (!it.startsWith(prefix)) {
                     return@map it
@@ -82,20 +89,23 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
                 val includePathStr = it.substring(prefix.length).trim().removeSurrounding("\"")
                 val includePath = file.path.resolve(includePathStr)
 
-                val includedFile = ioContext.readInput(includePath)
-                    ?: throw IllegalStateException("Included file not found: $includePathStr included from ${file.path.absolutePathString()}")
-                val resolvedFile = usedFiles.getOrPut(includedFile.path.absolutePathString()) {
-                    resolve(includedFile, included)
+                val pathStr = includePath.absolutePathString()
+                val includedFile = resolveDirect(includePath)
+                if (includedFile.includeGuarded && !included.add(pathStr)) {
+                    return@map ""
                 }
+
+                val resolvedFile = resolve(includedFile, included)
 
                 return@map resolvedFile.code
             }
             .joinToString("\n")
 
-        return newFile.copy(code = newCode)
+        return file.copy(code = newCode)
     }
 
     return inputFiles.parallelStream()
+        .map { resolve(prepareForPreprocessor(it), mutableSetOf()) }
         .map { file ->
             val proc = ProcessBuilder()
                 .command("clang", "-C", "-E", "-P", "-Wno-microsoft-include", "-")
@@ -103,7 +113,7 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
                 .start()
 
             proc.outputStream.writer().use {
-                it.write(resolve(file, mutableSetOf()).code)
+                it.write(file.code)
             }
 
             val newCode = proc.inputStream.bufferedReader().use {
