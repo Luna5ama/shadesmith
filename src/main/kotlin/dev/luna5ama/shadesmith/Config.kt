@@ -17,9 +17,9 @@ enum class TextureFormat {
 
 @Serializable
 data class FixedSizedTexture(
-    val format: TextureFormat,
     val width: Int,
     val height: Int,
+    val format: TextureFormat,
 )
 
 @Serializable

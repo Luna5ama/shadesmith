@@ -47,6 +47,7 @@ object TextureVisualization {
             .toList()
             .sortedBy { (it.second as LifeTimeRange.Transient).range.first }
         val historyTextures = lifeTime.filter { it.value is LifeTimeRange.History }
+        val persistentTextures = lifeTime.filter { it.value is LifeTimeRange.Persistent }
 
         if (transientTextures.isNotEmpty()) {
             appendLine("TRANSIENT TEXTURES:")
@@ -80,6 +81,20 @@ object TextureVisualization {
                     }
                 }
                 appendLine()
+            }
+        }
+
+        if (persistentTextures.isNotEmpty()) {
+            appendLine()
+            appendLine("PERSISTENT TEXTURES:")
+            persistentTextures.forEach { (name, range) ->
+                range as LifeTimeRange.Persistent
+                append(name.padEnd(colWidth))
+                append("│")
+                repeat(passCount) {
+                    append(" PPP ")
+                }
+                appendLine(" (${range.width}x${range.height})")
             }
         }
 
@@ -247,7 +262,7 @@ object TextureVisualization {
 
         // Group textures by format, then sort by format then name
         val texturesByFormat = lifeTime.entries
-            .groupBy { (texName, _) -> config.screen[texName] ?: TextureFormat.RGBA8 }
+            .groupBy { (texName, _) -> config.screen[texName] ?: config.fixed[texName]?.format ?: TextureFormat.RGBA8 }
             .toSortedMap()
 
         texturesByFormat.forEach { (format, entries) ->
@@ -299,6 +314,26 @@ object TextureVisualization {
                                 states.add(state)
                                 formats.add(format.name)
                             }
+                        }
+                    }
+                    is LifeTimeRange.Persistent -> {
+                        (0..<range.total).forEach { pass ->
+                            val accessInfo = accessInfos[pass].second
+                            val hasRead = texName in accessInfo.reads
+                            val hasWrite = texName in accessInfo.writes
+
+                            val state = when {
+                                hasRead && hasWrite -> "ReadWrite"
+                                hasRead -> "Read"
+                                hasWrite -> "Write"
+                                else -> "Active"
+                            }
+
+                            textureNames.add(texNameWithFormat)
+                            passIndices.add(pass)
+                            passLabels.add(passNames.getOrElse(pass) { "Pass$pass" })
+                            states.add(state)
+                            formats.add(format.name)
                         }
                     }
                 }
@@ -434,7 +469,7 @@ object TextureVisualization {
 
             // Filter lifeTime to only include textures of this format
             val formatLifeTime = lifeTime.filter { (texName, _) ->
-                config.screen[texName] == format
+                config.screen[texName] == format || config.fixed[texName]?.format == format
             }
 
             // Invert the mapping: tileID -> textures
@@ -456,6 +491,7 @@ object TextureVisualization {
                         when (range) {
                             is LifeTimeRange.Transient -> pass in range.range
                             is LifeTimeRange.History -> pass <= range.lastRead || pass >= range.firstWrite
+                            is LifeTimeRange.Persistent -> true  // Persistent textures are always active
                         }
                     }
 

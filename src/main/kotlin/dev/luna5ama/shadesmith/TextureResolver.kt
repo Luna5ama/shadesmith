@@ -4,7 +4,7 @@ import org.intellij.lang.annotations.Language
 import java.util.*
 import kotlin.io.path.name
 
-private val REGEX_PREFIX = """^[^#\n\r]+((?:transient|history)_$IDENTIFIER_REGEX_STR)""".toRegex()
+private val REGEX_PREFIX = """^[^#\n\r]+((?:transient|history|persistent)_$IDENTIFIER_REGEX_STR)""".toRegex()
 private val ATOMIC_REGEX = """atomic(?:Add|Min|Max|And|Or|Xor|Exchange|CompSwap)""".toRegex()
 private val READ_REGEX =
     """${REGEX_PREFIX.pattern}_(sample|gather|fetch|load|${ATOMIC_REGEX.pattern})\(""".toRegex(RegexOption.MULTILINE)
@@ -103,7 +103,10 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
 //        println("${it.first}: reads: ${it.second.reads} writes: ${it.second.writes}")
 //    }
 
-    val lifeTime = config.screen.keys.associateWith { texName ->
+    val lifeTime = mutableMapOf<String, LifeTimeRange>()
+
+    // Add screen-based textures (transient and history)
+    config.screen.keys.forEach { texName ->
         val typeStr = texName.substringBefore('_')
         when (typeStr) {
             "transient" -> {
@@ -112,7 +115,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
                     texName in accessInfo.reads || texName in accessInfo.writes
                 }
                 check(exists.size >= 1) { "Transient texture $texName must be read/written at least onrce." }
-                LifeTimeRange.Transient(exists.min()..exists.max())
+                lifeTime[texName] = LifeTimeRange.Transient(exists.min()..exists.max())
             }
 
             "history" -> {
@@ -124,8 +127,14 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
                     val accessInfo = accessInfos[it].second
                     it <= firstWriteIndex && texName in accessInfo.reads
                 } ?: 0
-                LifeTimeRange.History(lastReadIndex, firstWriteIndex, accessInfos.size)
+                lifeTime[texName] = LifeTimeRange.History(lastReadIndex, firstWriteIndex, accessInfos.size)
+            }
 
+            "persistent" -> {
+                // Persistent textures from shader code (must also be in config.fixed)
+                val fixedTexture = config.fixed[texName]
+                    ?: error("Persistent texture $texName found in shader code but not defined in config.fixed")
+                lifeTime[texName] = LifeTimeRange.Persistent(accessInfos.size, fixedTexture.width, fixedTexture.height)
             }
 
             else -> {
@@ -134,13 +143,28 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
         }
     }
 
+    // Add persistent textures from config.fixed that weren't in screen
+    config.fixed.forEach { (texName, fixedTexture) ->
+        if (texName !in lifeTime) {
+            lifeTime[texName] = LifeTimeRange.Persistent(accessInfos.size, fixedTexture.width, fixedTexture.height)
+        }
+    }
+
 //    println("\nLifetime:")
 //    lifeTime.forEach {
-//        println("${it.key} (${config.formats[it.key]}): ${it.value}")
+//        println("${it.key} (${config.screen[it.key] ?: config.fixed[it.key]?.format}): ${it.value}")
 //    }
 
     data class AllocationInfo(val tileID: MutableMap<String, Int>, val tileCount: Int)
+    data class FixedTileInfo(val width: Int, val height: Int, val offsetX: Int, val offsetY: Int)
+    data class FixedAllocationInfo(
+        val tileID: MutableMap<String, Int>,
+        val tiles: MutableList<FixedTileInfo>,
+        val atlasWidth: Int,
+        val atlasHeight: Int
+    )
 
+    // Allocate screen-based textures (existing algorithm)
     val slots = config.screen.entries.groupBy { it.value }
         .mapValues { entry -> entry.value.map { it.key } }
         .mapValues { (format, texNames) ->
@@ -155,6 +179,44 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
                 }
 
             AllocationInfo(tileID, tiles.size)
+        }
+        .toMap(EnumMap(TextureFormat::class.java))
+
+    // Allocate fixed-size textures (separate atlases with absolute sizes)
+    val fixedSlots = config.fixed.entries.groupBy { it.value.format }
+        .mapValues { entry -> entry.value.map { it.key to it.value } }
+        .mapValues { (format, textures) ->
+            val tileID = mutableMapOf<String, Int>()
+            val tiles = mutableListOf<FixedTileInfo>()
+
+            // Simple shelf packing algorithm for fixed-size tiles
+            var currentX = 0
+            var currentY = 0
+            var rowHeight = 0
+            var maxWidth = 0
+
+            textures.sortedBy { it.first }.forEach { (texName, fixedTexture) ->
+                val width = fixedTexture.width
+                val height = fixedTexture.height
+
+                // Start a new row if this tile doesn't fit (max width 8192)
+                if (currentX > 0 && currentX + width > 8192) {
+                    currentX = 0
+                    currentY += rowHeight
+                    rowHeight = 0
+                }
+
+                tileID[texName] = tiles.size
+                tiles.add(FixedTileInfo(width, height, currentX, currentY))
+
+                currentX += width
+                rowHeight = maxOf(rowHeight, height)
+                maxWidth = maxOf(maxWidth, currentX)
+            }
+
+            val totalHeight = currentY + rowHeight
+
+            FixedAllocationInfo(tileID, tiles, maxWidth, totalHeight)
         }
         .toMap(EnumMap(TextureFormat::class.java))
 
@@ -199,7 +261,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
     val ySizeArray = arrayOf(1, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5)
 
     val textTileCode = buildString {
-
+        // Generate code for screen-based textures
         slots.forEach { (format, allocationInfo) ->
             fun prefix(tileID: Int) = "_shadesmith_${format.name}_$tileID"
             fun offsetStr(tileID: Int) = "${prefix(tileID)}_OFFSET"
@@ -210,7 +272,6 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
             fun texelToGatherUVStr(tileID: Int) = "${prefix(tileID)}_TEXEL_TO_GATHER_UV"
             fun uvToGatherUVStr(tileID: Int) = "${prefix(tileID)}_UV_TO_GATHER_UV"
             fun texelToTexelStr(tileID: Int) = "${prefix(tileID)}_TEXEL_TO_TEXEL"
-
 
             val xSize = xSizeArray[allocationInfo.tileCount - 1]
             val ySize = ySizeArray[allocationInfo.tileCount - 1]
@@ -240,7 +301,6 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
             append(" (vec2(1.0) / ")
             append(atlasSize)
             append(")\n")
-
 
             repeat(allocationInfo.tileCount) {
                 val cx = cxArray[it]
@@ -396,6 +456,206 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
             }
 
             println("$format: $xSize x $ySize (${allocationInfo.tileCount})")
+        }
+
+        // Generate code for fixed-size textures
+        fixedSlots.forEach { (format, allocationInfo) ->
+            fun prefix(tileID: Int) = "_shadesmith_F${format.name}_$tileID"
+            fun offsetStr(tileID: Int) = "${prefix(tileID)}_OFFSET"
+            fun offsetFStr(tileID: Int) = "${prefix(tileID)}_OFFSET_F"
+            fun sizeStr(tileID: Int) = "${prefix(tileID)}_SIZE"
+            fun sizeFStr(tileID: Int) = "${prefix(tileID)}_SIZE_F"
+            fun uvToUVStr(tileID: Int) = "${prefix(tileID)}_UV_TO_UV"
+            fun texelToGatherUVStr(tileID: Int) = "${prefix(tileID)}_TEXEL_TO_GATHER_UV"
+            fun uvToGatherUVStr(tileID: Int) = "${prefix(tileID)}_UV_TO_GATHER_UV"
+            fun texelToTexelStr(tileID: Int) = "${prefix(tileID)}_TEXEL_TO_TEXEL"
+
+            val atlasSize = "_shadesmith_F${format.name}_ATLAS_SIZE"
+            val atlasSizeI = "${atlasSize}_I"
+            val atlasSizeRcp = "${atlasSize}_RCP"
+
+            append("#define ")
+            append(atlasSizeI)
+            append(" ivec2(")
+            append(allocationInfo.atlasWidth)
+            append(", ")
+            append(allocationInfo.atlasHeight)
+            append(")\n")
+
+            append("#define ")
+            append(atlasSize)
+            append(" vec2(")
+            append(allocationInfo.atlasWidth)
+            append(".0, ")
+            append(allocationInfo.atlasHeight)
+            append(".0)\n")
+
+            append("#define ")
+            append(atlasSizeRcp)
+            append(" (vec2(1.0) / ")
+            append(atlasSize)
+            append(")\n")
+
+            allocationInfo.tiles.forEachIndexed { index, tile ->
+                val offsetStr = offsetStr(index)
+                val offsetF = offsetFStr(index)
+                val sizeStr = sizeStr(index)
+                val sizeFStr = sizeFStr(index)
+
+                append("#define ")
+                append(offsetStr)
+                append(" ivec2(")
+                append(tile.offsetX)
+                append(", ")
+                append(tile.offsetY)
+                append(")\n")
+
+                append("#define ")
+                append(offsetF)
+                append(" vec2(")
+                append(tile.offsetX)
+                append(".0, ")
+                append(tile.offsetY)
+                append(".0)\n")
+
+                append("#define ")
+                append(sizeStr)
+                append(" ivec2(")
+                append(tile.width)
+                append(", ")
+                append(tile.height)
+                append(")\n")
+
+                append("#define ")
+                append(sizeFStr)
+                append(" vec2(")
+                append(tile.width)
+                append(".0, ")
+                append(tile.height)
+                append(".0)\n")
+
+                append("#define ")
+                append(texelToTexelStr(index))
+                append("(texelPos) _textile_texelToTexel(texelPos, ")
+                append(offsetStr)
+                append(", ")
+                append(sizeStr)
+                append(")\n")
+
+                append("#define ")
+                append(uvToUVStr(index))
+                append("(uv) _textile_uvToUV(uv, ")
+                append(offsetF)
+                append(", ")
+                append(sizeFStr)
+                append(", ")
+                append(atlasSizeRcp)
+                append(")\n")
+
+                append("#define ")
+                append(uvToGatherUVStr(index))
+                append("(uv) _textile_uvToGatherUV(uv, ")
+                append(offsetF)
+                append(", ")
+                append(sizeFStr)
+                append(", ")
+                append(atlasSizeRcp)
+                append(")\n")
+
+                append("#define ")
+                append(texelToGatherUVStr(index))
+                append("(texelPos) _textile_texelToGatherUV(texelPos, ")
+                append(offsetF)
+                append(", ")
+                append(sizeFStr)
+                append(", ")
+                append(atlasSizeRcp)
+                append(")\n")
+            }
+
+            val formatLowercase = format.name.lowercase()
+            val usamFormat = "usam_f$formatLowercase"
+            val uimgFormat = "uimg_f$formatLowercase"
+
+            allocationInfo.tileID.forEach { (texName, tileID) ->
+                append("#define ")
+                append(texName)
+                append("_sample(x) texture(")
+                append(usamFormat)
+                append(", ")
+                append(uvToUVStr(tileID))
+                append("(x))\n")
+
+                append("#define ")
+                append(texName)
+                append("_gather(x, c) textureGather(")
+                append(usamFormat)
+                append(", ")
+                append(uvToGatherUVStr(tileID))
+                append("(x), c)\n")
+
+                append("#define ")
+                append(texName)
+                append("_gatherTexel(x, c) textureGather(")
+                append(usamFormat)
+                append(", ")
+                append(texelToGatherUVStr(tileID))
+                append("(x), c)\n")
+
+                append("#define ")
+                append(texName)
+                append("_fetch(x) texelFetch(")
+                append(usamFormat)
+                append(", ")
+                append(texelToTexelStr(tileID))
+                append("(x), 0)\n")
+
+                append("#define ")
+                append(texName)
+                append("_load(x) imageLoad(")
+                append(uimgFormat)
+                append(", ")
+                append(texelToTexelStr(tileID))
+                append("(x))\n")
+
+                append("#define ")
+                append(texName)
+                append("_store(x, v) imageStore(")
+                append(uimgFormat)
+                append(", ")
+                append(texelToTexelStr(tileID))
+                append("(x), v)\n")
+
+                listOf("Add", "Min", "Max", "And", "Or", "Xor", "Exchange").forEach { atomicOp ->
+                    append("#define ")
+                    append(texName)
+                    append("_atomic")
+                    append(atomicOp)
+                    append("(x, v) imageAtomic")
+                    append(atomicOp)
+                    append("(")
+                    append(uimgFormat)
+                    append(", ")
+                    append(texelToTexelStr(tileID))
+                    append("(x), v)\n")
+                }
+
+                listOf("CompSwap").forEach { atomicOp ->
+                    append("#define ")
+                    append(texName)
+                    append("_atomic")
+                    append(atomicOp)
+                    append("(x, v1, v2) imageAtomic")
+                    append(atomicOp)
+                    append("(")
+                    append(uimgFormat)
+                    append(", ")
+                    append(texelToTexelStr(tileID))
+                    append("(x), v1, v2)\n")
+                }
+            }
+
+            println("Fixed $format: ${allocationInfo.atlasWidth} x ${allocationInfo.atlasHeight} (${allocationInfo.tiles.size} tiles)")
         }
     }
 

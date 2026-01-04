@@ -35,5 +35,18 @@ sealed interface LifeTimeRange {
             return bitSet
         }
     }
+
+    /**
+     * A persistent texture with fixed size that exists for all passes
+     */
+    data class Persistent(val total: Int, val width: Int, val height: Int) : LifeTimeRange {
+        override val sortOrder get() = -2
+
+        override fun rangeBitSet(): BitSet {
+            val bitSet = BitSet()
+            bitSet.set(0, total)
+            return bitSet
+        }
+    }
 }
 
