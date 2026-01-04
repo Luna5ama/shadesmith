@@ -357,7 +357,11 @@ object TextureVisualization {
         data["format"] = formats
 
         return letsPlot(data) +
-                geomTile(color = "white", size = 2.0) {  // 2x larger blocks
+                geomTile(color = "white", size = 2.0, tooltips = layerTooltips()
+                    .line("Texture: @texture")
+                    .line("Pass: @passLabel")
+                    .line("State: @state")
+                ) {
                     x = "pass"
                     y = "texture"
                     fill = "state"
@@ -537,8 +541,8 @@ object TextureVisualization {
         data["state"] = states
 
         return letsPlot(data) +
-                geomTile(color = "white", size = 2.0, tooltips = layerTooltips()  // 2x larger blocks
-                    .line("Textures: @textures")
+                geomTile(color = "white", size = 2.0, tooltips = layerTooltips()
+                    .line("Texture: @textures")
                     .line("Pass: @passLabel")
                     .line("State: @state")
                 ) {
