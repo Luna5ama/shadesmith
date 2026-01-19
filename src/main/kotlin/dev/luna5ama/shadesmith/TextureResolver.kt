@@ -186,37 +186,59 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
     val fixedSlots = config.fixed.entries.groupBy { it.value.format }
         .mapValues { entry -> entry.value.map { it.key to it.value } }
         .mapValues { (format, textures) ->
-            val tileID = mutableMapOf<String, Int>()
-            val tiles = mutableListOf<FixedTileInfo>()
+            // Sort by height descending for shelf packing
+            val sortedTextures = textures.sortedWith(
+                compareByDescending<Pair<String, FixedSizedTexture>> { it.second.height }
+                    .thenByDescending { it.second.width }
+            )
 
-            // Simple shelf packing algorithm for fixed-size tiles
-            var currentX = 0
-            var currentY = 0
-            var rowHeight = 0
-            var maxWidth = 0
+            val minWidth = sortedTextures.maxOfOrNull { it.second.width } ?: 0
+            val maxWidthLimit = maxOf(8192, minWidth)
 
-            textures.sortedBy { it.first }.forEach { (texName, fixedTexture) ->
-                val width = fixedTexture.width
-                val height = fixedTexture.height
+            var bestArea = Long.MAX_VALUE
+            var bestWidth = 0
+            var bestHeight = 0
+            var bestTiles = emptyList<FixedTileInfo>()
 
-                // Start a new row if this tile doesn't fit (max width 8192)
-                if (currentX > 0 && currentX + width > 8192) {
-                    currentX = 0
-                    currentY += rowHeight
-                    rowHeight = 0
+            // Try all possible widths from minWidth up to 8192 to find the smallest area
+            for (wLimit in minWidth..maxWidthLimit) {
+                var currentX = 0
+                var currentY = 0
+                var rowHeight = 0
+                var maxW = 0
+                val tiles = mutableListOf<FixedTileInfo>()
+
+                for ((_, tex) in sortedTextures) {
+                    if (currentX > 0 && currentX + tex.width > wLimit) {
+                        currentX = 0
+                        currentY += rowHeight
+                        rowHeight = 0
+                    }
+                    tiles.add(FixedTileInfo(tex.width, tex.height, currentX, currentY))
+                    currentX += tex.width
+                    rowHeight = maxOf(rowHeight, tex.height)
+                    maxW = maxOf(maxW, currentX)
+                }
+                val totalH = currentY + rowHeight
+                val area = maxW.toLong() * totalH
+
+                if (area < bestArea || (area == bestArea && maxOf(maxW, totalH) < maxOf(bestWidth, bestHeight))) {
+                    bestArea = area
+                    bestWidth = maxW
+                    bestHeight = totalH
+                    bestTiles = tiles
                 }
 
-                tileID[texName] = tiles.size
-                tiles.add(FixedTileInfo(width, height, currentX, currentY))
-
-                currentX += width
-                rowHeight = maxOf(rowHeight, height)
-                maxWidth = maxOf(maxWidth, currentX)
+                // If we've reached the minimum possible height (tallest texture), no point in increasing width further
+                if (totalH == sortedTextures[0].second.height) break
             }
 
-            val totalHeight = currentY + rowHeight
+            val tileID = mutableMapOf<String, Int>()
+            sortedTextures.forEachIndexed { index, (name, _) ->
+                tileID[name] = index
+            }
 
-            FixedAllocationInfo(tileID, tiles, maxWidth, totalHeight)
+            FixedAllocationInfo(tileID, bestTiles.toMutableList(), bestWidth, bestHeight)
         }
         .toMap(EnumMap(TextureFormat::class.java))
 
