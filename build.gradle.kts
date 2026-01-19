@@ -28,6 +28,7 @@ dependencies {
     implementation(libs.fastutil)
 
     implementation(libs.bundles.kotlinEcosystem)
+    implementation(libs.simpleLogger)
 }
 
 kotlin {
@@ -69,7 +70,7 @@ tasks {
 
     val optimizeFatJar = jarOptimizer.register(
         fatJar,
-        "dev.luna5ama.shadesmith"
+        "dev.luna5ama.shadesmith", "kotlin.reflect", "org.slf4j"
     )
 
     artifacts {
