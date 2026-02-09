@@ -43,16 +43,6 @@ object WaterFlag: PBRProvider<PBRValue.Bool> {
     }
 }
 
-object LavaFlag : PBRProvider<PBRValue.Bool> {
-    override val defaultValue: PBRValue.Bool = PBRValue.Bool(false)
-    override fun BlockScope.provide(): Sequence<Pair<BlockState, PBRValue.Bool>> = sequence {
-        if (nameEquals(BlockNames.Lava)) {
-            yield(baseState to PBRValue.Bool(true))
-            yield(BlockState("flowing_lava") to PBRValue.Bool(true))
-        }
-    }
-}
-
 object Emissive : PBRProvider<PBRValue.UInt4> {
     override val defaultValue: PBRValue.UInt4 = PBRValue.UInt4(0u)
     override fun BlockScope.provide(): Sequence<Pair<BlockState, PBRValue.UInt4>> = sequence {
