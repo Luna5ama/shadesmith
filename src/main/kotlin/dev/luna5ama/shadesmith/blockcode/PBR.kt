@@ -35,7 +35,9 @@ fun generateHardcodedPBR() {
 
     // Create palette by deduplicating PBR data
     println("Creating palette...")
-    val pbrDataToPalette = mutableMapOf<List<LUTData>, Int>()
+    val pbrDataToPalette = mutableMapOf(
+        PBRAssemblerImpl.provide(BlockState(""), BlockProperty()).first().second to 0
+    )
     val blockStateToMaterialId = mutableMapOf<BlockState, Int>()
     var nextMaterialId = 0
 

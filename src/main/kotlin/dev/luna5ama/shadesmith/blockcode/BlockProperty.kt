@@ -3,12 +3,12 @@ package dev.luna5ama.shadesmith.blockcode
 import kotlinx.serialization.json.*
 
 data class BlockProperty(
-    val block: String,
-    val variants: List<String>,
-    val isFullCube: Boolean,
-    val luminance: Int,
-    val isOpaque: Boolean,
-    val tags: Set<Tags>
+    val block: String = "",
+    val variants: List<String> = emptyList(),
+    val isFullCube: Boolean = false,
+    val luminance: Int = 0,
+    val isOpaque: Boolean = true,
+    val tags: Set<Tags> = emptySet()
 ) {
     enum class Tags {
         SmallFlower,
