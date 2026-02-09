@@ -7,7 +7,7 @@ object SSS : PBRProvider<PBRValue.UInt4> {
     override fun BlockScope.provide(): Sequence<Pair<BlockState, PBRValue.UInt4>> = sequence {
         if (property.tags.contains(BlockProperty.Tags.SmallFlower)) {
             yield(baseState to PBRValue.UInt4(15u))
-        } else if (property.tags.contains(BlockProperty.Tags.Flower)) {
+        } else if (property.tags.contains(BlockProperty.Tags.Flower) && !nameEndsWith("_leaves")) {
             yield(baseState to PBRValue.UInt4(13u))
         }
 
@@ -15,7 +15,7 @@ object SSS : PBRProvider<PBRValue.UInt4> {
             yield(baseState to PBRValue.UInt4(12u))
         }
 
-        if (nameEquals(BlockNames.ShortDryGrass, BlockNames.ShortGrass, "grass")) {
+        if (nameEquals(BlockNames.ShortDryGrass, BlockNames.ShortGrass)) {
             yield(baseState to PBRValue.UInt4(14u))
 
             if (nameEquals(BlockNames.ShortGrass)) {
@@ -44,6 +44,34 @@ object WaterFlag: PBRProvider<PBRValue.Bool> {
         }
     }
 }
+
+object SmallFoliageFlag: PBRProvider<PBRValue.Bool> {
+    override val defaultValue: PBRValue.Bool = PBRValue.Bool(false)
+    override fun BlockScope.provide(): Sequence<Pair<BlockState, PBRValue.Bool>> = sequence {
+        if (property.tags.contains(BlockProperty.Tags.SmallFlower)) {
+            yield(baseState to PBRValue.Bool(true))
+        } else if (property.tags.contains(BlockProperty.Tags.Flower) && !nameEndsWith("_leaves")) {
+            yield(baseState to PBRValue.Bool(true))
+        }
+
+        if (nameEndsWith("_sapling")) {
+            yield(baseState to PBRValue.Bool(true))
+        }
+
+        if (nameEquals(BlockNames.ShortDryGrass, BlockNames.ShortGrass)) {
+            yield(baseState to PBRValue.Bool(true))
+
+            if (nameEquals(BlockNames.ShortGrass)) {
+                yield(BlockState("grass") to PBRValue.Bool(true)) // Old name
+            }
+        }
+
+        if (nameEquals(BlockNames.TallGrass, BlockNames.TallDryGrass)) {
+            yield(baseState to PBRValue.Bool(true))
+        }
+    }
+}
+
 
 object Emissive : PBRProvider<PBRValue.UInt4> {
     override val defaultValue: PBRValue.UInt4 = PBRValue.UInt4(0u)
