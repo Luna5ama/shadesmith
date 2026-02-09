@@ -16,13 +16,20 @@ data class BlockProperty(
     }
 
     companion object {
+        // Split variant names that contain <br> as a separator
+        private fun splitVariantName(name: String): List<String> {
+            return name.split("<br>", "<br/>", "<BR>", ignoreCase = true)
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+        }
+
         fun fromJsonObject(jsonObject: JsonObject): Map<BlockState, BlockProperty> {
             val block = jsonObject["block"]!!.jsonPrimitive.content
             val variantsRaw = jsonObject["variants"]!!
             val variants = if (variantsRaw is JsonArray) {
-                variantsRaw.map { it.jsonPrimitive.content }
+                variantsRaw.flatMap { splitVariantName(it.jsonPrimitive.content) }
             } else {
-                listOf(variantsRaw.jsonPrimitive.content)
+                splitVariantName(variantsRaw.jsonPrimitive.content)
             }
 
             fun booleanTag(name: String, variantName: String? = null, stateKey: String? = null): Boolean {
@@ -30,18 +37,33 @@ data class BlockProperty(
                 return when (element) {
                     is JsonPrimitive -> element.content == "Yes"
                     is JsonObject -> {
-                        if (variantName != null && element.containsKey(variantName)) {
-                            val variantElement = element[variantName]!!
-                            when (variantElement) {
-                                is JsonPrimitive -> variantElement.content == "Yes"
-                                is JsonObject -> {
-                                    if (stateKey != null && variantElement.containsKey(stateKey)) {
-                                        variantElement[stateKey]!!.jsonPrimitive.content == "Yes"
-                                    } else {
-                                        false
-                                    }
+                        if (variantName != null) {
+                            // Try exact match first
+                            var matchedKey: String? = null
+                            if (element.containsKey(variantName)) {
+                                matchedKey = variantName
+                            } else {
+                                // Try matching against keys with <br> separators
+                                matchedKey = element.keys.firstOrNull { key ->
+                                    splitVariantName(key).contains(variantName)
                                 }
-                                else -> false
+                            }
+
+                            if (matchedKey != null) {
+                                val variantElement = element[matchedKey]!!
+                                when (variantElement) {
+                                    is JsonPrimitive -> variantElement.content == "Yes"
+                                    is JsonObject -> {
+                                        if (stateKey != null && variantElement.containsKey(stateKey)) {
+                                            variantElement[stateKey]!!.jsonPrimitive.content == "Yes"
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                    else -> false
+                                }
+                            } else {
+                                false
                             }
                         } else {
                             false
@@ -63,9 +85,22 @@ data class BlockProperty(
                 return when (element) {
                     is JsonPrimitive -> mapOf(emptyMap<String, String>() to element.int)
                     is JsonObject -> {
-                        // First try to find by variant name
-                        if (variantName != null && element.containsKey(variantName)) {
-                            val variantElement = element[variantName]!!
+                        // First try to find by variant name (handling <br> separators)
+                        var matchedKey: String? = null
+                        if (variantName != null) {
+                            // Try exact match first
+                            if (element.containsKey(variantName)) {
+                                matchedKey = variantName
+                            } else {
+                                // Try matching against keys with <br> separators
+                                matchedKey = element.keys.firstOrNull { key ->
+                                    splitVariantName(key).contains(variantName)
+                                }
+                            }
+                        }
+
+                        if (matchedKey != null) {
+                            val variantElement = element[matchedKey]!!
                             when (variantElement) {
                                 is JsonPrimitive -> mapOf(emptyMap<String, String>() to variantElement.int)
                                 is JsonObject -> {
