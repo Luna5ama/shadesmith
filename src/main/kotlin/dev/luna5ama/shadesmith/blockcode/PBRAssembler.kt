@@ -26,7 +26,7 @@ interface PBRAssembler {
     fun BlockScope.provide(): Sequence<Pair<BlockState, List<LUTData>>>
 }
 
-fun PBRAssembler.provide(blockName: String, property: BlockProperty) =
-    with(BlockScope(BlockState(blockName), property)) {
+fun PBRAssembler.provide(blockState: BlockState, property: BlockProperty) =
+    with(BlockScope(blockState, property)) {
         provide()
     }

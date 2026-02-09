@@ -8,7 +8,10 @@ sealed interface PBRValue<T, R> {
         override val rawData: T
             get() = value
     }
-
+    data class Bool(override val value: Boolean) : PBRValue<Boolean, UByte> {
+        override val rawData: UByte
+            get() = if (value) 1u else 0u
+    }
     data class UInt4(override val value: UByte) : Identity<UByte>
     data class UInt8(override val value: UByte) : Identity<UByte>
     data class Unorm4(override val value: Float) : PBRValue<Float, UByte> {

@@ -1,12 +1,13 @@
 package dev.luna5ama.shadesmith
 
+import dev.luna5ama.shadesmith.blockcode.generateHardcodedPBR
 import kotlin.io.path.*
 
 object Main {
     @JvmStatic
     @OptIn(ExperimentalPathApi::class)
     fun main(args: Array<String>) {
-        check(args.size == 2) { "Missing path argument" }
+        check(args.size >= 2) { "Missing path argument" }
 
         val inputPath = Path(args[0]).toAbsolutePath()
         val outputPath = Path(args[1]).toAbsolutePath()
@@ -20,21 +21,25 @@ object Main {
 
         val ioContext = IOContext(inputPath, outputPath)
         context(ioContext) {
-            val composites = readAllCompositeStyleShaders()
-            val others = readOtherShaders()
-            val inputFiles = composites + others
+            if (args.contains("--pbr")) {
+                generateHardcodedPBR()
+            } else {
+                val composites = readAllCompositeStyleShaders()
+                val others = readOtherShaders()
+                val inputFiles = composites + others
 
-            val included = resolveIncludes(inputFiles)
-            val cleaned = included.parallelStream()
-                .map { holdComments(it) }
-                .map  { it.copy(first = cleanUnused(it.first)) }
-                .map { restoreComments(it) }
-                .toList()
+                val included = resolveIncludes(inputFiles)
+                val cleaned = included.parallelStream()
+                    .map { holdComments(it) }
+                    .map  { it.copy(first = cleanUnused(it.first)) }
+                    .map { restoreComments(it) }
+                    .toList()
 
-            resolveTextures(cleaned)
+                resolveTextures(cleaned)
 
-            cleaned.forEach {
-                it.copy(path = it.path.toOutputPath()).writeOutput()
+                cleaned.forEach {
+                    it.copy(path = it.path.toOutputPath()).writeOutput()
+                }
             }
         }
     }

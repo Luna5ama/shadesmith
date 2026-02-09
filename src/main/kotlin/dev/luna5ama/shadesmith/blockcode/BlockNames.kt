@@ -1019,5 +1019,5 @@ object BlockNames {
     const val WaxedWeatheredCopperLantern = "waxed_weathered_copper_lantern"
     const val WaxedOxidizedCopperLantern = "waxed_oxidized_copper_lantern"
     const val GoldenDandelion = "golden_dandelion"
-
+    const val PitcherPlant = "pitcher_plant"
 }

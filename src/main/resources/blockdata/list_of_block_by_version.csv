@@ -168,10 +168,10 @@ Block of Emerald,emerald_block,12w22a
 Spruce Stairs,spruce_stairs,12w25a
 Birch Stairs,birch_stairs,12w25a
 Jungle Stairs,jungle_stairs,12w25a
-Oak Wood[note 2],oak_wood,12w30d
-Spruce Wood[note 2],spruce_wood,12w30d
-Birch Wood[note 2],birch_wood,12w30d
-Jungle Wood[note 2],jungle_wood,12w30d
+Oak Wood,oak_wood,12w30d
+Spruce Wood,spruce_wood,12w30d
+Birch Wood,birch_wood,12w30d
+Jungle Wood,jungle_wood,12w30d
 Beacon,beacon,12w32a
 Command Block,command_block,12w32a
 Cobblestone Wall,cobblestone_wall,12w32a
@@ -288,11 +288,11 @@ Blue Stained Glass Pane,blue_stained_glass_pane,13w41a
 Purple Stained Glass Pane,purple_stained_glass_pane,13w41a
 Magenta Stained Glass Pane,magenta_stained_glass_pane,13w41a
 Pink Stained Glass Pane,pink_stained_glass_pane,13w41a
-Acacia Wood[note 2],acacia_wood,13w43a
+Acacia Wood,acacia_wood,13w43a
 Acacia Log,acacia_log,13w43a
 Acacia Sapling,acacia_sapling,13w43a
 Acacia Leaves,acacia_leaves,13w43a
-Dark Oak Wood[note 2],dark_oak_wood,13w43a
+Dark Oak Wood,dark_oak_wood,13w43a
 Dark Oak Log,dark_oak_log,13w43a
 Dark Oak Sapling,dark_oak_sapling,13w43a
 Dark Oak Leaves,dark_oak_leaves,13w43a
@@ -1018,3 +1018,17 @@ Waxed Exposed Copper Lantern,waxed_exposed_copper_lantern,25w32a
 Waxed Weathered Copper Lantern,waxed_weathered_copper_lantern,25w32a
 Waxed Oxidized Copper Lantern,waxed_oxidized_copper_lantern,25w32a
 Golden Dandelion,golden_dandelion,26.1 Snapshot 5
+Acacia Wall Hanging Sign,acacia_wall_hanging_sign,Unknown
+Bamboo Wall Hanging Sign,bamboo_wall_sign,Unknown
+Birch Wall Hanging Sign,birch_wall_sign,Unknown
+Cherry Wall Hanging Sign,cherry_wall_sign,Unknown
+Crimson Wall Hanging Sign,crimson_wall_sign,Unknown
+Dark Oak Wall Hanging Sign,dark_oak_wall_sign,Unknown
+Jungle Wall Hanging Sign,jungle_wall_sign,Unknown
+Mangrove Wall Hanging Sign,mangrove_wall_sign,Unknown
+Oak Wall Hanging Sign,oak_wall_sign,Unknown
+Pale Oak Wall Hanging Sign,pale_oak_wall_sign,Unknown
+Spruce Wall Hanging Sign,spruce_wall_sign,Unknown
+Warped Wall Hanging Sign,warped_wall_sign,Unknown
+Cherry Sapling,cherry_sapling,Unknown
+Pumpkin,pumpkin,Unknown

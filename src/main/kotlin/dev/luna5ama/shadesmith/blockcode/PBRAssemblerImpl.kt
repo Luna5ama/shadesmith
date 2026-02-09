@@ -14,7 +14,9 @@ object PBRAssemblerImpl : PBRAssembler {
         val sss = SSS.provide()
         val emissive = Emissive.provide()
         val ior = IOR.provide()
-        val allStates = sss.keys + emissive.keys + ior.keys
+        val water = WaterFlag.provide()
+        val lava = LavaFlag.provide()
+        val allStates = sss.keys + emissive.keys + ior.keys + water.keys + lava.keys
         fun <P : PBRValue<*, *>> getData(provider: PBRProvider<P>, map: Map<BlockState, P>, state: BlockState): P {
             return map[state] ?: map[baseState] ?: provider.defaultValue
         }
@@ -22,6 +24,8 @@ object PBRAssemblerImpl : PBRAssembler {
             val sssValue = getData(SSS, sss, state)
             val emissiveValue = getData(Emissive, emissive, state)
             val iorValue = getData(IOR, ior, state)
+            val waterValue = getData(WaterFlag, water, state)
+            val lavaValue = getData(LavaFlag, lava, state)
             yield(state to buildList {
                 add(LUTData(
                     TextureFormat.R32UI,
@@ -30,6 +34,8 @@ object PBRAssemblerImpl : PBRAssembler {
                         int32Bits = int32Bits or (sssValue.rawData.toInt() and 0xF)
                         int32Bits = int32Bits or ((emissiveValue.rawData.toInt() and 0xF) shl 4)
                         int32Bits = int32Bits or ((iorValue.rawData.toInt() and 0xFF) shl 8)
+                        int32Bits = int32Bits or ((waterValue.rawData.toInt() and 0x1) shl 16)
+                        int32Bits = int32Bits or ((lavaValue.rawData.toInt() and 0x1) shl 17)
                         putInt(int32Bits)
                     }
                 ))
