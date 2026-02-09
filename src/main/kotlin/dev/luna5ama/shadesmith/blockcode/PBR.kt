@@ -36,10 +36,20 @@ fun generateHardcodedPBR() {
     // Create palette by deduplicating PBR data
     println("Creating palette...")
     val pbrDataToPalette = mutableMapOf<List<LUTData>, Int>()
-    val blockStateToMaterialId = mutableMapOf<BlockState, Int>()
-    var nextMaterialId = 0
+    val reservedMaterialIDs = listOf(
+        listOf("water", "flowing_water")
+    )
+
+    val blockStateToMaterialId = reservedMaterialIDs.asSequence()
+        .withIndex()
+        .flatMap { (index, blockNames) -> blockNames.map { BlockState(it) to (index + 1) } }
+        .toMap(mutableMapOf())
+    var nextMaterialId = reservedMaterialIDs.size
 
     for ((state, data) in blockStateToPBRData) {
+        if (state in blockStateToMaterialId) {
+            continue // Skip reserved IDs
+        }
         val materialId = pbrDataToPalette.getOrPut(data) {
             ++nextMaterialId
         }
