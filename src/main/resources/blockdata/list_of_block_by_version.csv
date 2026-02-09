@@ -1,0 +1,1020 @@
+Block,ID,Added
+Air,air,Cave game tech test
+Stone,stone,Cave game tech test
+Grass Block,grass_block,Cave game tech test
+Dirt,dirt,pre-Classic rd-20090515
+Cobblestone,cobblestone,pre-Classic rd-20090515
+Oak Planks,oak_planks,pre-Classic rd-20090515
+Oak Sapling,oak_sapling,pre-Classic rd-161348
+Bedrock,bedrock,Classic 0.0.12a
+Water,water,Classic 0.0.12a
+Lava,lava,Classic 0.0.12a
+Sand,sand,Classic 0.0.14a
+Gravel,gravel,Classic 0.0.14a
+Gold Ore,gold_ore,Classic 0.0.14a
+Iron Ore,iron_ore,Classic 0.0.14a
+Coal Ore,coal_ore,Classic 0.0.14a
+Oak Log,oak_log,Classic 0.0.14a
+Oak Leaves,oak_leaves,Classic 0.0.14a
+Sponge,sponge,Classic 0.0.19a
+Glass,glass,Classic 0.0.19a
+White Wool,white_wool,Classic 0.0.20a
+Dandelion,dandelion,Classic 0.0.20a
+Poppy,poppy,Classic 0.0.20a
+Brown Mushroom,brown_mushroom,Classic 0.0.20a
+Red Mushroom,red_mushroom,Classic 0.0.20a
+Block of Gold,gold_block,Classic 0.0.20a
+Block of Iron,iron_block,Classic 0.26 SURVIVAL TEST
+Smooth Stone Slab,smooth_stone_slab,Classic 0.26 SURVIVAL TEST
+Bricks,bricks,Classic 0.26 SURVIVAL TEST
+TNT,tnt,Classic 0.26 SURVIVAL TEST
+Bookshelf,bookshelf,Classic 0.26 SURVIVAL TEST
+Mossy Cobblestone,mossy_cobblestone,Classic 0.26 SURVIVAL TEST
+Obsidian,obsidian,Classic 0.28
+Torch,torch,Indev 0.31 20091223-1457
+Fire,fire,Indev 0.31 20100109-1939
+Chest,chest,Indev 0.31 20100124-2119
+Diamond Ore,diamond_ore,Indev 0.31 20100128-2200
+Block of Diamond,diamond_block,Indev 0.31 20100128-2200
+Crafting Table,crafting_table,Indev 0.31 20100129-2332
+Wheat Crops,wheat,Indev 20100206-2034
+Farmland,farmland,Indev 20100206-2034
+Furnace,furnace,Indev 20100219
+Oak Sign,oak_sign,Infdev 20100607
+Oak Door,oak_door,Infdev 20100607
+Ladder,ladder,Infdev 20100607
+Rail,rail,Infdev 20100618
+Monster Spawner,spawner,Infdev 20100625-1917
+Oak Stairs,oak_stairs,Infdev 20100629
+Cobblestone Stairs,cobblestone_stairs,Infdev 20100629
+Redstone Wire,redstone_wire,Alpha v1.0.1
+Lever,lever,Alpha v1.0.1
+Stone Pressure Plate,stone_pressure_plate,Alpha v1.0.1
+Iron Door,iron_door,Alpha v1.0.1
+Oak Pressure Plate,oak_pressure_plate,Alpha v1.0.1
+Redstone Ore,redstone_ore,Alpha v1.0.1
+Redstone Torch,redstone_torch,Alpha v1.0.1
+Stone Button,stone_button,Alpha v1.0.1
+Snow,snow,Alpha v1.0.4
+Ice,ice,Alpha v1.0.4
+Snow Block,snow_block,Alpha v1.0.5
+Cactus,cactus,Alpha v1.0.6
+Clay,clay,Alpha v1.0.11
+Sugar Cane,sugar_cane,Alpha v1.0.11
+Jukebox,jukebox,Alpha v1.0.14
+Oak Fence,oak_fence,Alpha v1.0.17
+Carved Pumpkin,carved_pumpkin,Alpha v1.2.0
+Netherrack,netherrack,Alpha v1.2.0
+Soul Sand,soul_sand,Alpha v1.2.0
+Glowstone,glowstone,Alpha v1.2.0
+Nether Portal,nether_portal,Alpha v1.2.0
+Jack o'Lantern,jack_o_lantern,Alpha v1.2.0
+Spruce Log,spruce_log,Beta 1.2
+Birch Log,birch_log,Beta 1.2
+Spruce Leaves,spruce_leaves,Beta 1.2
+Birch Leaves,birch_leaves,Beta 1.2
+Lapis Lazuli Ore,lapis_ore,Beta 1.2
+Block of Lapis Lazuli,lapis_block,Beta 1.2
+Dispenser,dispenser,Beta 1.2
+Sandstone,sandstone,Beta 1.2
+Note Block,note_block,Beta 1.2
+Orange Wool,orange_wool,Beta 1.2
+Magenta Wool,magenta_wool,Beta 1.2
+Light Blue Wool,light_blue_wool,Beta 1.2
+Yellow Wool,yellow_wool,Beta 1.2
+Lime Wool,lime_wool,Beta 1.2
+Pink Wool,pink_wool,Beta 1.2
+Gray Wool,gray_wool,Beta 1.2
+Light Gray Wool,light_gray_wool,Beta 1.2
+Cyan Wool,cyan_wool,Beta 1.2
+Purple Wool,purple_wool,Beta 1.2
+Blue Wool,blue_wool,Beta 1.2
+Brown Wool,brown_wool,Beta 1.2
+Green Wool,green_wool,Beta 1.2
+Red Wool,red_wool,Beta 1.2
+Black Wool,black_wool,Beta 1.2
+Cake,cake,Beta 1.2
+Red Bed,red_bed,Beta 1.3
+Sandstone Slab,sandstone_slab,Beta 1.3
+Petrified Oak Slab,petrified_oak_slab,Beta 1.3
+Cobblestone Slab,cobblestone_slab,Beta 1.3
+Redstone Repeater,repeater,Beta 1.3
+Spruce Sapling,spruce_sapling,Beta 1.5
+Birch Sapling,birch_sapling,Beta 1.5
+Powered Rail,powered_rail,Beta 1.5
+Detector Rail,detector_rail,Beta 1.5
+Cobweb,cobweb,Beta 1.5
+Short Grass,short_grass,Beta 1.6 Test Build 3
+Fern,fern,Beta 1.6 Test Build 3
+Dead Bush,dead_bush,Beta 1.6 Test Build 3
+Oak Trapdoor,oak_trapdoor,Beta 1.6 Test Build 3
+Sticky Piston,sticky_piston,Beta 1.7
+Piston,piston,Beta 1.7
+Brick Slab,brick_slab,Beta 1.8 Pre-release
+Stone Brick Slab,stone_brick_slab,Beta 1.8 Pre-release
+Infested Stone,infested_stone,Beta 1.8 Pre-release
+Infested Cobblestone,infested_cobblestone,Beta 1.8 Pre-release
+Infested Stone Bricks,infested_stone_bricks,Beta 1.8 Pre-release
+Stone Bricks,stone_bricks,Beta 1.8 Pre-release
+Mossy Stone Bricks,mossy_stone_bricks,Beta 1.8 Pre-release
+Cracked Stone Bricks,cracked_stone_bricks,Beta 1.8 Pre-release
+Brown Mushroom Block,brown_mushroom_block,Beta 1.8 Pre-release
+Mushroom Stem,mushroom_stem,Beta 1.8 Pre-release
+Red Mushroom Block,red_mushroom_block,Beta 1.8 Pre-release
+Iron Bars,iron_bars,Beta 1.8 Pre-release
+Glass Pane,glass_pane,Beta 1.8 Pre-release
+Melon,melon,Beta 1.8 Pre-release
+Pumpkin Stem,pumpkin_stem,Beta 1.8 Pre-release
+Melon Stem,melon_stem,Beta 1.8 Pre-release
+Vines,vine,Beta 1.8 Pre-release
+Oak Fence Gate,oak_fence_gate,Beta 1.8 Pre-release
+Brick Stairs,brick_stairs,Beta 1.8 Pre-release
+Stone Brick Stairs,stone_brick_stairs,Beta 1.8 Pre-release
+Nether Brick Slab,nether_brick_slab,Beta 1.9 Prerelease
+Mycelium,mycelium,Beta 1.9 Prerelease
+Lily Pad,lily_pad,Beta 1.9 Prerelease
+Nether Bricks,nether_bricks,Beta 1.9 Prerelease
+Nether Brick Fence,nether_brick_fence,Beta 1.9 Prerelease
+Nether Brick Stairs,nether_brick_stairs,Beta 1.9 Prerelease
+Nether Wart,nether_wart,Beta 1.9 Prerelease
+Enchanting Table,enchanting_table,Beta 1.9 Prerelease 3
+Brewing Stand,brewing_stand,Beta 1.9 Prerelease 3
+Cauldron,cauldron,Beta 1.9 Prerelease 3
+End Portal,end_portal,Beta 1.9 Prerelease 3
+End Portal Frame,end_portal_frame,Beta 1.9 Prerelease 3
+End Stone,end_stone,Beta 1.9 Prerelease 4
+Dragon Egg,dragon_egg,Beta 1.9 Prerelease 6
+Jungle Log,jungle_log,12w03a
+Jungle Leaves,jungle_leaves,12w03a
+Jungle Sapling,jungle_sapling,12w03a
+Redstone Lamp,redstone_lamp,12w07a
+Chiseled Stone Bricks,chiseled_stone_bricks,1.2
+Spruce Planks,spruce_planks,1.2.4
+Birch Planks,birch_planks,1.2.4
+Jungle Planks,jungle_planks,1.2.4
+Chiseled Sandstone,chiseled_sandstone,1.2.4
+Cut Sandstone,cut_sandstone,1.2.4
+Oak Slab,oak_slab,12w17a
+Spruce Slab,spruce_slab,12w17a
+Birch Slab,birch_slab,12w17a
+Jungle Slab,jungle_slab,12w17a
+Cocoa,cocoa,12w19a
+Sandstone Stairs,sandstone_stairs,12w21a
+Emerald Ore,emerald_ore,12w21a
+Ender Chest,ender_chest,12w21a
+Tripwire Hook,tripwire_hook,12w22a
+Tripwire,tripwire,12w22a
+Block of Emerald,emerald_block,12w22a
+Spruce Stairs,spruce_stairs,12w25a
+Birch Stairs,birch_stairs,12w25a
+Jungle Stairs,jungle_stairs,12w25a
+Oak Wood[note 2],oak_wood,12w30d
+Spruce Wood[note 2],spruce_wood,12w30d
+Birch Wood[note 2],birch_wood,12w30d
+Jungle Wood[note 2],jungle_wood,12w30d
+Beacon,beacon,12w32a
+Command Block,command_block,12w32a
+Cobblestone Wall,cobblestone_wall,12w32a
+Flower Pot,flower_pot,12w34a
+Mossy Cobblestone Wall,mossy_cobblestone_wall,12w34a
+Oak Button,oak_button,12w34a
+Skeleton Skull,skeleton_skull,12w36a
+Wither Skeleton Skull,wither_skeleton_skull,12w36a
+Zombie Head,zombie_head,12w36a
+Creeper Head,creeper_head,12w36a
+Player Head,player_head,12w36a
+Anvil,anvil,12w41a
+Nether Brick Slab,nether_brick_slab,12w49a
+Block of Redstone,redstone_block,13w01a
+Daylight Detector,daylight_detector,13w01a
+Hopper,hopper,13w01a
+Nether Quartz Ore,nether_quartz_ore,13w01a
+Redstone Comparator,comparator,13w01a
+Trapped Chest,trapped_chest,13w01a
+Light Weighted Pressure Plate,light_weighted_pressure_plate,13w01a
+Heavy Weighted Pressure Plate,heavy_weighted_pressure_plate,13w01a
+Activator Rail,activator_rail,13w02a
+Block of Quartz,quartz_block,13w02a
+Chiseled Quartz Block,chiseled_quartz_block,13w02a
+Quartz Pillar,quartz_pillar,13w02a
+Quartz Stairs,quartz_stairs,13w02a
+Quartz Slab,quartz_slab,13w02a
+Dropper,dropper,13w03a
+White Carpet,white_carpet,13w16a
+Light Gray Carpet,light_gray_carpet,13w16a
+Gray Carpet,gray_carpet,13w16a
+Black Carpet,black_carpet,13w16a
+Brown Carpet,brown_carpet,13w16a
+Red Carpet,red_carpet,13w16a
+Orange Carpet,orange_carpet,13w16a
+Yellow Carpet,yellow_carpet,13w16a
+Lime Carpet,lime_carpet,13w16a
+Green Carpet,green_carpet,13w16a
+Cyan Carpet,cyan_carpet,13w16a
+Light Blue Carpet,light_blue_carpet,13w16a
+Blue Carpet,blue_carpet,13w16a
+Purple Carpet,purple_carpet,13w16a
+Magenta Carpet,magenta_carpet,13w16a
+Pink Carpet,pink_carpet,13w16a
+Hay Bale,hay_block,13w16a
+Terracotta,terracotta,13w17a
+Block of Coal,coal_block,13w18a
+White Terracotta,white_terracotta,13w19a
+Light Gray Terracotta,light_gray_terracotta,13w19a
+Gray Terracotta,gray_terracotta,13w19a
+Black Terracotta,black_terracotta,13w19a
+Brown Terracotta,brown_terracotta,13w19a
+Red Terracotta,red_terracotta,13w19a
+Orange Terracotta,orange_terracotta,13w19a
+Yellow Terracotta,yellow_terracotta,13w19a
+Lime Terracotta,lime_terracotta,13w19a
+Green Terracotta,green_terracotta,13w19a
+Cyan Terracotta,cyan_terracotta,13w19a
+Light Blue Terracotta,light_blue_terracotta,13w19a
+Blue Terracotta,blue_terracotta,13w19a
+Purple Terracotta,purple_terracotta,13w19a
+Magenta Terracotta,magenta_terracotta,13w19a
+Pink Terracotta,pink_terracotta,13w19a
+Large Fern,large_fern,13w36a
+Allium,allium,13w36a
+Azure Bluet,azure_bluet,13w36a
+Blue Orchid,blue_orchid,13w36a
+Lilac,lilac,13w36a
+Oxeye Daisy,oxeye_daisy,13w36a
+Peony,peony,13w36a
+Rose Bush,rose_bush,13w36a
+Sunflower,sunflower,13w36a
+Red Tulip,red_tulip,13w36a
+Orange Tulip,orange_tulip,13w36a
+White Tulip,white_tulip,13w36a
+Pink Tulip,pink_tulip,13w36a
+Tall Grass,tall_grass,13w36a
+Coarse Dirt,coarse_dirt,13w36a
+Infested Mossy Stone Bricks,infested_mossy_stone_bricks,13w36a
+Infested Cracked Stone Bricks,infested_cracked_stone_bricks,13w36a
+Infested Chiseled Stone Bricks,infested_chiseled_stone_bricks,13w36a
+Packed Ice,packed_ice,13w36a
+Podzol,podzol,13w36a
+Red Sand,red_sand,13w39a
+White Stained Glass,white_stained_glass,13w41a
+Light Gray Stained Glass,light_gray_stained_glass,13w41a
+Gray Stained Glass,gray_stained_glass,13w41a
+Black Stained Glass,black_stained_glass,13w41a
+Brown Stained Glass,brown_stained_glass,13w41a
+Red Stained Glass,red_stained_glass,13w41a
+Orange Stained Glass,orange_stained_glass,13w41a
+Yellow Stained Glass,yellow_stained_glass,13w41a
+Lime Stained Glass,lime_stained_glass,13w41a
+Green Stained Glass,green_stained_glass,13w41a
+Cyan Stained Glass,cyan_stained_glass,13w41a
+Light Blue Stained Glass,light_blue_stained_glass,13w41a
+Blue Stained Glass,blue_stained_glass,13w41a
+Purple Stained Glass,purple_stained_glass,13w41a
+Magenta Stained Glass,magenta_stained_glass,13w41a
+Pink Stained Glass,pink_stained_glass,13w41a
+White Stained Glass Pane,white_stained_glass_pane,13w41a
+Light Gray Stained Glass Pane,light_gray_stained_glass_pane,13w41a
+Gray Stained Glass Pane,gray_stained_glass_pane,13w41a
+Black Stained Glass Pane,black_stained_glass_pane,13w41a
+Brown Stained Glass Pane,brown_stained_glass_pane,13w41a
+Red Stained Glass Pane,red_stained_glass_pane,13w41a
+Orange Stained Glass Pane,orange_stained_glass_pane,13w41a
+Yellow Stained Glass Pane,yellow_stained_glass_pane,13w41a
+Lime Stained Glass Pane,lime_stained_glass_pane,13w41a
+Green Stained Glass Pane,green_stained_glass_pane,13w41a
+Cyan Stained Glass Pane,cyan_stained_glass_pane,13w41a
+Light Blue Stained Glass Pane,light_blue_stained_glass_pane,13w41a
+Blue Stained Glass Pane,blue_stained_glass_pane,13w41a
+Purple Stained Glass Pane,purple_stained_glass_pane,13w41a
+Magenta Stained Glass Pane,magenta_stained_glass_pane,13w41a
+Pink Stained Glass Pane,pink_stained_glass_pane,13w41a
+Acacia Wood[note 2],acacia_wood,13w43a
+Acacia Log,acacia_log,13w43a
+Acacia Sapling,acacia_sapling,13w43a
+Acacia Leaves,acacia_leaves,13w43a
+Dark Oak Wood[note 2],dark_oak_wood,13w43a
+Dark Oak Log,dark_oak_log,13w43a
+Dark Oak Sapling,dark_oak_sapling,13w43a
+Dark Oak Leaves,dark_oak_leaves,13w43a
+Acacia Planks,acacia_planks,1.7
+Acacia Slab,acacia_slab,1.7
+Acacia Stairs,acacia_stairs,1.7
+Dark Oak Planks,dark_oak_planks,1.7
+Dark Oak Slab,dark_oak_slab,1.7
+Dark Oak Stairs,dark_oak_stairs,1.7
+Granite,granite,14w02a
+Polished Granite,polished_granite,14w02a
+Diorite,diorite,14w02a
+Polished Diorite,polished_diorite,14w02a
+Andesite,andesite,14w02a
+Polished Andesite,polished_andesite,14w02a
+Slime Block,slime_block,14w02a
+Barrier,barrier,14w05a
+Iron Trapdoor,iron_trapdoor,14w07a
+Prismarine,prismarine,14w25a
+Prismarine Bricks,prismarine_bricks,14w25a
+Dark Prismarine,dark_prismarine,14w25a
+Sea Lantern,sea_lantern,14w25a
+Wet Sponge,wet_sponge,14w25a
+White Banner,white_banner,14w30a
+Light Gray Banner,light_gray_banner,14w30a
+Gray Banner,gray_banner,14w30a
+Black Banner,black_banner,14w30a
+Brown Banner,brown_banner,14w30a
+Red Banner,red_banner,14w30a
+Orange Banner,orange_banner,14w30a
+Yellow Banner,yellow_banner,14w30a
+Lime Banner,lime_banner,14w30a
+Green Banner,green_banner,14w30a
+Cyan Banner,cyan_banner,14w30a
+Light Blue Banner,light_blue_banner,14w30a
+Blue Banner,blue_banner,14w30a
+Purple Banner,purple_banner,14w30a
+Magenta Banner,magenta_banner,14w30a
+Pink Banner,pink_banner,14w30a
+Red Sandstone,red_sandstone,14w32a
+Cut Red Sandstone,cut_red_sandstone,14w32a
+Chiseled Red Sandstone,chiseled_red_sandstone,14w32a
+Smooth Red Sandstone,smooth_red_sandstone,14w32a
+Red Sandstone Slab,red_sandstone_slab,14w32a
+Red Sandstone Stairs,red_sandstone_stairs,14w32a
+Spruce Fence,spruce_fence,14w32b
+Birch Fence,birch_fence,14w32b
+Jungle Fence,jungle_fence,14w32b
+Acacia Fence,acacia_fence,14w32b
+Dark Oak Fence,dark_oak_fence,14w32b
+Spruce Fence Gate,spruce_fence_gate,14w32b
+Birch Fence Gate,birch_fence_gate,14w32b
+Jungle Fence Gate,jungle_fence_gate,14w32b
+Acacia Fence Gate,acacia_fence_gate,14w32b
+Dark Oak Fence Gate,dark_oak_fence_gate,14w32b
+Spruce Door,spruce_door,14w32d
+Birch Door,birch_door,14w32d
+Jungle Door,jungle_door,14w32d
+Acacia Door,acacia_door,14w32d
+Dark Oak Door,dark_oak_door,14w32d
+Dirt Path,dirt_path,15w31a
+Structure Block,structure_block,15w31a
+Dragon Head,dragon_head,15w31a
+End Gateway,end_gateway,15w31a
+End Rod,end_rod,15w31a
+End Stone Bricks,end_stone_bricks,15w31a
+Purpur Block,purpur_block,15w31a
+Purpur Pillar,purpur_pillar,15w31a
+Purpur Slab,purpur_slab,15w31a
+Purpur Stairs,purpur_stairs,15w31a
+Chorus Plant,chorus_plant,15w31a
+Chorus Flower,chorus_flower,15w31a
+Chain Command Block,chain_command_block,15w34a
+Repeating Command Block,repeating_commannd_block,15w34a
+Frosted Ice,frosted_ice,15w42a
+Bone Block,bone_block,16w20a
+Magma Block,magma_block,16w20a
+Nether Wart Block,nether_wart_block,16w20a
+Red Nether Bricks,red_nether_bricks,16w20a
+Structure Void,structure_void,16w20a
+Observer,observer,16w39a
+White Shulker Box,white_shulker_box,16w39a
+Light Gray Shulker Box,light_gray_shulker_box,16w39a
+Gray Shulker Box,gray_shulker_box,16w39a
+Black Shulker Box,black_shulker_box,16w39a
+Brown Shulker Box,brown_shulker_box,16w39a
+Red Shulker Box,red_shulker_box,16w39a
+Orange Shulker Box,orange_shulker_box,16w39a
+Yellow Shulker Box,yellow_shulker_box,16w39a
+Lime Shulker Box,lime_shulker_box,16w39a
+Green Shulker Box,green_shulker_box,16w39a
+Cyan Shulker Box,cyan_shulker_box,16w39a
+Light Blue Shulker Box,light_blue_shulker_box,16w39a
+Blue Shulker Box,blue_shulker_box,16w39a
+Purple Shulker Box,purple_shulker_box,16w39a
+Magenta Shulker Box,magenta_shulker_box,16w39a
+Pink Shulker Box,pink_shulker_box,16w39a
+White Concrete,white_concrete,17w06a
+Light Gray Concrete,light_gray_concrete,17w06a
+Gray Concrete,gray_concrete,17w06a
+Black Concrete,black_concrete,17w06a
+Brown Concrete,brown_concrete,17w06a
+Red Concrete,red_concrete,17w06a
+Orange Concrete,orange_concrete,17w06a
+Yellow Concrete,yellow_concrete,17w06a
+Lime Concrete,lime_concrete,17w06a
+Green Concrete,green_concrete,17w06a
+Cyan Concrete,cyan_concrete,17w06a
+Light Blue Concrete,light_blue_concrete,17w06a
+Blue Concrete,blue_concrete,17w06a
+Purple Concrete,purple_concrete,17w06a
+Magenta Concrete,magenta_concrete,17w06a
+Pink Concrete,pink_concrete,17w06a
+White Concrete Powder,white_concrete_powder,17w06a
+Light Gray Concrete Powder,light_gray_concrete_powder,17w06a
+Gray Concrete Powder,gray_concrete_powder,17w06a
+Black Concrete Powder,black_concrete_powder,17w06a
+Brown Concrete Powder,brown_concrete_powder,17w06a
+Red Concrete Powder,red_concrete_powder,17w06a
+Orange Concrete Powder,orange_concrete_powder,17w06a
+Yellow Concrete Powder,yellow_concrete_powder,17w06a
+Lime Concrete Powder,lime_concrete_powder,17w06a
+Green Concrete Powder,green_concrete_powder,17w06a
+Cyan Concrete Powder,cyan_concrete_powder,17w06a
+Light Blue Concrete Powder,light_blue_concrete_powder,17w06a
+Blue Concrete Powder,blue_concrete_powder,17w06a
+Purple Concrete Powder,purple_concrete_powder,17w06a
+Magenta Concrete Powder,magenta_concrete_powder,17w06a
+Pink Concrete Powder,pink_concrete_powder,17w06a
+White Glazed Terracotta,white_glazed_terracotta,17w06a
+Light Gray Glazed Terracotta,light_gray_glazed_terracotta,17w06a
+Gray Glazed Terracotta,gray_glazed_terracotta,17w06a
+Black Glazed Terracotta,black_glazed_terracotta,17w06a
+Brown Glazed Terracotta,brown_glazed_terracotta,17w06a
+Red Glazed Terracotta,red_glazed_terracotta,17w06a
+Orange Glazed Terracotta,orange_glazed_terracotta,17w06a
+Yellow Glazed Terracotta,yellow_glazed_terracotta,17w06a
+Lime Glazed Terracotta,lime_glazed_terracotta,17w06a
+Green Glazed Terracotta,green_glazed_terracotta,17w06a
+Cyan Glazed Terracotta,cyan_glazed_terracotta,17w06a
+Light Blue Glazed Terracotta,light_blue_glazed_terracotta,17w06a
+Blue Glazed Terracotta,blue_glazed_terracotta,17w06a
+Purple Glazed Terracotta,purple_glazed_terracotta,17w06a
+Magenta Glazed Terracotta,magenta_glazed_terracotta,17w06a
+Pink Glazed Terracotta,pink_glazed_terracotta,17w06a
+White Bed,white_bed,17w15a
+Light Gray Bed,light_gray_bed,17w15a
+Gray Bed,gray_bed,17w15a
+Black Bed,black_bed,17w15a
+Brown Bed,brown_bed,17w15a
+Orange Bed,orange_bed,17w15a
+Yellow Bed,yellow_bed,17w15a
+Lime Bed,lime_bed,17w15a
+Green Bed,green_bed,17w15a
+Cyan Bed,cyan_bed,17w15a
+Light Blue Bed,light_blue_bed,17w15a
+Blue Bed,blue_bed,17w15a
+Purple Bed,purple_bed,17w15a
+Magenta Bed,magenta_bed,17w15a
+Pink Bed,pink_bed,17w15a
+Acacia Button,acacia_button,17w47a
+Acacia Pressure Plate,acacia_pressure_plate,17w47a
+Acacia Trapdoor,acacia_trapdoor,17w47a
+Birch Button,birch_button,17w47a
+Birch Pressure Plate,birch_pressure_plate,17w47a
+Birch Trapdoor,birch_trapdoor,17w47a
+Dark Oak Button,dark_oak_button,17w47a
+Dark Oak Pressure Plate,dark_oak_pressure_plate,17w47a
+Dark Oak Trapdoor,dark_oak_trapdoor,17w47a
+Jungle Button,jungle_button,17w47a
+Jungle Pressure Plate,jungle_pressure_plate,17w47a
+Jungle Trapdoor,jungle_trapdoor,17w47a
+Spruce Button,spruce_button,17w47a
+Spruce Pressure Plate,spruce_pressure_plate,17w47a
+Spruce Trapdoor,spruce_trapdoor,17w47a
+Stripped Acacia Log,stripped_acacia_log,18w07a
+Stripped Birch Log,stripped_birch_log,18w07a
+Stripped Dark Oak Log,stripped_dark_oak_log,18w07a
+Stripped Jungle Log,stripped_jungle_log,18w07a
+Stripped Oak Log,stripped_oak_log,18w07a
+Stripped Spruce Log,stripped_spruce_log,18w07a
+Bubble Column,bubble_column,18w07a
+Kelp,kelp,18w07a
+Seagrass,seagrass,18w07a
+Dried Kelp Block,dried_kelp_block,18w07a
+Prismarine Slab,prismarine_slab,18w07a
+Prismarine Stairs,prismarine_stairs,18w07a
+Prismarine Brick Slab,prismarine_brick_slab,18w07a
+Prismarine Brick Stairs,prismarine_brick_stairs,18w07a
+Dark Prismarine Slab,dark_prismarine_slab,18w07a
+Dark Prismarine Stairs,dark_prismarine_stairs,18w07a
+Turtle Egg,turtle_egg,18w07a
+Brain Coral Block,brain_coral_block,18w09a
+Bubble Coral Block,bubble_coral_block,18w09a
+Fire Coral Block,fire_coral_block,18w09a
+Horn Coral Block,horn_coral_block,18w09a
+Tube Coral Block,tube_coral_block,18w09a
+Tube Coral,tube_coral,18w10a
+Fire Coral,fire_coral,18w10a
+Brain Coral,brain_coral,18w10a
+Bubble Coral,bubble_coral,18w10a
+Horn Coral,horn_coral,18w10a
+Dead Tube Coral Block,dead_tube_coral_block,18w10b
+Dead Brain Coral Block,dead_brain_coral_block,18w10b
+Dead Bubble Coral Block,dead_bubble_coral_block,18w10b
+Dead Fire Coral Block,dead_fire_coral_block,18w10b
+Dead Horn Coral Block,dead_horn_coral_block,18w10b
+Shulker Box,shulker_box,18w10b
+Tube Coral Fan,tube_coral_fan,18w11a
+Fire Coral Fan,fire_coral_fan,18w11a
+Brain Coral Fan,brain_coral_fan,18w11a
+Bubble Coral Fan,bubble_coral_fan,18w11a
+Horn Coral Fan,horn_coral_fan,18w11a
+Sea Pickle,sea_pickle,18w14b
+Blue Ice,blue_ice,18w15a
+Conduit,conduit,18w15a
+Stripped Oak Wood,stripped_oak_wood,1.13-pre2
+Stripped Birch Wood,stripped_birch_wood,1.13-pre2
+Stripped Spruce Wood,stripped_spruce_wood,1.13-pre2
+Stripped Jungle Wood,stripped_jungle_wood,1.13-pre2
+Stripped Acacia Wood,stripped_acacia_wood,1.13-pre2
+Stripped Dark Oak Wood,stripped_dark_oak_wood,1.13-pre2
+Dead Tube Coral Fan,dead_tube_coral_fan,1.13-pre8
+Dead Brain Coral Fan,dead_brain_coral_fan,1.13-pre8
+Dead Bubble Coral Fan,dead_bubble_coral_fan,1.13-pre8
+Dead Fire Coral Fan,dead_fire_coral_fan,1.13-pre8
+Dead Horn Coral Fan,dead_horn_coral_fan,1.13-pre8
+Dead Tube Coral,dead_tube_coral,18w32a
+Dead Brain Coral,dead_brain_coral,18w32a
+Dead Bubble Coral,dead_bubble_coral,18w32a
+Dead Fire Coral,dead_fire_coral,18w32a
+Dead Horn Coral,dead_horn_coral,18w32a
+Bamboo,bamboo,18w43a
+Cornflower,cornflower,18w43a
+Wither Rose,wither_rose,18w43a
+Lily of the Valley,lily_of_the_valley,18w43a
+Loom,loom,18w43a
+Birch Sign,birch_sign,18w43a
+Spruce Sign,spruce_sign,18w43a
+Jungle Sign,jungle_sign,18w43a
+Acacia Sign,acacia_sign,18w43a
+Dark Oak Sign,dark_oak_sign,18w43a
+Stone Slab,stone_slab,18w43a
+Andesite Slab,andesite_slab,18w43a
+Polished Andesite Slab,polished_andesite_slab,18w43a
+Diorite Slab,diorite_slab,18w43a
+Polished Diorite Slab,polished_Diorite_slab,18w43a
+Granite Slab,granite_slab,18w43a
+Polished Granite Slab,polished_granite_slab,18w43a
+Mossy Stone Brick Slab,mossy_stone_brick_slab,18w43a
+Mossy Cobblestone Slab,mossy_cobblestone_slab,18w43a
+Smooth Sandstone Slab,smooth_sandstone_slab,18w43a
+Smooth Red Sandstone Slab,smooth_red_sandstone_slab,18w43a
+Smooth Quartz Slab,smooth_quartz_slab,18w43a
+Red Nether Brick Slab,red_nether_brick_slab,18w43a
+End Stone Brick Slab,end_stone_brick_slab,18w43a
+Stone Stairs,stone_stairs,18w43a
+Mossy Cobblestone Stairs,mossy_cobblestone_stairs,18w43a
+Mossy Stone Brick Stairs,mossy_stone_brick_stairs,18w43a
+Granite Stairs,granite_stairs,18w43a
+Polished Granite Stairs,polished_granite_stairs,18w43a
+Diorite Stairs,diorite_stairs,18w43a
+Polished Diorite Stairs,polished_diorite_stairs,18w43a
+Andesite Stairs,andesite_stairs,18w43a
+Polished Andesite Stairs,polished_andesite_stairs,18w43a
+Smooth Sandstone Stairs,smooth_sandstone_stairs,18w43a
+Smooth Red Sandstone Stairs,smooth_red_sandstone_stairs,18w43a
+Red Nether Brick Stairs,red_nether_brick_stairs,18w43a
+End Stone Brick Stairs,end_stone_brick_stairs,18w43a
+Smooth Quartz Stairs,smooth_quartz_stairs,18w43a
+Brick Wall,brick_wall,18w43a
+Andesite Wall,andesite_wall,18w43a
+Diorite Wall,diorite_wall,18w43a
+Granite Wall,granite_wall,18w43a
+Prismarine Wall,prismarine_wall,18w43a
+Stone Brick Wall,stone_brick_wall,18w43a
+Mossy Stone Brick Wall,mossy_stone_brick_wall,18w43a
+Sandstone Wall,sandstone_wall,18w43a
+Red Sandstone Wall,red_sandstone_wall,18w43a
+Nether Brick Wall,nether_brick_wall,18w43a
+Red Nether Brick Wall,red_nether_brick_wall,18w43a
+End Stone Brick Wall,end_stone_brick_wall,18w43a
+Brick Wall,brick_wall,18w43a
+Barrel,barrel,18w44a
+Blast Furnace,blast_furnace,18w44a
+Bell,bell,18w44a
+Smoker,smoker,18w44a
+Cartography Table,cartography_table,18w44a
+Fletching Table,fletching_table,18w44a
+Smithing Table,smithing_table,18w44a
+Stonecutter,stonecutter,18w44a
+Grindstone,grindstone,18w44a
+Lectern,lectern,18w44a
+Scaffolding,scaffolding,18w45a
+Lantern,lantern,18w46a
+Jigsaw Block,jigsaw,18w46a
+Sweet Berry Bush,sweet_berry_bush,18w49a
+Campfire,campfire,19w02a
+Composter,composter,19w03a
+Cut Sandstone Slab,cut_sandstone_slab,19w12a
+Cut Red Sandstone Slab,cut_red_sandstone_slab,19w12a
+Bee Nest,bee_nest,19w34a
+Beehive,beehive,19w34a
+Honey Block,honey_block,19w41a
+Honeycomb Block,honeycomb_block,19w41a
+Ancient Debris,ancient_debris,20w06a
+Basalt,basalt,20w06a
+Block of Netherite,netherite_block,20w06a
+Crimson Fungus,crimson_fungus,20w06a
+Warped Fungus,warped_fungus,20w06a
+Crimson Nylium,crimson_nylium,20w06a
+Warped Nylium,warped_nylium,20w06a
+Crimson Stem,crimson_stem,20w06a
+Warped Stem,warped_stem,20w06a
+Stripped Crimson Stem,stripped_crimson_stem,20w06a
+Stripped Warped Stem,stripped_warped_stem,20w06a
+Crimson Planks,crimson_planks,20w06a
+Warped Planks,warped_planks,20w06a
+Crimson Slab,crimson_slab,20w06a
+Warped Slab,warped_slab,20w06a
+Crimson Stairs,crimson_stairs,20w06a
+Warped Stairs,warped_stairs,20w06a
+Crimson Fence,crimson_fence,20w06a
+Warped Fence,warped_fence,20w06a
+Crimson Fence Gate,crimson_fence_gate,20w06a
+Warped Fence Gate,warped_fence_gate,20w06a
+Crimson Pressure Plate,crimson_pressure_plate,20w06a
+Warped Pressure Plate,warped_pressure_plate,20w06a
+Crimson Button,crimson_button,20w06a
+Warped Button,warped_button,20w06a
+Crimson Door,crimson_door,20w06a
+Warped Door,warped_door,20w06a
+Crimson Trapdoor,crimson_trapdoor,20w06a
+Warped Trapdoor,warped_trapdoor,20w06a
+Crimson Sign,crimson_sign,20w06a
+Warped Sign,warped_sign,20w06a
+Crimson Roots,crimson_roots,20w06a
+Warped Roots,warped_roots,20w06a
+Nether Sprouts,nether_sprouts,20w06a
+Shroomlight,shroomlight,20w06a
+Soul Fire,soul fire,20w06a
+Soul Torch,soul_torch,20w06a
+Soul Lantern,soul_lantern,20w06a
+Soul Soil,soul_soil,20w06a
+Warped Wart Block,warped_wart_block,20w06a
+Weeping Vines,weeping_vines,20w06a
+Crying Obsidian,crying_obsidian,20w09a
+Target,target,20w09a
+Crimson Hyphae,crimson_hyphae,20w10a
+Warped Hyphae,warped_hyphae,20w10a
+Stripped Crimson Hyphae,stripped_crimson_hyphae,20w10a
+Stripped Warped Hyphae,stripped_warped_hyphae,20w10a
+Nether Gold Ore,nether_gold_ore,20w11a
+Twisting Vines,twisting_vines,20w11a
+Polished Basalt,polished_basalt,20w12a
+Respawn Anchor,respawn_anchor,20w12a
+Lodestone,lodestone,20w13a
+Chiseled Nether Bricks,chiseled_nether_bricks,20w15a
+Cracked Nether Bricks,cracked_nether_bricks,20w15a
+Blackstone,blackstone,20w15a
+Blackstone Slab,blackstone_slab,20w15a
+Blackstone Stairs,blackstone_stairs,20w15a
+Blackstone Wall,blackstone_wall,20w15a
+Polished Blackstone,polished_blackstone,20w15a
+Polished Blackstone Slab,polished_blackstone_slab,20w15a
+Polished Blackstone Stairs,polished_blackstone_stairs,20w15a
+Polished Blackstone Wall,polished_blackstone_wall,20w15a
+Polished Blackstone Button,polished_blackstone_button,20w15a
+Polished Blackstone Pressure Plate,polished_blackstone_pressure_plate,20w15a
+Chiseled Polished Blackstone,chiseled_polished_blackstone,20w15a
+Polished Blackstone Bricks,polished_blackstone_bricks,20w15a
+Polished Blackstone Brick Slab,polished_blackstone_brick_slab,20w15a
+Polished Blackstone Brick Stairs,polished_blackstone_brick_stairs,20w15a
+Polished Blackstone Brick Wall,polished_blackstone_brick_wall,20w15a
+Cracked Polished Blackstone Bricks,cracked_polished_blackstone_bricks,20w15a
+Gilded Blackstone,gilded_blackstone,20w15a
+Quartz Bricks,quartz_bricks,20w15a
+Soul Campfire,soul_campfire,20w15a
+Chain,chain,20w16a
+Small Amethyst Bud,small_amethyst_bud,20w45a
+Medium Amethyst Bud,medium_amethyst_bud,20w45a
+Large Amethyst Bud,large_amethyst_bud,20w45a
+Amethyst Cluster,amethyst_cluster,20w45a
+Block of Amethyst,amethyst_block,20w45a
+Budding Amethyst,budding_amethyst,20w45a
+Tinted Glass,tinted_glass,20w45a
+Calcite,calcite,20w45a
+Candle,candle,20w45a
+White Candle,white_candle,20w45a
+Light Gray Candle,light_gray_candle,20w45a
+Gray Candle,gray_candle,20w45a
+Black Candle,black_candle,20w45a
+Brown Candle,brown_candle,20w45a
+Red Candle,red_candle,20w45a
+Orange Candle,orange_candle,20w45a
+Yellow Candle,yellow_candle,20w45a
+Lime Candle,lime_candle,20w45a
+Green Candle,green_candle,20w45a
+Cyan Candle,cyan_candle,20w45a
+Light Blue Candle,light_blue_candle,20w45a
+Blue Candle,blue_candle,20w45a
+Purple Candle,purple_candle,20w45a
+Magenta Candle,magenta_candle,20w45a
+Pink Candle,pink_candle,20w45a
+Copper Ore,copper_ore,20w45a
+Block of Copper,copper_block,20w45a
+Exposed Copper,exposed_copper,20w45a
+Weathered Copper,weathered_copper,20w45a
+Oxidized Copper,oxidized_copper,20w45a
+Waxed Block of Copper,waxed_copper_block,20w45a
+Waxed Exposed Copper,waxed_exposed_copper,20w45a
+Waxed Weathered Copper,waxed_weathered_copper,20w45a
+Cut Copper,cut_copper,20w45a
+Exposed Cut Copper,exposed_cut_copper,20w45a
+Weathered Cut Copper,weathered_cut_copper,20w45a
+Oxidized Cut Copper,oxidized_cut_copper,20w45a
+Waxed Cut Copper,waxed_cut_copper,20w45a
+Waxed Exposed Cut Copper,waxed_exposed_cut_copper,20w45a
+Waxed Weathered Cut Copper,waxed_weathered_cut_copper,20w45a
+Cut Copper Slab,cut_copper,20w45a
+Exposed Cut Copper Slab,exposed_cut_copper_slab,20w45a
+Weathered Cut Copper Slab,weathered_cut_copper_slab,20w45a
+Oxidized Cut Copper Slab,oxidized_cut_copper_slab,20w45a
+Waxed Cut Copper Slab,waxed_cut_copper_slab,20w45a
+Waxed Exposed Cut Copper Slab,waxed_exposed_cut_copper_slab,20w45a
+Waxed Weathered Cut Copper Slab,waxed_weathered_cut_copper_slab,20w45a
+Cut Copper Stairs,cut_copper_stairs,20w45a
+Exposed Cut Copper Stairs,exposed_cut_copper_stairs,20w45a
+Weathered Cut Copper Stairs,weathered_cut_copper_stairs,20w45a
+Oxidized Cut Copper Stairs,oxidized_cut_copper_stairs,20w45a
+Waxed Cut Copper Stairs,waxed_cut_copper_stairs,20w45a
+Waxed Exposed Cut Copper Stairs,waxed_exposed_cut_copper_stairs,20w45a
+Waxed Weathered Cut Copper Stairs,waxed_weathered_cut_copper_stairs,20w45a
+Lightning Rod,lightning_rod,20w45a
+Powder Snow,powder_snow,20w46a
+Dripstone Block,dripstone_block,20w48a
+Pointed Dripstone,pointed_dripstone,20w48a
+Sculk Sensor,sculk_sensor,20w49a
+Glow Lichen,glow_lichen,21w03a
+Azalea,azalea,21w05a
+Flowering Azalea,flowering_azalea,21w05a
+Azalea Leaves,azalea_leaves,21w05a
+Flowering Azalea Leaves,flowering_azalea_leaves,21w05a
+Cave Vines,cave_vines,21w05a
+Small Dripleaf,small_dripleaf,21w05a
+Big Dripleaf,big_dripleaf,21w05a
+Moss Block,moss_block,21w05a
+Moss Carpet,moss_carpet,21w05a
+Spore Blossom,spore_blossom,21w05a
+Rooted Dirt,rooted_dirt,21w05a
+Hanging Roots,hanging_roots,21w05a
+Deepslate,deepslate,21w07a
+Cobbled Deepslate Slab,cobbled_deepslate_slab,21w07a
+Cobbled Deepslate Stairs,cobbled_deepslate_stairs,21w07a
+Cobbled Deepslate Wall,cobbled_deepslate_wall,21w07a
+Chiseled Deepslate,chiseled_deepslate,21w07a
+Polished Deepslate,polished_deepslate,21w07a
+Polished Deepslate Slab,polished_deepslate_slab,21w07a
+Polished Deepslate Stairs,polished_deepslate_stairs,21w07a
+Polished Deepslate Wall,polished_deepslate_wall,21w07a
+Deepslate Bricks,deepslate_bricks,21w07a
+Deepslate Brick Slab,deepslate_brick_slab,21w07a
+Deepslate Brick Stairs,deepslate_brick_stairs,21w07a
+Deepslate Brick Wall,deepslate_brick_wall,21w07a
+Deepslate Tiles,deepslate_tiles,21w07a
+Deepslate Tile Slab,deepslate_tile_slab,21w07a
+Deepslate Tile Stairs,deepslate_tile_stairs,21w07a
+Deepslate Tile Wall,deepslate_tile_wall,21w07a
+Cobbled Deepslate,cobbled_deepslate,21w08a
+Deepslate Iron Ore,deepslate_iron_ore,21w08a
+Deepslate Gold Ore,deepslate_gold_ore,21w08a
+Deepslate Lapis Lazuli Ore,deepslate_lapis_lazuli_ore,21w08a
+Deepslate Redstone Ore,deepslate_redstone_ore,21w08a
+Deepslate Diamond Ore,deepslate_diamond_ore,21w08a
+Smooth Basalt,smooth_basalt,21w08a
+Deepslate Coal Ore,deepslate_coal_ore,21w10a
+Deepslate Copper Ore,deepslate_copper_ore,21w10a
+Deepslate Emerald Ore,deepslate_emerald_ore,21w10a
+Infested Deepslate,infested_deepslate,21w10a
+Cracked Deepslate Bricks,cracked_deepslate_bricks,21w10a
+Cracked Deepslate Tiles,cracked_deepslate_tiles,21w10a
+Light,light,21w13a
+Waxed Oxidized Copper,waxed_oxidized_copper,21w14a
+Waxed Oxidized Cut Copper,waxed_oxidized_cut_copper,21w14a
+Waxed Oxidized Cut Copper Slab,waxed_oxidized_cut_copper_slab,21w14a
+Waxed Oxidized Cut Copper Stairs,waxed_oxidized_cut_copper_stairs,21w14a
+Block of Raw Copper,raw_copper_block,21w15a
+Block of Raw Iron,raw_iron_block,21w15a
+Block of Raw Gold,raw_gold_block,21w15a
+Sculk,sculk,Deep Dark Experimental Snapshot 1
+Sculk Catalyst,sculk_catalyst,Deep Dark Experimental Snapshot 1
+Sculk Shrieker,sculk_shrieker,Deep Dark Experimental Snapshot 1
+Sculk Vein,sculk_vein,Deep Dark Experimental Snapshot 1
+Frogspawn,frogspawn,22w11a
+Pearlescent Froglight,perlescent_froglight,22w11a
+Verdant Froglight,verdant_froglight,22w11a
+Ochre Froglight,ochre_froglight,22w11a
+Mangrove Log,mangrove_log,22w11a
+Stripped Mangrove Log,stripped_mangrove_log,22w11a
+Mangrove Wood,mangrove_wood,22w11a
+Stripped Mangrove Wood,stripped_mangrove_wood,22w11a
+Mangrove Planks,mangrove_planks,22w11a
+Mangrove Slab,mangrove_slab,22w11a
+Mangrove Stairs,mangrove_stairs,22w11a
+Mangrove Fence,mangrove_fence,22w11a
+Mangrove Fence Gate,mangrove_fence_gate,22w11a
+Mangrove Pressure Plate,mangrove_pressure_plate,22w11a
+Mangrove Button,mangrove_button,22w11a
+Mangrove Door,mangrove_door,22w11a
+Mangrove Trapdoor,mangrove_trapdoor,22w11a
+Mangrove Sign,mangrove_sign,22w11a
+Mangrove Leaves,mangrove_leaves,22w11a
+Mangrove Propagule,mangrove_propagule,22w11a
+Mangrove Roots,mangrove_roots,22w11a
+Muddy Mangrove Roots,muddy_mangrove_roots,22w11a
+Mud,mud,22w11a
+Packed Mud,packed_mud,22w11a
+Mud Bricks,mud_bricks,22w11a
+Mud Brick Slab,mud_brick_slab,22w11a
+Mud Brick Stairs,mud_brick_stairs,22w11a
+Mud Brick Wall,mud_brick_wall,22w11a
+Chiseled Bookshelf,chiseled_bookshelf,22w42a
+Bamboo Button,bamboo_button,22w42a
+Bamboo Door,bamboo_door,22w42a
+Bamboo Fence,bamboo_fence,22w42a
+Bamboo Fence Gate,bamboo_fence_gate,22w42a
+Bamboo Hanging Sign,bamboo_hanging_sign,22w42a
+Bamboo Mosaic,bamboo_mosaic,22w42a
+Bamboo Planks,bamboo_planks,22w42a
+Bamboo Pressure Plate,bamboo_pressure_plate,22w42a
+Bamboo Sign,bamboo_sign,22w42a
+Bamboo Slab,bamboo_slab,22w42a
+Bamboo Stairs,bamboo_stairs,22w42a
+Bamboo Trapdoor,bamboo_trapdoor,22w42a
+Oak Hanging Sign,oak_hanging_sign,22w42a
+Spruce Hanging Sign,spruce_hanging_sign,22w42a
+Birch Hanging Sign,birch_hanging_sign,22w42a
+Jungle Hanging Sign,jungle_hanging_sign,22w42a
+Acacia Hanging Sign,acacia_hanging_sign,22w42a
+Dark Oak Hanging Sign,dark_oak_hanging_sign,22w42a
+Mangrove Hanging Sign,mangrove_hanging_sign,22w42a
+Crimson Hanging Sign,crimson_hanging_sign,22w42a
+Warped Hanging Sign,warped_hanging_sign,22w42a
+Block of Bamboo,bamboo_block,22w45a
+Block of Stripped Bamboo,stripped_bamboo_block,22w45a
+Piglin Head,piglin_head,22w46a
+Cherry Log,cherry_log,23w07a
+Stripped Cherry Log,stripped_cherry_log,23w07a
+Cherry Wood,cherry_wood,23w07a
+Stripped Cherry Wood,stripped_cherry_wood,23w07a
+Cherry Planks,cherry_planks,23w07a
+Cherry Pressure Plate,cherry_pressure_plate,23w07a
+Cherry Button,cherry_button,23w07a
+Cherry Door,cherry_door,23w07a
+Cherry Fence,cherry_fence,23w07a
+Cherry Fence Gate,cherry_fence_gate,23w07a
+Cherry Hanging Sign,cherry_hanging_sign,23w07a
+Cherry Sign,cherry_sign,23w07a
+Cherry Slab,cherry_slab,23w07a
+Cherry Stairs,cherry_stairs,23w07a
+Cherry Trapdoor,cherry_trapdoor,23w07a
+Cherry Leaves,cherry_leaves,23w07a
+Decorated Pot,decorated_pot,23w07a
+Pink Petals,pink_petals,23w07a
+Torchflower,torchflower,23w07a
+Suspicious Sand,suspicious_sand,23w07a
+Suspicious Gravel,suspicious_gravel,23w12a
+Calibrated Sculk Sensor,calibrated_sculk_sensor,23w12a
+Crafter,crafter,23w42a
+Chiseled Copper,chiseled_copper,23w43a
+Exposed Chiseled Copper,exposed_chiseled_copper,23w43a
+Weathered Chiseled Copper,weathered_chiseled_copper,23w43a
+Oxidized Chiseled Copper,oxidized_chiseled_copper,23w43a
+Waxed Chiseled Copper,waxed_chiseled_copper,23w43a
+Waxed Exposed Chiseled Copper,waxed_exposed_chiseled_copper,23w43a
+Waxed Weathered Chiseled Copper,waxed_weathered_chiseled_copper,23w43a
+Waxed Oxidized Chiseled Copper,waxed_oxidized_chiseled_copper,23w43a
+Copper Bulb,copper_bulb,23w43a
+Exposed Copper Bulb,exposed_copper_bulb,23w43a
+Weathered Copper Bulb,weathered_copper_bulb,23w43a
+Oxidized Copper Bulb,oxidized_copper_bulb,23w43a
+Waxed Copper Bulb,waxed_copper_bulb,23w43a
+Waxed Exposed Copper Bulb,waxed_exposed_copper_bulb,23w43a
+Waxed Weathered Copper Bulb,waxed_weathered_copper_bulb,23w43a
+Waxed Oxidized Copper Bulb,waxed_oxidized_copper_bulb,23w43a
+Copper Door,copper_door,23w43a
+Exposed Copper Door,exposed_copper_door,23w43a
+Weathered Copper Door,weathered_copper_door,23w43a
+Oxidized Copper Door,oxidized_copper_door,23w43a
+Waxed Copper Door,waxed_copper_door,23w43a
+Waxed Exposed Copper Door,waxed_exposed_copper_door,23w43a
+Waxed Weathered Copper Door,waxed_weathered_copper_door,23w43a
+Waxed Oxidized Copper Door,waxed_oxidized_copper_door,23w43a
+Copper Trapdoor,copper_trapdoor,23w43a
+Exposed Copper Trapdoor,exposed_copper_trapdoor,23w43a
+Weathered Copper Trapdoor,weathered_copper_trapdoor,23w43a
+Oxidized Copper Trapdoor,oxidized_copper_trapdoor,23w43a
+Waxed Copper Trapdoor,waxed_copper_trapdoor,23w43a
+Waxed Exposed Copper Trapdoor,waxed_exposed_copper_trapdoor,23w43a
+Waxed Weathered Copper Trapdoor,waxed_weathered_copper_trapdoor,23w43a
+Waxed Oxidized Copper Trapdoor,waxed_oxidized_copper_trapdoor,23w43a
+Copper Grate,copper_grate,23w43a
+Exposed Copper Grate,exposed_copper_grate,23w43a
+Weathered Copper Grate,weathered_copper_grate,23w43a
+Oxidized Copper Grate,oxidized_copper_grate,23w43a
+Waxed Copper Grate,waxed_copper_grate,23w43a
+Waxed Exposed Copper Grate,waxed_exposed_copper_grate,23w43a
+Waxed Weathered Copper Grate,waxed_weathered_copper_grate,23w43a
+Waxed Oxidized Copper Grate,waxed_oxidized_copper_grate,23w43a
+Tuff Slab,tuff_slab,23w43a
+Tuff Stairs,tuff_stairs,23w43a
+Tuff Wall,tuff_wall,23w43a
+Chiseled Tuff,chiseled_tuff,23w43a
+Polished Tuff,polished_tuff,23w43a
+Polished Tuff Slab,polished_tuff_slab,23w43a
+Polished Tuff Stairs,polished_tuff_stairs,23w43a
+Polished Tuff Wall,polished_tuff_wall,23w43a
+Tuff Bricks,tuff_bricks,23w43a
+Tuff Brick Slab,tuff_brick_slab,23w43a
+Tuff Brick Stairs,tuff_brick_stairs,23w43a
+Tuff Brick Wall,tuff_brick_wall,23w43a
+Chiseled Tuff Bricks,chiseled_tuff_bricks,23w43a
+Trial Spawner,trial_spawner,23w45a
+Vault,vault,24w05a
+Heavy Core,heavy_core,24w11a
+Creaking Heart,creaking_heart,24w40a
+Pale Hanging Moss,pale_hanging_moss,24w40a
+Pale Moss Block,pale_moss_block,24w40a
+Pale Moss Carpet,pale_moss_carpet,24w40a
+Pale Oak Leaves,pale_oak_leaves,24w40a
+Pale Oak Log,pale_oak_log,24w40a
+Stripped Pale Oak Log,stripped_pale_oak_log,24w40a
+Pale Oak Wood,pale_oak_wood,24w40a
+Stripped Pale Oak Wood,stripped_pale_oak_wood,24w40a
+Pale Oak Planks,pale_oak_planks,24w40a
+Pale Oak Slab,pale_oak_slab,24w40a
+Pale Oak Stairs,pale_oak_stairs,24w40a
+Pale Oak Sign,pale_oak_sign,24w40a
+Pale Oak Hanging Sign,pale_hanging_sign,24w40a
+Pale Oak Button,pale_oak_buttom,24w40a
+Pale Oak Pressure Plate,pale_pressure_plate,24w40a
+Pale Oak Door,pale_oak_door,24w40a
+Pale Oak Fence,pale_oak_fence,24w40a
+Pale Oak Fence Gate,pale_oak_fence_gate,24w40a
+Pale Oak Trapdoor,pale_oak_trapdoor,24w40a
+Pale Oak Sapling,pale_oak_sapling,24w40a
+Closed Eyeblossom,closed_eyeblossom,24w44a
+Open Eyeblossom,open_eyeblossom,24w44a
+Block of Resin,resin_block,24w44a
+Resin Bricks,resin_brick,24w44a
+Chiseled Resin Bricks,chiseled_resin_brick,24w44a
+Resin Brick Slab,resin_brick_slab,24w44a
+Resin Brick Stairs,resin_brick_stairs,24w44a
+Resin Brick Wall,resin_brick_wall,24w44a
+Leaf Litter,leaf_litter,25w02a
+Wildflowers,wildflowers,25w02a
+Test Block,test_block,25w03a
+Test Instance Block,test_instance_block,25w03a
+Bush,bush,25w05a
+Firefly Bush,firefly_bush,25w05a
+Cactus Flower,cactus_flower,25w06a
+Short Dry Grass,short_dry_grass,25w06a
+Tall Dry Grass,tall_dry_grass,25w06a
+Dried Ghast,dried_ghast,25w15a
+Copper Chest,copper_chest,25w31a
+Exposed Copper Chest,exposed_copper_chest,25w31a
+Weathered Copper Chest,weathered_copper_chest,25w31a
+Oxidized Copper Chest,oxidized_copper_chest,25w31a
+Waxed Copper Chest,waxed_copper_chest,25w31a
+Waxed Exposed Copper Chest,waxed_exposed_copper_chest,25w31a
+Waxed Weathered Copper Chest,waxed_weathered_copper_chest,25w31a
+Waxed Oxidized Copper Chest,waxed_oxidized_copper_chest,25w31a
+Oak Shelf,oak_shelf,25w31a
+Spruce Shelf,spruce_shelf,25w31a
+Birch Shelf,birch_shelf,25w31a
+Jungle Shelf,jungle_shelf,25w31a
+Acacia Shelf,acacia_shelf,25w31a
+Dark Oak Shelf,dark_oak_shelf,25w31a
+Mangrove Shelf,mangrove_shelf,25w31a
+Cherry Shelf,cherry_shelf,25w31a
+Pale Oak Shelf,pale_oak_shelf,25w31a
+Bamboo Shelf,bamboo_shelf,25w31a
+Crimson Shelf,crimson_shelf,25w31a
+Warped Shelf,warped_shelf,25w31a
+Copper Golem Statue,copper_golem_statue,25w31a
+Exposed Copper Golem Statue,exposed_copper_golem_statue,25w31a
+Weathered Copper Golem Statue,weathered_copper_golem_statue,25w31a
+Oxidized Copper Golem Statue,oxidized_copper_golem_statue,25w31a
+Waxed Copper Golem Statue,waxed_copper_golem_statue,25w31a
+Waxed Exposed Copper Golem Statue,waxed_exposed_copper_golem_statue,25w31a
+Waxed Weathered Copper Golem Statue,waxed_weathered_copper_golem_statue,25w31a
+Waxed Oxidized Copper Golem Statue,waxed_oxidized_copper_golem_statue,25w31a
+Exposed Lightning Rod,exposed_lightning_rod,25w31a
+Weathered Lightning Rod,weathered_lightning_rod,25w31a
+Oxidized Lightning Rod,oxidized_lightning_rod,25w31a
+Waxed Lightning Rod,waxed_lightning_rod,25w31a
+Waxed Exposed Lightning Rod,waxed_exposed_lightning_rod,25w31a
+Waxed Weathered Lightning Rod,waxed_weathered_lightning_rod,25w31a
+Waxed Oxidized Lightning Rod,waxed_oxidized_lightning_rod,25w31a
+Copper Torch,copper_torch,25w32a
+Copper Bars,copper_bars,25w32a
+Exposed Copper Bars,exposed_copper_bars,25w32a
+Weathered Copper Bars,weathered_copper_bars,25w32a
+Oxidized Copper Bars,oxidized_copper_bars,25w32a
+Waxed Copper Bars,waxed_copper_bars,25w32a
+Waxed Exposed Copper Bars,waxed_exposed_copper_bars,25w32a
+Waxed Weathered Copper Bars,waxed_weathered_copper_bars,25w32a
+Waxed Oxidized Copper Bars,waxed_oxidized_copper_bars,25w32a
+Copper Chain,copper_chain,25w32a
+Exposed Copper Chain,exposed_copper_chain,25w32a
+Weathered Copper Chain,weathered_copper_chain,25w32a
+Oxidized Copper Chain,oxidized_copper_chain,25w32a
+Waxed Copper Chain,waxed_copper_chain,25w32a
+Waxed Exposed Copper Chain,waxed_exposed_copper_chain,25w32a
+Waxed Weathered Copper Chain,waxed_weathered_copper_chain,25w32a
+Waxed Oxidized Copper Chain,waxed_oxidized_copper_chain,25w32a
+Copper Lantern,copper_lantern,25w32a
+Exposed Copper Lantern,exposed_copper_lantern,25w32a
+Weathered Copper Lantern,weathered_copper_lantern,25w32a
+Oxidized Copper Lantern,oxidized_copper_lantern,25w32a
+Waxed Copper Lantern,waxed_copper_lantern,25w32a
+Waxed Exposed Copper Lantern,waxed_exposed_copper_lantern,25w32a
+Waxed Weathered Copper Lantern,waxed_weathered_copper_lantern,25w32a
+Waxed Oxidized Copper Lantern,waxed_oxidized_copper_lantern,25w32a
+Golden Dandelion,golden_dandelion,26.1 Snapshot 5

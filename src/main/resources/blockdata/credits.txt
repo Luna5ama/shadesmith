@@ -1,0 +1,3 @@
+list_of_block_by_version.csv: https://minecraft.wiki/w/List_of_blocks_by_version
+blocklist.json: https://joakimthorsen.github.io/MCPropertyEncyclopedia/?selection=variants,full_cube,luminance,opaque,tag_small_flowers,tag_flowers&settings=(font:normal)#
+java.yaml: https://github.com/Nixinova/Minecraft-Versions/blob/main/data/java.yaml

@@ -1,0 +1,3776 @@
+[
+  {
+    "block": "Activator Rail",
+    "variants": "Activator Rail",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Air",
+    "variants": [
+      "Air",
+      "Cave Air",
+      "Void Air"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Amethyst Cluster",
+    "variants": [
+      "Amethyst Cluster",
+      "Large Amethyst Bud",
+      "Medium Amethyst Bud",
+      "Small Amethyst Bud"
+    ],
+    "full_cube": "No",
+    "luminance": {
+      "Amethyst Cluster": 5,
+      "Large Amethyst Bud": 4,
+      "Medium Amethyst Bud": 2,
+      "Small Amethyst Bud": 1
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Ancient Debris",
+    "variants": "Ancient Debris",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Andesite",
+    "variants": [
+      "Andesite",
+      "Polished Andesite"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Anvil",
+    "variants": [
+      "Anvil",
+      "Chipped Anvil",
+      "Damaged Anvil"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Azalea",
+    "variants": [
+      "Azalea",
+      "Flowering Azalea"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": {
+      "Azalea": "No",
+      "Flowering Azalea": "Yes"
+    }
+  },
+  {
+    "block": "Bamboo",
+    "variants": [
+      "Bamboo",
+      "Bamboo Shoot"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Bamboo Mosaic",
+    "variants": "Bamboo Mosaic",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Banners",
+    "variants": [
+      "Black Banner",
+      "Blue Banner",
+      "Brown Banner",
+      "Cyan Banner",
+      "Gray Banner",
+      "Green Banner",
+      "Light Blue Banner",
+      "Light Gray Banner",
+      "Lime Banner",
+      "Magenta Banner",
+      "No Translation Key: black_wall_banner",
+      "No Translation Key: blue_wall_banner",
+      "No Translation Key: brown_wall_banner",
+      "No Translation Key: cyan_wall_banner",
+      "No Translation Key: gray_wall_banner",
+      "No Translation Key: green_wall_banner",
+      "No Translation Key: light_blue_wall_banner",
+      "No Translation Key: light_gray_wall_banner",
+      "No Translation Key: lime_wall_banner",
+      "No Translation Key: magenta_wall_banner",
+      "No Translation Key: orange_wall_banner",
+      "No Translation Key: pink_wall_banner",
+      "No Translation Key: purple_wall_banner",
+      "No Translation Key: red_wall_banner",
+      "No Translation Key: white_wall_banner",
+      "No Translation Key: yellow_wall_banner",
+      "Orange Banner",
+      "Pink Banner",
+      "Purple Banner",
+      "Red Banner",
+      "White Banner",
+      "Yellow Banner"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Barrel",
+    "variants": "Barrel",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Barrier",
+    "variants": "Barrier",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Basalt",
+    "variants": [
+      "Basalt",
+      "Polished Basalt",
+      "Smooth Basalt"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Beacon",
+    "variants": "Beacon",
+    "full_cube": "Yes",
+    "luminance": 15,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Bedrock",
+    "variants": "Bedrock",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Beds",
+    "variants": [
+      "Black Bed",
+      "Blue Bed",
+      "Brown Bed",
+      "Cyan Bed",
+      "Gray Bed",
+      "Green Bed",
+      "Light Blue Bed",
+      "Light Gray Bed",
+      "Lime Bed",
+      "Magenta Bed",
+      "Orange Bed",
+      "Pink Bed",
+      "Purple Bed",
+      "Red Bed",
+      "White Bed",
+      "Yellow Bed"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Bee Nest",
+    "variants": "Bee Nest",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Beehive",
+    "variants": "Beehive",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Bell",
+    "variants": "Bell",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Big Dripleaf",
+    "variants": [
+      "Big Dripleaf",
+      "Big Dripleaf Stem"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": {
+      "Big Dripleaf": "Yes",
+      "Big Dripleaf Stem": "No"
+    },
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Blackstone",
+    "variants": [
+      "Blackstone",
+      "Chiseled Polished Blackstone",
+      "Cracked Polished Blackstone Bricks",
+      "Polished Blackstone",
+      "Polished Blackstone Bricks"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Blast Furnace",
+    "variants": "Blast Furnace",
+    "full_cube": "Yes",
+    "luminance": {
+      "lit: false": 0,
+      "lit: true": 13
+    },
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Amethyst",
+    "variants": "Block of Amethyst",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Bamboo",
+    "variants": "Block of Bamboo",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Coal",
+    "variants": "Block of Coal",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Copper",
+    "variants": [
+      "Block of Copper",
+      "Cut Copper",
+      "Exposed Copper",
+      "Exposed Cut Copper",
+      "Oxidized Copper",
+      "Oxidized Cut Copper",
+      "Waxed Block of Copper",
+      "Waxed Cut Copper",
+      "Waxed Exposed Copper",
+      "Waxed Exposed Cut Copper",
+      "Waxed Oxidized Copper",
+      "Waxed Oxidized Cut Copper",
+      "Waxed Weathered Copper",
+      "Waxed Weathered Cut Copper",
+      "Weathered Copper",
+      "Weathered Cut Copper"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Diamond",
+    "variants": "Block of Diamond",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Emerald",
+    "variants": "Block of Emerald",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Gold",
+    "variants": "Block of Gold",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Iron",
+    "variants": "Block of Iron",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Lapis Lazuli",
+    "variants": "Block of Lapis Lazuli",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Netherite",
+    "variants": "Block of Netherite",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Quartz",
+    "variants": [
+      "Block of Quartz",
+      "Chiseled Quartz Block",
+      "Quartz Bricks",
+      "Quartz Pillar",
+      "Smooth Quartz Block"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Raw Copper",
+    "variants": "Block of Raw Copper",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Raw Gold",
+    "variants": "Block of Raw Gold",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Raw Iron",
+    "variants": "Block of Raw Iron",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Redstone",
+    "variants": "Block of Redstone",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Block of Stripped Bamboo",
+    "variants": "Block of Stripped Bamboo",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Blue Ice",
+    "variants": "Blue Ice",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Bone Block",
+    "variants": "Bone Block",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Bookshelf",
+    "variants": "Bookshelf",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Brewing Stand",
+    "variants": "Brewing Stand",
+    "full_cube": "No",
+    "luminance": 1,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Bricks",
+    "variants": "Bricks",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Budding Amethyst",
+    "variants": "Budding Amethyst",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Buttons",
+    "variants": [
+      "Acacia Button",
+      "Bamboo Button",
+      "Birch Button",
+      "Cherry Button",
+      "Crimson Button",
+      "Dark Oak Button",
+      "Jungle Button",
+      "Mangrove Button",
+      "Oak Button",
+      "Pale Oak Button",
+      "Polished Blackstone Button",
+      "Spruce Button",
+      "Stone Button",
+      "Warped Button"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Cactus",
+    "variants": "Cactus",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Cake",
+    "variants": [
+      "Cake",
+      "Cake with Black Candle",
+      "Cake with Blue Candle",
+      "Cake with Brown Candle",
+      "Cake with Candle",
+      "Cake with Cyan Candle",
+      "Cake with Gray Candle",
+      "Cake with Green Candle",
+      "Cake with Light Blue Candle",
+      "Cake with Light Gray Candle",
+      "Cake with Lime Candle",
+      "Cake with Magenta Candle",
+      "Cake with Orange Candle",
+      "Cake with Pink Candle",
+      "Cake with Purple Candle",
+      "Cake with Red Candle",
+      "Cake with White Candle",
+      "Cake with Yellow Candle"
+    ],
+    "full_cube": "No",
+    "luminance": {
+      "Cake": 0,
+      "Cake with Black Candle<br>Cake with Blue Candle<br>Cake with Brown Candle<br>Cake with Candle<br>Cake with Cyan Candle<br>Cake with Gray Candle<br>Cake with Green Candle<br>Cake with Light Blue Candle<br>Cake with Light Gray Candle<br>Cake with Lime Candle<br>Cake with Magenta Candle<br>Cake with Orange Candle<br>Cake with Pink Candle<br>Cake with Purple Candle<br>Cake with Red Candle<br>Cake with White Candle<br>Cake with Yellow Candle": {
+        "lit: false": 0,
+        "lit: true": 3
+      }
+    },
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Calcite",
+    "variants": "Calcite",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Calibrated Sculk Sensor",
+    "variants": "Calibrated Sculk Sensor",
+    "full_cube": "No",
+    "luminance": 1,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Campfire",
+    "variants": [
+      "Campfire",
+      "Soul Campfire"
+    ],
+    "full_cube": "No",
+    "luminance": {
+      "Campfire": {
+        "lit: false": 0,
+        "lit: true": 15
+      },
+      "Soul Campfire": {
+        "lit: false": 0,
+        "lit: true": 10
+      }
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Candles",
+    "variants": [
+      "Black Candle",
+      "Blue Candle",
+      "Brown Candle",
+      "Candle",
+      "Cyan Candle",
+      "Gray Candle",
+      "Green Candle",
+      "Light Blue Candle",
+      "Light Gray Candle",
+      "Lime Candle",
+      "Magenta Candle",
+      "Orange Candle",
+      "Pink Candle",
+      "Purple Candle",
+      "Red Candle",
+      "White Candle",
+      "Yellow Candle"
+    ],
+    "full_cube": "No",
+    "luminance": {
+      "candles: 1": {
+        "lit: false": 0,
+        "lit: true": 3
+      },
+      "candles: 2": {
+        "lit: false": 0,
+        "lit: true": 6
+      },
+      "candles: 3": {
+        "lit: false": 0,
+        "lit: true": 9
+      },
+      "candles: 4": {
+        "lit: false": 0,
+        "lit: true": 12
+      }
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Carpets",
+    "variants": [
+      "Black Carpet",
+      "Blue Carpet",
+      "Brown Carpet",
+      "Cyan Carpet",
+      "Gray Carpet",
+      "Green Carpet",
+      "Light Blue Carpet",
+      "Light Gray Carpet",
+      "Lime Carpet",
+      "Magenta Carpet",
+      "Orange Carpet",
+      "Pink Carpet",
+      "Purple Carpet",
+      "Red Carpet",
+      "White Carpet",
+      "Yellow Carpet"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Cartography Table",
+    "variants": "Cartography Table",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Cauldron",
+    "variants": [
+      "Cauldron",
+      "Lava Cauldron",
+      "Powder Snow Cauldron",
+      "Water Cauldron"
+    ],
+    "full_cube": "No",
+    "luminance": {
+      "Cauldron<br>Powder Snow Cauldron<br>Water Cauldron": 0,
+      "Lava Cauldron": 15
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Cave Vines",
+    "variants": [
+      "Cave Vines",
+      "Cave Vines Plant"
+    ],
+    "full_cube": "No",
+    "luminance": {
+      "berries: false": 0,
+      "berries: true": 14
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Chain",
+    "variants": "Chain",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Chest",
+    "variants": "Chest",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Chiseled Bookshelf",
+    "variants": "Chiseled Bookshelf",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Chiseled Copper",
+    "variants": [
+      "Chiseled Copper",
+      "Exposed Chiseled Copper",
+      "Oxidized Chiseled Copper",
+      "Waxed Chiseled Copper",
+      "Waxed Exposed Chiseled Copper",
+      "Waxed Oxidized Chiseled Copper",
+      "Waxed Weathered Chiseled Copper",
+      "Weathered Chiseled Copper"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Chiseled Tuff",
+    "variants": "Chiseled Tuff",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Chiseled Tuff Bricks",
+    "variants": "Chiseled Tuff Bricks",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Chorus Flower",
+    "variants": "Chorus Flower",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "Yes"
+  },
+  {
+    "block": "Chorus Plant",
+    "variants": "Chorus Plant",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Clay",
+    "variants": "Clay",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Coal Ore",
+    "variants": [
+      "Coal Ore",
+      "Deepslate Coal Ore"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Coarse Dirt",
+    "variants": "Coarse Dirt",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Cobbled Deepslate",
+    "variants": [
+      "Chiseled Deepslate",
+      "Cobbled Deepslate",
+      "Cracked Deepslate Bricks",
+      "Cracked Deepslate Tiles",
+      "Deepslate Bricks",
+      "Deepslate Tiles",
+      "Polished Deepslate"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Cobblestone",
+    "variants": [
+      "Cobblestone",
+      "Infested Cobblestone",
+      "Mossy Cobblestone"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Cobweb",
+    "variants": "Cobweb",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Cocoa",
+    "variants": "Cocoa",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Command Blocks",
+    "variants": [
+      "Chain Command Block",
+      "Command Block",
+      "Repeating Command Block"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Composter",
+    "variants": "Composter",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Concrete",
+    "variants": [
+      "Black Concrete",
+      "Blue Concrete",
+      "Brown Concrete",
+      "Cyan Concrete",
+      "Gray Concrete",
+      "Green Concrete",
+      "Light Blue Concrete",
+      "Light Gray Concrete",
+      "Lime Concrete",
+      "Magenta Concrete",
+      "Orange Concrete",
+      "Pink Concrete",
+      "Purple Concrete",
+      "Red Concrete",
+      "White Concrete",
+      "Yellow Concrete"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Concrete Powder",
+    "variants": [
+      "Black Concrete Powder",
+      "Blue Concrete Powder",
+      "Brown Concrete Powder",
+      "Cyan Concrete Powder",
+      "Gray Concrete Powder",
+      "Green Concrete Powder",
+      "Light Blue Concrete Powder",
+      "Light Gray Concrete Powder",
+      "Lime Concrete Powder",
+      "Magenta Concrete Powder",
+      "Orange Concrete Powder",
+      "Pink Concrete Powder",
+      "Purple Concrete Powder",
+      "Red Concrete Powder",
+      "White Concrete Powder",
+      "Yellow Concrete Powder"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Conduit",
+    "variants": "Conduit",
+    "full_cube": "No",
+    "luminance": 15,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Copper Bulb",
+    "variants": [
+      "Copper Bulb",
+      "Exposed Copper Bulb",
+      "Oxidized Copper Bulb",
+      "Waxed Copper Bulb",
+      "Waxed Exposed Copper Bulb",
+      "Waxed Oxidized Copper Bulb",
+      "Waxed Weathered Copper Bulb",
+      "Weathered Copper Bulb"
+    ],
+    "full_cube": "Yes",
+    "luminance": {
+      "Copper Bulb<br>Waxed Copper Bulb": {
+        "lit: false": 0,
+        "lit: true": 15
+      },
+      "Exposed Copper Bulb<br>Waxed Exposed Copper Bulb": {
+        "lit: false": 0,
+        "lit: true": 12
+      },
+      "Oxidized Copper Bulb<br>Waxed Oxidized Copper Bulb": {
+        "lit: false": 0,
+        "lit: true": 4
+      },
+      "Waxed Weathered Copper Bulb<br>Weathered Copper Bulb": {
+        "lit: false": 0,
+        "lit: true": 8
+      }
+    },
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Copper Grate",
+    "variants": [
+      "Copper Grate",
+      "Exposed Copper Grate",
+      "Oxidized Copper Grate",
+      "Waxed Copper Grate",
+      "Waxed Exposed Copper Grate",
+      "Waxed Oxidized Copper Grate",
+      "Waxed Weathered Copper Grate",
+      "Weathered Copper Grate"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Copper Ore",
+    "variants": [
+      "Copper Ore",
+      "Deepslate Copper Ore"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Coral Blocks",
+    "variants": [
+      "Brain Coral Block",
+      "Bubble Coral Block",
+      "Dead Brain Coral Block",
+      "Dead Bubble Coral Block",
+      "Dead Fire Coral Block",
+      "Dead Horn Coral Block",
+      "Dead Tube Coral Block",
+      "Fire Coral Block",
+      "Horn Coral Block",
+      "Tube Coral Block"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Coral Fans",
+    "variants": [
+      "Brain Coral Fan",
+      "Brain Coral Wall Fan",
+      "Bubble Coral Fan",
+      "Bubble Coral Wall Fan",
+      "Dead Brain Coral Fan",
+      "Dead Brain Coral Wall Fan",
+      "Dead Bubble Coral Fan",
+      "Dead Bubble Coral Wall Fan",
+      "Dead Fire Coral Fan",
+      "Dead Fire Coral Wall Fan",
+      "Dead Horn Coral Fan",
+      "Dead Horn Coral Wall Fan",
+      "Dead Tube Coral Fan",
+      "Dead Tube Coral Wall Fan",
+      "Fire Coral Fan",
+      "Fire Coral Wall Fan",
+      "Horn Coral Fan",
+      "Horn Coral Wall Fan",
+      "Tube Coral Fan",
+      "Tube Coral Wall Fan"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Corals",
+    "variants": [
+      "Brain Coral",
+      "Bubble Coral",
+      "Dead Brain Coral",
+      "Dead Bubble Coral",
+      "Dead Fire Coral",
+      "Dead Horn Coral",
+      "Dead Tube Coral",
+      "Fire Coral",
+      "Horn Coral",
+      "Tube Coral"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Crafter",
+    "variants": "Crafter",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Crafting Table",
+    "variants": "Crafting Table",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Creaking Heart",
+    "variants": "Creaking Heart",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Crops",
+    "variants": [
+      "Attached Melon Stem",
+      "Attached Pumpkin Stem",
+      "Beetroots",
+      "Carrots",
+      "Melon Stem",
+      "Potatoes",
+      "Pumpkin Stem",
+      "Wheat Crops"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Crying Obsidian",
+    "variants": "Crying Obsidian",
+    "full_cube": "Yes",
+    "luminance": 10,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Daylight Detector",
+    "variants": "Daylight Detector",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Dead Bush",
+    "variants": "Dead Bush",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Decorated Pot",
+    "variants": "Decorated Pot",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Deepslate",
+    "variants": [
+      "Deepslate",
+      "Infested Deepslate"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Detector Rail",
+    "variants": "Detector Rail",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Diamond Ore",
+    "variants": [
+      "Deepslate Diamond Ore",
+      "Diamond Ore"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Diorite",
+    "variants": [
+      "Diorite",
+      "Polished Diorite"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Dirt",
+    "variants": [
+      "Dirt",
+      "Rooted Dirt"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Dirt Path",
+    "variants": "Dirt Path",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Dispenser",
+    "variants": "Dispenser",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Doors",
+    "variants": [
+      "Acacia Door",
+      "Bamboo Door",
+      "Birch Door",
+      "Cherry Door",
+      "Copper Door",
+      "Crimson Door",
+      "Dark Oak Door",
+      "Exposed Copper Door",
+      "Iron Door",
+      "Jungle Door",
+      "Mangrove Door",
+      "Oak Door",
+      "Oxidized Copper Door",
+      "Pale Oak Door",
+      "Spruce Door",
+      "Warped Door",
+      "Waxed Copper Door",
+      "Waxed Exposed Copper Door",
+      "Waxed Oxidized Copper Door",
+      "Waxed Weathered Copper Door",
+      "Weathered Copper Door"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Dragon Egg",
+    "variants": "Dragon Egg",
+    "full_cube": "No",
+    "luminance": 1,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Dried Kelp Block",
+    "variants": "Dried Kelp Block",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Dripstone Block",
+    "variants": "Dripstone Block",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Dropper",
+    "variants": "Dropper",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Emerald Ore",
+    "variants": [
+      "Deepslate Emerald Ore",
+      "Emerald Ore"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Enchanting Table",
+    "variants": "Enchanting Table",
+    "full_cube": "No",
+    "luminance": 7,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "End Gateway",
+    "variants": "End Gateway",
+    "full_cube": "No",
+    "luminance": 15,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "End Portal",
+    "variants": "End Portal",
+    "full_cube": "No",
+    "luminance": 15,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "End Portal Frame",
+    "variants": "End Portal Frame",
+    "full_cube": "No",
+    "luminance": 1,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "End Rod",
+    "variants": "End Rod",
+    "full_cube": "No",
+    "luminance": 14,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "End Stone",
+    "variants": "End Stone",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "End Stone Bricks",
+    "variants": "End Stone Bricks",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Ender Chest",
+    "variants": "Ender Chest",
+    "full_cube": "No",
+    "luminance": 7,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Farmland",
+    "variants": "Farmland",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Fence Gates",
+    "variants": [
+      "Acacia Fence Gate",
+      "Bamboo Fence Gate",
+      "Birch Fence Gate",
+      "Cherry Fence Gate",
+      "Crimson Fence Gate",
+      "Dark Oak Fence Gate",
+      "Jungle Fence Gate",
+      "Mangrove Fence Gate",
+      "Oak Fence Gate",
+      "Pale Oak Fence Gate",
+      "Spruce Fence Gate",
+      "Warped Fence Gate"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Fences",
+    "variants": [
+      "Acacia Fence",
+      "Bamboo Fence",
+      "Birch Fence",
+      "Cherry Fence",
+      "Crimson Fence",
+      "Dark Oak Fence",
+      "Jungle Fence",
+      "Mangrove Fence",
+      "Nether Brick Fence",
+      "Oak Fence",
+      "Pale Oak Fence",
+      "Spruce Fence",
+      "Warped Fence"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Fern",
+    "variants": [
+      "Fern",
+      "Large Fern"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Fire",
+    "variants": [
+      "Fire",
+      "Soul Fire"
+    ],
+    "full_cube": "No",
+    "luminance": {
+      "Fire": 15,
+      "Soul Fire": 10
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Fletching Table",
+    "variants": "Fletching Table",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Flower Pot",
+    "variants": [
+      "Flower Pot",
+      "Potted Acacia Sapling",
+      "Potted Allium",
+      "Potted Azalea",
+      "Potted Azure Bluet",
+      "Potted Bamboo",
+      "Potted Birch Sapling",
+      "Potted Blue Orchid",
+      "Potted Brown Mushroom",
+      "Potted Cactus",
+      "Potted Cherry Sapling",
+      "Potted Closed Eyeblossom",
+      "Potted Cornflower",
+      "Potted Crimson Fungus",
+      "Potted Crimson Roots",
+      "Potted Dandelion",
+      "Potted Dark Oak Sapling",
+      "Potted Dead Bush",
+      "Potted Fern",
+      "Potted Flowering Azalea",
+      "Potted Jungle Sapling",
+      "Potted Lily of the Valley",
+      "Potted Mangrove Propagule",
+      "Potted Oak Sapling",
+      "Potted Open Eyeblossom",
+      "Potted Orange Tulip",
+      "Potted Oxeye Daisy",
+      "Potted Pale Oak Sapling",
+      "Potted Pink Tulip",
+      "Potted Poppy",
+      "Potted Red Mushroom",
+      "Potted Red Tulip",
+      "Potted Spruce Sapling",
+      "Potted Torchflower",
+      "Potted Warped Fungus",
+      "Potted Warped Roots",
+      "Potted White Tulip",
+      "Potted Wither Rose"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Flowers",
+    "variants": [
+      "Allium",
+      "Azure Bluet",
+      "Blue Orchid",
+      "Closed Eyeblossom",
+      "Cornflower",
+      "Dandelion",
+      "Lilac",
+      "Lily of the Valley",
+      "Open Eyeblossom",
+      "Orange Tulip",
+      "Oxeye Daisy",
+      "Peony",
+      "Pink Tulip",
+      "Poppy",
+      "Red Tulip",
+      "Rose Bush",
+      "Sunflower",
+      "White Tulip",
+      "Wither Rose"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": {
+      "Allium<br>Azure Bluet<br>Blue Orchid<br>Closed Eyeblossom<br>Cornflower<br>Dandelion<br>Lily of the Valley<br>Open Eyeblossom<br>Orange Tulip<br>Oxeye Daisy<br>Pink Tulip<br>Poppy<br>Red Tulip<br>White Tulip<br>Wither Rose": "Yes",
+      "Lilac<br>Peony<br>Rose Bush<br>Sunflower": "No"
+    },
+    "tag_flowers": "Yes"
+  },
+  {
+    "block": "Froglights",
+    "variants": [
+      "Ochre Froglight",
+      "Pearlescent Froglight",
+      "Verdant Froglight"
+    ],
+    "full_cube": "Yes",
+    "luminance": 15,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Frogspawn",
+    "variants": "Frogspawn",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Frosted Ice",
+    "variants": "Frosted Ice",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Fungi",
+    "variants": [
+      "Crimson Fungus",
+      "Warped Fungus"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Furnace",
+    "variants": "Furnace",
+    "full_cube": "Yes",
+    "luminance": {
+      "lit: false": 0,
+      "lit: true": 13
+    },
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Gilded Blackstone",
+    "variants": "Gilded Blackstone",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Glass",
+    "variants": "Glass",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Glass Pane",
+    "variants": "Glass Pane",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Glazed Terracotta",
+    "variants": [
+      "Black Glazed Terracotta",
+      "Blue Glazed Terracotta",
+      "Brown Glazed Terracotta",
+      "Cyan Glazed Terracotta",
+      "Gray Glazed Terracotta",
+      "Green Glazed Terracotta",
+      "Light Blue Glazed Terracotta",
+      "Light Gray Glazed Terracotta",
+      "Lime Glazed Terracotta",
+      "Magenta Glazed Terracotta",
+      "Orange Glazed Terracotta",
+      "Pink Glazed Terracotta",
+      "Purple Glazed Terracotta",
+      "Red Glazed Terracotta",
+      "White Glazed Terracotta",
+      "Yellow Glazed Terracotta"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Glow Lichen",
+    "variants": "Glow Lichen",
+    "full_cube": "No",
+    "luminance": {
+      "down: false": {
+        "east: false": {
+          "north: false": {
+            "south: false": {
+              "up: false": {
+                "west: false": 0,
+                "west: true": 7
+              },
+              "up: true": 7
+            },
+            "south: true": 7
+          },
+          "north: true": 7
+        },
+        "east: true": 7
+      },
+      "down: true": 7
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Glowstone",
+    "variants": "Glowstone",
+    "full_cube": "Yes",
+    "luminance": 15,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Gold Ore",
+    "variants": [
+      "Deepslate Gold Ore",
+      "Gold Ore"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Granite",
+    "variants": [
+      "Granite",
+      "Polished Granite"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Grass Block",
+    "variants": "Grass Block",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Gravel",
+    "variants": "Gravel",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Grindstone",
+    "variants": "Grindstone",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Hanging Roots",
+    "variants": "Hanging Roots",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Hanging Signs",
+    "variants": [
+      "Acacia Hanging Sign",
+      "Acacia Wall Hanging Sign",
+      "Bamboo Hanging Sign",
+      "Bamboo Wall Hanging Sign",
+      "Birch Hanging Sign",
+      "Birch Wall Hanging Sign",
+      "Cherry Hanging Sign",
+      "Cherry Wall Hanging Sign",
+      "Crimson Hanging Sign",
+      "Crimson Wall Hanging Sign",
+      "Dark Oak Hanging Sign",
+      "Dark Oak Wall Hanging Sign",
+      "Jungle Hanging Sign",
+      "Jungle Wall Hanging Sign",
+      "Mangrove Hanging Sign",
+      "Mangrove Wall Hanging Sign",
+      "Oak Hanging Sign",
+      "Oak Wall Hanging Sign",
+      "Pale Oak Hanging Sign",
+      "Pale Oak Wall Hanging Sign",
+      "Spruce Hanging Sign",
+      "Spruce Wall Hanging Sign",
+      "Warped Hanging Sign",
+      "Warped Wall Hanging Sign"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Hay Bale",
+    "variants": "Hay Bale",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Heads",
+    "variants": [
+      "Creeper Head",
+      "Creeper Wall Head",
+      "Dragon Head",
+      "Dragon Wall Head",
+      "Piglin Head",
+      "Piglin Wall Head",
+      "Player Head",
+      "Player Wall Head",
+      "Skeleton Skull",
+      "Skeleton Wall Skull",
+      "Wither Skeleton Skull",
+      "Wither Skeleton Wall Skull",
+      "Zombie Head",
+      "Zombie Wall Head"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Heavy Core",
+    "variants": "Heavy Core",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Honey Block",
+    "variants": "Honey Block",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Honeycomb Block",
+    "variants": "Honeycomb Block",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Hopper",
+    "variants": "Hopper",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Hyphae",
+    "variants": [
+      "Crimson Hyphae",
+      "Stripped Crimson Hyphae",
+      "Stripped Warped Hyphae",
+      "Warped Hyphae"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Ice",
+    "variants": "Ice",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Iron Bars",
+    "variants": "Iron Bars",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Iron Ore",
+    "variants": [
+      "Deepslate Iron Ore",
+      "Iron Ore"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Jack o'Lantern",
+    "variants": "Jack o'Lantern",
+    "full_cube": "Yes",
+    "luminance": 15,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Jigsaw Block",
+    "variants": "Jigsaw Block",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Jukebox",
+    "variants": "Jukebox",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Kelp",
+    "variants": [
+      "Kelp",
+      "Kelp Plant"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Ladder",
+    "variants": "Ladder",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Lantern",
+    "variants": [
+      "Lantern",
+      "Soul Lantern"
+    ],
+    "full_cube": "No",
+    "luminance": {
+      "Lantern": 15,
+      "Soul Lantern": 10
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Lapis Lazuli Ore",
+    "variants": [
+      "Deepslate Lapis Lazuli Ore",
+      "Lapis Lazuli Ore"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Lava",
+    "variants": "Lava",
+    "full_cube": "No",
+    "luminance": 15,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Leaves",
+    "variants": [
+      "Acacia Leaves",
+      "Azalea Leaves",
+      "Birch Leaves",
+      "Cherry Leaves",
+      "Dark Oak Leaves",
+      "Flowering Azalea Leaves",
+      "Jungle Leaves",
+      "Mangrove Leaves",
+      "Oak Leaves",
+      "Pale Oak Leaves",
+      "Spruce Leaves"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": {
+      "Acacia Leaves<br>Azalea Leaves<br>Birch Leaves<br>Dark Oak Leaves<br>Jungle Leaves<br>Mangrove Leaves<br>Oak Leaves<br>Pale Oak Leaves<br>Spruce Leaves": "No",
+      "Cherry Leaves<br>Flowering Azalea Leaves": "Yes"
+    }
+  },
+  {
+    "block": "Lectern",
+    "variants": "Lectern",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Lever",
+    "variants": "Lever",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Light Block",
+    "variants": "Light",
+    "full_cube": "No",
+    "luminance": {
+      "level: 0": 0,
+      "level: 1": 1,
+      "level: 2": 2,
+      "level: 3": 3,
+      "level: 4": 4,
+      "level: 5": 5,
+      "level: 6": 6,
+      "level: 7": 7,
+      "level: 8": 8,
+      "level: 9": 9,
+      "level: 10": 10,
+      "level: 11": 11,
+      "level: 12": 12,
+      "level: 13": 13,
+      "level: 14": 14,
+      "level: 15": 15
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Lightning Rod",
+    "variants": "Lightning Rod",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Lily Pad",
+    "variants": "Lily Pad",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Lodestone",
+    "variants": "Lodestone",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Logs",
+    "variants": [
+      "Acacia Log",
+      "Birch Log",
+      "Cherry Log",
+      "Dark Oak Log",
+      "Jungle Log",
+      "Mangrove Log",
+      "Oak Log",
+      "Pale Oak Log",
+      "Spruce Log",
+      "Stripped Acacia Log",
+      "Stripped Birch Log",
+      "Stripped Cherry Log",
+      "Stripped Dark Oak Log",
+      "Stripped Jungle Log",
+      "Stripped Mangrove Log",
+      "Stripped Oak Log",
+      "Stripped Pale Oak Log",
+      "Stripped Spruce Log"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Loom",
+    "variants": "Loom",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Magma Block",
+    "variants": "Magma Block",
+    "full_cube": "Yes",
+    "luminance": 3,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Mangrove Propagule",
+    "variants": "Mangrove Propagule",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "Yes"
+  },
+  {
+    "block": "Mangrove Roots",
+    "variants": "Mangrove Roots",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Melon",
+    "variants": "Melon",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Moss Block",
+    "variants": "Moss Block",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Moss Carpet",
+    "variants": "Moss Carpet",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Moving Piston",
+    "variants": "Moving Piston",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Mud",
+    "variants": "Mud",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Mud Bricks",
+    "variants": "Mud Bricks",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Muddy Mangrove Roots",
+    "variants": "Muddy Mangrove Roots",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Mushroom Blocks",
+    "variants": [
+      "Brown Mushroom Block",
+      "Mushroom Stem",
+      "Red Mushroom Block"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Mushrooms",
+    "variants": [
+      "Brown Mushroom",
+      "Red Mushroom"
+    ],
+    "full_cube": "No",
+    "luminance": {
+      "Brown Mushroom": 1,
+      "Red Mushroom": 0
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Mycelium",
+    "variants": "Mycelium",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Nether Bricks",
+    "variants": [
+      "Chiseled Nether Bricks",
+      "Cracked Nether Bricks",
+      "Nether Bricks",
+      "Red Nether Bricks"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Nether Gold Ore",
+    "variants": "Nether Gold Ore",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Nether Portal",
+    "variants": "Nether Portal",
+    "full_cube": "No",
+    "luminance": 11,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Nether Quartz Ore",
+    "variants": "Nether Quartz Ore",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Nether Sprouts",
+    "variants": "Nether Sprouts",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Nether Wart",
+    "variants": "Nether Wart",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Netherrack",
+    "variants": "Netherrack",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Note Block",
+    "variants": "Note Block",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Nylium",
+    "variants": [
+      "Crimson Nylium",
+      "Warped Nylium"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Observer",
+    "variants": "Observer",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Obsidian",
+    "variants": "Obsidian",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Packed Ice",
+    "variants": "Packed Ice",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Packed Mud",
+    "variants": "Packed Mud",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Pale Hanging Moss",
+    "variants": "Pale Hanging Moss",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Pale Moss Block",
+    "variants": "Pale Moss Block",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Pale Moss Carpet",
+    "variants": "Pale Moss Carpet",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Pink Petals",
+    "variants": "Pink Petals",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "Yes"
+  },
+  {
+    "block": "Piston",
+    "variants": [
+      "Piston",
+      "Piston Head",
+      "Sticky Piston"
+    ],
+    "full_cube": {
+      "Piston Head": "No",
+      "Piston<br>Sticky Piston": {
+        "extended: false": "Yes",
+        "extended: true": "No"
+      }
+    },
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Pitcher Crop",
+    "variants": "Pitcher Crop",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Pitcher Plant",
+    "variants": "Pitcher Plant",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "Yes"
+  },
+  {
+    "block": "Planks",
+    "variants": [
+      "Acacia Planks",
+      "Bamboo Planks",
+      "Birch Planks",
+      "Cherry Planks",
+      "Crimson Planks",
+      "Dark Oak Planks",
+      "Jungle Planks",
+      "Mangrove Planks",
+      "Oak Planks",
+      "Pale Oak Planks",
+      "Spruce Planks",
+      "Warped Planks"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Podzol",
+    "variants": "Podzol",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Pointed Dripstone",
+    "variants": "Pointed Dripstone",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Polished Tuff",
+    "variants": "Polished Tuff",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Powder Snow",
+    "variants": "Powder Snow",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Powered Rail",
+    "variants": "Powered Rail",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Pressure Plates",
+    "variants": [
+      "Acacia Pressure Plate",
+      "Bamboo Pressure Plate",
+      "Birch Pressure Plate",
+      "Cherry Pressure Plate",
+      "Crimson Pressure Plate",
+      "Dark Oak Pressure Plate",
+      "Heavy Weighted Pressure Plate",
+      "Jungle Pressure Plate",
+      "Light Weighted Pressure Plate",
+      "Mangrove Pressure Plate",
+      "Oak Pressure Plate",
+      "Pale Oak Pressure Plate",
+      "Polished Blackstone Pressure Plate",
+      "Spruce Pressure Plate",
+      "Stone Pressure Plate",
+      "Warped Pressure Plate"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Prismarine",
+    "variants": [
+      "Dark Prismarine",
+      "Prismarine",
+      "Prismarine Bricks"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Pumpkin",
+    "variants": [
+      "Carved Pumpkin",
+      "Pumpkin"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Purpur Block",
+    "variants": [
+      "Purpur Block",
+      "Purpur Pillar"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Rail",
+    "variants": "Rail",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Red Sand",
+    "variants": "Red Sand",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Red Sandstone",
+    "variants": [
+      "Chiseled Red Sandstone",
+      "Cut Red Sandstone",
+      "Red Sandstone",
+      "Smooth Red Sandstone"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Redstone Comparator",
+    "variants": "Redstone Comparator",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Redstone Dust",
+    "variants": "Redstone Wire",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Redstone Lamp",
+    "variants": "Redstone Lamp",
+    "full_cube": "Yes",
+    "luminance": {
+      "lit: false": 0,
+      "lit: true": 15
+    },
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Redstone Ore",
+    "variants": [
+      "Deepslate Redstone Ore",
+      "Redstone Ore"
+    ],
+    "full_cube": "Yes",
+    "luminance": {
+      "lit: false": 0,
+      "lit: true": 9
+    },
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Redstone Repeater",
+    "variants": "Redstone Repeater",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Redstone Torch",
+    "variants": [
+      "Redstone Torch",
+      "Redstone Wall Torch"
+    ],
+    "full_cube": "No",
+    "luminance": {
+      "lit: false": 0,
+      "lit: true": 7
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Reinforced Deepslate",
+    "variants": "Reinforced Deepslate",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Resin Block",
+    "variants": "Block of Resin",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Resin Bricks",
+    "variants": [
+      "Chiseled Resin Bricks",
+      "Resin Bricks"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Resin Clump",
+    "variants": "Resin Clump",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Respawn Anchor",
+    "variants": "Respawn Anchor",
+    "full_cube": "Yes",
+    "luminance": {
+      "charges: 0": 0,
+      "charges: 1": 3,
+      "charges: 2": 7,
+      "charges: 3": 11,
+      "charges: 4": 15
+    },
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Roots",
+    "variants": [
+      "Crimson Roots",
+      "Warped Roots"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Sand",
+    "variants": "Sand",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Sandstone",
+    "variants": [
+      "Chiseled Sandstone",
+      "Cut Sandstone",
+      "Sandstone",
+      "Smooth Sandstone"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Saplings",
+    "variants": [
+      "Acacia Sapling",
+      "Birch Sapling",
+      "Cherry Sapling",
+      "Dark Oak Sapling",
+      "Jungle Sapling",
+      "Oak Sapling",
+      "Pale Oak Sapling",
+      "Spruce Sapling"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Scaffolding",
+    "variants": "Scaffolding",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Sculk",
+    "variants": "Sculk",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Sculk Catalyst",
+    "variants": "Sculk Catalyst",
+    "full_cube": "Yes",
+    "luminance": 6,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Sculk Sensor",
+    "variants": "Sculk Sensor",
+    "full_cube": "No",
+    "luminance": 1,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Sculk Shrieker",
+    "variants": "Sculk Shrieker",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Sculk Vein",
+    "variants": "Sculk Vein",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Sea Lantern",
+    "variants": "Sea Lantern",
+    "full_cube": "Yes",
+    "luminance": 15,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Sea Pickle",
+    "variants": "Sea Pickle",
+    "full_cube": "No",
+    "luminance": {
+      "pickles: 1": {
+        "waterlogged: false": 0,
+        "waterlogged: true": 6
+      },
+      "pickles: 2": {
+        "waterlogged: false": 0,
+        "waterlogged: true": 9
+      },
+      "pickles: 3": {
+        "waterlogged: false": 0,
+        "waterlogged: true": 12
+      },
+      "pickles: 4": {
+        "waterlogged: false": 0,
+        "waterlogged: true": 15
+      }
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Seagrass",
+    "variants": [
+      "Seagrass",
+      "Tall Seagrass"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Short Grass",
+    "variants": "Short Grass",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Shroomlight",
+    "variants": "Shroomlight",
+    "full_cube": "Yes",
+    "luminance": 15,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Shulker Box",
+    "variants": [
+      "Black Shulker Box",
+      "Blue Shulker Box",
+      "Brown Shulker Box",
+      "Cyan Shulker Box",
+      "Gray Shulker Box",
+      "Green Shulker Box",
+      "Light Blue Shulker Box",
+      "Light Gray Shulker Box",
+      "Lime Shulker Box",
+      "Magenta Shulker Box",
+      "Orange Shulker Box",
+      "Pink Shulker Box",
+      "Purple Shulker Box",
+      "Red Shulker Box",
+      "Shulker Box",
+      "White Shulker Box",
+      "Yellow Shulker Box"
+    ],
+    "full_cube": {
+      "Closed": "Yes",
+      "Open": "No"
+    },
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Signs",
+    "variants": [
+      "Acacia Sign",
+      "Acacia Wall Sign",
+      "Bamboo Sign",
+      "Bamboo Wall Sign",
+      "Birch Sign",
+      "Birch Wall Sign",
+      "Cherry Sign",
+      "Cherry Wall Sign",
+      "Crimson Sign",
+      "Crimson Wall Sign",
+      "Dark Oak Sign",
+      "Dark Oak Wall Sign",
+      "Jungle Sign",
+      "Jungle Wall Sign",
+      "Mangrove Sign",
+      "Mangrove Wall Sign",
+      "Oak Sign",
+      "Oak Wall Sign",
+      "Pale Oak Sign",
+      "Pale Oak Wall Sign",
+      "Spruce Sign",
+      "Spruce Wall Sign",
+      "Warped Sign",
+      "Warped Wall Sign"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Slabs",
+    "variants": [
+      "Acacia Slab",
+      "Andesite Slab",
+      "Bamboo Mosaic Slab",
+      "Bamboo Slab",
+      "Birch Slab",
+      "Blackstone Slab",
+      "Brick Slab",
+      "Cherry Slab",
+      "Cobbled Deepslate Slab",
+      "Cobblestone Slab",
+      "Crimson Slab",
+      "Cut Copper Slab",
+      "Cut Red Sandstone Slab",
+      "Cut Sandstone Slab",
+      "Dark Oak Slab",
+      "Dark Prismarine Slab",
+      "Deepslate Brick Slab",
+      "Deepslate Tile Slab",
+      "Diorite Slab",
+      "End Stone Brick Slab",
+      "Exposed Cut Copper Slab",
+      "Granite Slab",
+      "Jungle Slab",
+      "Mangrove Slab",
+      "Mossy Cobblestone Slab",
+      "Mossy Stone Brick Slab",
+      "Mud Brick Slab",
+      "Nether Brick Slab",
+      "Oak Slab",
+      "Oxidized Cut Copper Slab",
+      "Pale Oak Slab",
+      "Petrified Oak Slab",
+      "Polished Andesite Slab",
+      "Polished Blackstone Brick Slab",
+      "Polished Blackstone Slab",
+      "Polished Deepslate Slab",
+      "Polished Diorite Slab",
+      "Polished Granite Slab",
+      "Polished Tuff Slab",
+      "Prismarine Brick Slab",
+      "Prismarine Slab",
+      "Purpur Slab",
+      "Quartz Slab",
+      "Red Nether Brick Slab",
+      "Red Sandstone Slab",
+      "Resin Brick Slab",
+      "Sandstone Slab",
+      "Smooth Quartz Slab",
+      "Smooth Red Sandstone Slab",
+      "Smooth Sandstone Slab",
+      "Smooth Stone Slab",
+      "Spruce Slab",
+      "Stone Brick Slab",
+      "Stone Slab",
+      "Tuff Brick Slab",
+      "Tuff Slab",
+      "Warped Slab",
+      "Waxed Cut Copper Slab",
+      "Waxed Exposed Cut Copper Slab",
+      "Waxed Oxidized Cut Copper Slab",
+      "Waxed Weathered Cut Copper Slab",
+      "Weathered Cut Copper Slab"
+    ],
+    "full_cube": {
+      "type: bottom<br>type: top": "No",
+      "type: double": "Yes"
+    },
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Slime Block",
+    "variants": "Slime Block",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Small Dripleaf",
+    "variants": "Small Dripleaf",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Smithing Table",
+    "variants": "Smithing Table",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Smoker",
+    "variants": "Smoker",
+    "full_cube": "Yes",
+    "luminance": {
+      "lit: false": 0,
+      "lit: true": 13
+    },
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Sniffer Egg",
+    "variants": "Sniffer Egg",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Snow",
+    "variants": "Snow",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Snow Block",
+    "variants": "Snow Block",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Soul Sand",
+    "variants": "Soul Sand",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Soul Soil",
+    "variants": "Soul Soil",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Spawner",
+    "variants": "Monster Spawner",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Sponge",
+    "variants": [
+      "Sponge",
+      "Wet Sponge"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Spore Blossom",
+    "variants": "Spore Blossom",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "Yes"
+  },
+  {
+    "block": "Stained Glass",
+    "variants": [
+      "Black Stained Glass",
+      "Blue Stained Glass",
+      "Brown Stained Glass",
+      "Cyan Stained Glass",
+      "Gray Stained Glass",
+      "Green Stained Glass",
+      "Light Blue Stained Glass",
+      "Light Gray Stained Glass",
+      "Lime Stained Glass",
+      "Magenta Stained Glass",
+      "Orange Stained Glass",
+      "Pink Stained Glass",
+      "Purple Stained Glass",
+      "Red Stained Glass",
+      "White Stained Glass",
+      "Yellow Stained Glass"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Stained Glass Panes",
+    "variants": [
+      "Black Stained Glass Pane",
+      "Blue Stained Glass Pane",
+      "Brown Stained Glass Pane",
+      "Cyan Stained Glass Pane",
+      "Gray Stained Glass Pane",
+      "Green Stained Glass Pane",
+      "Light Blue Stained Glass Pane",
+      "Light Gray Stained Glass Pane",
+      "Lime Stained Glass Pane",
+      "Magenta Stained Glass Pane",
+      "Orange Stained Glass Pane",
+      "Pink Stained Glass Pane",
+      "Purple Stained Glass Pane",
+      "Red Stained Glass Pane",
+      "White Stained Glass Pane",
+      "Yellow Stained Glass Pane"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Stairs",
+    "variants": [
+      "Acacia Stairs",
+      "Andesite Stairs",
+      "Bamboo Mosaic Stairs",
+      "Bamboo Stairs",
+      "Birch Stairs",
+      "Blackstone Stairs",
+      "Brick Stairs",
+      "Cherry Stairs",
+      "Cobbled Deepslate Stairs",
+      "Cobblestone Stairs",
+      "Crimson Stairs",
+      "Cut Copper Stairs",
+      "Dark Oak Stairs",
+      "Dark Prismarine Stairs",
+      "Deepslate Brick Stairs",
+      "Deepslate Tile Stairs",
+      "Diorite Stairs",
+      "End Stone Brick Stairs",
+      "Exposed Cut Copper Stairs",
+      "Granite Stairs",
+      "Jungle Stairs",
+      "Mangrove Stairs",
+      "Mossy Cobblestone Stairs",
+      "Mossy Stone Brick Stairs",
+      "Mud Brick Stairs",
+      "Nether Brick Stairs",
+      "Oak Stairs",
+      "Oxidized Cut Copper Stairs",
+      "Pale Oak Stairs",
+      "Polished Andesite Stairs",
+      "Polished Blackstone Brick Stairs",
+      "Polished Blackstone Stairs",
+      "Polished Deepslate Stairs",
+      "Polished Diorite Stairs",
+      "Polished Granite Stairs",
+      "Polished Tuff Stairs",
+      "Prismarine Brick Stairs",
+      "Prismarine Stairs",
+      "Purpur Stairs",
+      "Quartz Stairs",
+      "Red Nether Brick Stairs",
+      "Red Sandstone Stairs",
+      "Resin Brick Stairs",
+      "Sandstone Stairs",
+      "Smooth Quartz Stairs",
+      "Smooth Red Sandstone Stairs",
+      "Smooth Sandstone Stairs",
+      "Spruce Stairs",
+      "Stone Brick Stairs",
+      "Stone Stairs",
+      "Tuff Brick Stairs",
+      "Tuff Stairs",
+      "Warped Stairs",
+      "Waxed Cut Copper Stairs",
+      "Waxed Exposed Cut Copper Stairs",
+      "Waxed Oxidized Cut Copper Stairs",
+      "Waxed Weathered Cut Copper Stairs",
+      "Weathered Cut Copper Stairs"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Stems",
+    "variants": [
+      "Crimson Stem",
+      "Stripped Crimson Stem",
+      "Stripped Warped Stem",
+      "Warped Stem"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Stone",
+    "variants": [
+      "Infested Stone",
+      "Smooth Stone",
+      "Stone"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Stone Bricks",
+    "variants": [
+      "Chiseled Stone Bricks",
+      "Cracked Stone Bricks",
+      "Infested Chiseled Stone Bricks",
+      "Infested Cracked Stone Bricks",
+      "Infested Mossy Stone Bricks",
+      "Infested Stone Bricks",
+      "Mossy Stone Bricks",
+      "Stone Bricks"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Stonecutter",
+    "variants": "Stonecutter",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Structure Block",
+    "variants": "Structure Block",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Structure Void",
+    "variants": "Structure Void",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Sugar Cane",
+    "variants": "Sugar Cane",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Suspicious Gravel",
+    "variants": "Suspicious Gravel",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Suspicious Sand",
+    "variants": "Suspicious Sand",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Sweet Berry Bush",
+    "variants": "Sweet Berry Bush",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Tall Grass",
+    "variants": "Tall Grass",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Target",
+    "variants": "Target",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Terracotta",
+    "variants": [
+      "Black Terracotta",
+      "Blue Terracotta",
+      "Brown Terracotta",
+      "Cyan Terracotta",
+      "Gray Terracotta",
+      "Green Terracotta",
+      "Light Blue Terracotta",
+      "Light Gray Terracotta",
+      "Lime Terracotta",
+      "Magenta Terracotta",
+      "Orange Terracotta",
+      "Pink Terracotta",
+      "Purple Terracotta",
+      "Red Terracotta",
+      "Terracotta",
+      "White Terracotta",
+      "Yellow Terracotta"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Tinted Glass",
+    "variants": "Tinted Glass",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "TNT",
+    "variants": "TNT",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Torch",
+    "variants": [
+      "Soul Torch",
+      "Soul Wall Torch",
+      "Torch",
+      "Wall Torch"
+    ],
+    "full_cube": "No",
+    "luminance": {
+      "Soul Torch<br>Soul Wall Torch": 10,
+      "Torch<br>Wall Torch": 14
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Torchflower",
+    "variants": "Torchflower",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "Yes",
+    "tag_flowers": "Yes"
+  },
+  {
+    "block": "Torchflower Crop",
+    "variants": "Torchflower Crop",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Trapdoors",
+    "variants": [
+      "Acacia Trapdoor",
+      "Bamboo Trapdoor",
+      "Birch Trapdoor",
+      "Cherry Trapdoor",
+      "Copper Trapdoor",
+      "Crimson Trapdoor",
+      "Dark Oak Trapdoor",
+      "Exposed Copper Trapdoor",
+      "Iron Trapdoor",
+      "Jungle Trapdoor",
+      "Mangrove Trapdoor",
+      "Oak Trapdoor",
+      "Oxidized Copper Trapdoor",
+      "Pale Oak Trapdoor",
+      "Spruce Trapdoor",
+      "Warped Trapdoor",
+      "Waxed Copper Trapdoor",
+      "Waxed Exposed Copper Trapdoor",
+      "Waxed Oxidized Copper Trapdoor",
+      "Waxed Weathered Copper Trapdoor",
+      "Weathered Copper Trapdoor"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Trapped Chest",
+    "variants": "Trapped Chest",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Trial Spawner",
+    "variants": "Trial Spawner",
+    "full_cube": "Yes",
+    "luminance": {
+      "trial_spawner_state: active<br>trial_spawner_state: ejecting_reward<br>trial_spawner_state: waiting_for_reward_ejection": 8,
+      "trial_spawner_state: cooldown<br>trial_spawner_state: inactive": 0,
+      "trial_spawner_state: waiting_for_players": 4
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Tripwire",
+    "variants": "Tripwire",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Tripwire Hook",
+    "variants": "Tripwire Hook",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Tuff",
+    "variants": "Tuff",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Tuff Bricks",
+    "variants": "Tuff Bricks",
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Turtle Egg",
+    "variants": "Turtle Egg",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Twisting Vines",
+    "variants": [
+      "Twisting Vines",
+      "Twisting Vines Plant"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Vault",
+    "variants": "Vault",
+    "full_cube": "Yes",
+    "luminance": {
+      "vault_state: active<br>vault_state: ejecting<br>vault_state: unlocking": 12,
+      "vault_state: inactive": 6
+    },
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Vines",
+    "variants": "Vines",
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Walls",
+    "variants": [
+      "Andesite Wall",
+      "Blackstone Wall",
+      "Brick Wall",
+      "Cobbled Deepslate Wall",
+      "Cobblestone Wall",
+      "Deepslate Brick Wall",
+      "Deepslate Tile Wall",
+      "Diorite Wall",
+      "End Stone Brick Wall",
+      "Granite Wall",
+      "Mossy Cobblestone Wall",
+      "Mossy Stone Brick Wall",
+      "Mud Brick Wall",
+      "Nether Brick Wall",
+      "Polished Blackstone Brick Wall",
+      "Polished Blackstone Wall",
+      "Polished Deepslate Wall",
+      "Polished Tuff Wall",
+      "Prismarine Wall",
+      "Red Nether Brick Wall",
+      "Red Sandstone Wall",
+      "Resin Brick Wall",
+      "Sandstone Wall",
+      "Stone Brick Wall",
+      "Tuff Brick Wall",
+      "Tuff Wall"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Wart Blocks",
+    "variants": [
+      "Nether Wart Block",
+      "Warped Wart Block"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Water",
+    "variants": [
+      "Bubble Column",
+      "Water"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Weeping Vines",
+    "variants": [
+      "Weeping Vines",
+      "Weeping Vines Plant"
+    ],
+    "full_cube": "No",
+    "luminance": 0,
+    "opaque": "No",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Wood",
+    "variants": [
+      "Acacia Wood",
+      "Birch Wood",
+      "Cherry Wood",
+      "Dark Oak Wood",
+      "Jungle Wood",
+      "Mangrove Wood",
+      "Oak Wood",
+      "Pale Oak Wood",
+      "Spruce Wood",
+      "Stripped Acacia Wood",
+      "Stripped Birch Wood",
+      "Stripped Cherry Wood",
+      "Stripped Dark Oak Wood",
+      "Stripped Jungle Wood",
+      "Stripped Mangrove Wood",
+      "Stripped Oak Wood",
+      "Stripped Pale Oak Wood",
+      "Stripped Spruce Wood"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  },
+  {
+    "block": "Wool",
+    "variants": [
+      "Black Wool",
+      "Blue Wool",
+      "Brown Wool",
+      "Cyan Wool",
+      "Gray Wool",
+      "Green Wool",
+      "Light Blue Wool",
+      "Light Gray Wool",
+      "Lime Wool",
+      "Magenta Wool",
+      "Orange Wool",
+      "Pink Wool",
+      "Purple Wool",
+      "Red Wool",
+      "White Wool",
+      "Yellow Wool"
+    ],
+    "full_cube": "Yes",
+    "luminance": 0,
+    "opaque": "Yes",
+    "tag_small_flowers": "No",
+    "tag_flowers": "No"
+  }
+]

@@ -1,4 +1,4 @@
-package dev.luna5ama.shadesmith.block
+package dev.luna5ama.shadesmith.blockcode
 
 @Suppress("ConstPropertyName", "unused", "SpellCheckingInspection")
 object BlockNames {
