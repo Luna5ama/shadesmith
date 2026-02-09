@@ -36,7 +36,7 @@ interface PBRProvider<P : PBRValue<*, *>> {
     fun BlockScope.provide(): Sequence<Pair<BlockState, P>>
 }
 
-fun <P : PBRValue<*, *>> PBRProvider<P>.provide(blockName: String, property: BlockProperty) =
-    with(BlockScope(BlockState(blockName), property)) {
-        provide()
-    }
+context(scope: BlockScope)
+fun <P : PBRValue<*, *>> PBRProvider<P>.provide() = with(scope) {
+    provide()
+}.toMap()
