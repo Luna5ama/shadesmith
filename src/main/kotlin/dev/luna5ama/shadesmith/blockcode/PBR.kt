@@ -35,9 +35,7 @@ fun generateHardcodedPBR() {
 
     // Create palette by deduplicating PBR data
     println("Creating palette...")
-    val pbrDataToPalette = mutableMapOf(
-        PBRAssemblerImpl.provide(BlockState(""), BlockProperty()).first().second to 0
-    )
+    val pbrDataToPalette = mutableMapOf<List<LUTData>, Int>()
     val blockStateToMaterialId = mutableMapOf<BlockState, Int>()
     var nextMaterialId = 0
 
@@ -193,9 +191,10 @@ private fun writeLUTFiles(texturesPath: Path, pbrDataToPalette: Map<List<LUTData
 
         // Create a buffer for the entire LUT (1D texture)
         val textureData = ByteArray((maxMaterialId + 1) * bytesPerEntry)
+        val prepended = pbrDataToPalette + (PBRAssemblerImpl.provide(BlockState(""), BlockProperty()).first().second to 0)
 
         // Fill in the data for each material ID
-        for ((dataList, materialId) in pbrDataToPalette) {
+        for ((dataList, materialId) in prepended) {
             if (lutIndex < dataList.size) {
                 val lutData = dataList[lutIndex]
                 val offset = materialId * bytesPerEntry

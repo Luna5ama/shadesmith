@@ -1,5 +1,7 @@
 package dev.luna5ama.shadesmith.blockcode
 
+import kotlin.math.sqrt
+
 object SSS : PBRProvider<PBRValue.UInt4> {
     override val defaultValue: PBRValue.UInt4 = PBRValue.UInt4(0u)
     override fun BlockScope.provide(): Sequence<Pair<BlockState, PBRValue.UInt4>> = sequence {
@@ -78,6 +80,20 @@ object IOR : PBRProvider<PBRValue.Unorm8> {
 
         if (nameContains(BlockNames.BlockofEmerald)) {
             yield(baseState to encodeIOR(1.58f))
+        }
+    }
+}
+
+object Roughness : PBRProvider<PBRValue.Unorm8> {
+    private fun encodeRoughness(roughness: Float): PBRValue.Unorm8 {
+        return PBRValue.Unorm8(sqrt(roughness))
+    }
+
+    override val defaultValue: PBRValue.Unorm8 = encodeRoughness(0.5f)
+
+    override fun BlockScope.provide(): Sequence<Pair<BlockState, PBRValue.Unorm8>> = sequence {
+        if (nameContains("glass")) {
+            yield(baseState to encodeRoughness(0.0f))
         }
     }
 }
