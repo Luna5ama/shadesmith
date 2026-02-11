@@ -1,5 +1,6 @@
 package dev.luna5ama.shadesmith.blockcode
 
+import kotlin.math.pow
 import kotlin.math.sqrt
 
 object SSS : PBRProvider<PBRValue.UInt4> {
@@ -112,6 +113,9 @@ object Roughness : PBRProvider<PBRValue.Unorm8> {
     override fun BlockScope.provide(): Sequence<Pair<BlockState, PBRValue.Unorm8>> = sequence {
         if (nameContains("glass")) {
             yield(baseState to encodeRoughness(0.0f))
+        }
+        if (nameEquals("ice")) {
+            yield(baseState to encodeRoughness(0.01f))
         }
     }
 }
