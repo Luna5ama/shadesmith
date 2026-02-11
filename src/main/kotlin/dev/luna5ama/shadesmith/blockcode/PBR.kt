@@ -2,9 +2,14 @@ package dev.luna5ama.shadesmith.blockcode
 
 import dev.luna5ama.shadesmith.IOContext
 import dev.luna5ama.shadesmith.TextureFormat
-import kotlinx.serialization.json.*
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import java.nio.file.Path
-import kotlin.io.path.*
+import kotlin.io.path.bufferedWriter
+import kotlin.io.path.createDirectories
+import kotlin.io.path.outputStream
 
 context(ioContext: IOContext)
 fun generateHardcodedPBR() {
@@ -40,10 +45,11 @@ fun generateHardcodedPBR() {
         listOf("water", "flowing_water")
     )
 
-    val blockStateToMaterialId = reservedMaterialIDs.asSequence()
+    val reserved = reservedMaterialIDs.asSequence()
         .withIndex()
         .flatMap { (index, blockNames) -> blockNames.map { BlockState(it) to (index + 1) } }
-        .toMap(mutableMapOf())
+        .toMap()
+    val blockStateToMaterialId = reserved.toMutableMap()
     var nextMaterialId = reservedMaterialIDs.size
 
     for ((state, data) in blockStateToPBRData) {
@@ -55,6 +61,10 @@ fun generateHardcodedPBR() {
         }
         blockStateToMaterialId[state] = materialId
     }
+    val palette = pbrDataToPalette.toList() +
+            reserved.entries
+                .distinctBy { it.value }
+                .map { (state, id) -> blockStateToPBRData[state]!! to id }
     println("Created palette with ${pbrDataToPalette.size} unique material IDs")
 
     // Write block.properties
@@ -63,7 +73,7 @@ fun generateHardcodedPBR() {
 
     // Write LUT files
     println("Writing LUT files...")
-    writeLUTFiles(texturesPath, pbrDataToPalette)
+    writeLUTFiles(texturesPath, palette)
     println("Hardcoded PBR generation complete!")
 }
 
@@ -112,7 +122,7 @@ private fun parseBlocks(blockListJson: JsonArray): Map<String, Map<BlockState, B
             }
 
             val minecraftId = nameMapping[cleanedName] ?: run {
-                val name =cleanedName.lowercase().replace(" ", "_").replace("-", "_")
+                val name = cleanedName.lowercase().replace(" ", "_").replace("-", "_")
                 println("No Minecraft ID found for block state '$variantDisplayName', falling back to guessed name '$name'")
                 name
             }
@@ -155,7 +165,7 @@ private fun writeBlockProperties(path: Path, blockStateToMaterialId: Map<BlockSt
     }
 }
 
-private fun writeLUTFiles(texturesPath: Path, pbrDataToPalette: Map<List<LUTData>, Int>) {
+private fun writeLUTFiles(texturesPath: Path, pbrDataToPalette: List<Pair<List<LUTData>, Int>>) {
     texturesPath.createDirectories()
 
     if (pbrDataToPalette.isEmpty()) {
@@ -164,11 +174,11 @@ private fun writeLUTFiles(texturesPath: Path, pbrDataToPalette: Map<List<LUTData
     }
 
     // Find the maximum number of LUTs needed
-    val maxLUTs = pbrDataToPalette.keys.maxOfOrNull { it.size } ?: 0
+    val maxLUTs = pbrDataToPalette.maxOfOrNull { it.first.size } ?: 0
     println("Writing $maxLUTs LUT file(s)...")
 
     // Find the maximum material ID to determine texture size
-    val maxMaterialId = pbrDataToPalette.values.maxOrNull() ?: 0
+    val maxMaterialId = pbrDataToPalette.maxOfOrNull { it.second } ?: 0
     println("Maximum material ID: $maxMaterialId")
 
     // Create one file per LUT index
@@ -201,7 +211,8 @@ private fun writeLUTFiles(texturesPath: Path, pbrDataToPalette: Map<List<LUTData
 
         // Create a buffer for the entire LUT (1D texture)
         val textureData = ByteArray((maxMaterialId + 1) * bytesPerEntry)
-        val prepended = pbrDataToPalette + (PBRAssemblerImpl.provide(BlockState(""), BlockProperty()).first().second to 0)
+        val prepended =
+            pbrDataToPalette + (PBRAssemblerImpl.provide(BlockState(""), BlockProperty()).first().second to 0)
 
         // Fill in the data for each material ID
         for ((dataList, materialId) in prepended) {
