@@ -16,7 +16,8 @@ object PBRAssemblerImpl : PBRAssembler {
         val ior = IOR.provide()
         val roughness = Roughness.provide()
         val smallFoliage = SmallFoliageFlag.provide()
-        val allStates = listOf(sss, emissive, ior, roughness, smallFoliage)
+        val emissiveMultiplier = EmissiveMultiplier.provide()
+        val allStates = listOf(sss, emissive, ior, roughness, smallFoliage, emissiveMultiplier)
             .flatMap { it.keys }
         fun <P : PBRValue<*, *>> getData(provider: PBRProvider<P>, map: Map<BlockState, P>, state: BlockState): P {
             return map[state] ?: map[baseState] ?: provider.defaultValue
@@ -27,6 +28,7 @@ object PBRAssemblerImpl : PBRAssembler {
             val iorValue = getData(IOR, ior, state)
             val roughnessValue = getData(Roughness, roughness, state)
             val smallFoliageValue = getData(SmallFoliageFlag, smallFoliage, state)
+            val emissiveMultiplierValue = getData(EmissiveMultiplier, emissiveMultiplier, state)
             yield(state to buildList {
                 add(LUTData(
                     TextureFormat.R32UI,
@@ -35,8 +37,9 @@ object PBRAssemblerImpl : PBRAssembler {
                         int32Bits = int32Bits or (sssValue.rawData.toInt() and 0xF)
                         int32Bits = int32Bits or ((emissiveValue.rawData.toInt() and 0xF) shl 4)
                         int32Bits = int32Bits or ((iorValue.rawData.toInt() and 0xFF) shl 8)
-                        int32Bits = int32Bits or ((roughnessValue.rawData.toInt() and 0xFF) shl 16)
-                        int32Bits = int32Bits or ((smallFoliageValue.rawData.toInt() and 0x1) shl 31)
+                        int32Bits = int32Bits or ((emissiveMultiplierValue.rawData.toInt() and 0xF) shl 16)
+                        int32Bits = int32Bits or ((smallFoliageValue.rawData.toInt() and 0x1) shl 20)
+                        int32Bits = int32Bits or ((roughnessValue.rawData.toInt() and 0xFF) shl 24)
                         putInt(int32Bits)
                     }
                 ))

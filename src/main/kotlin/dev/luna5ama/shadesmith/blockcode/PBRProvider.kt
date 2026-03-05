@@ -14,6 +14,8 @@ sealed interface PBRValue<T, R> {
             get() = if (value) 1u else 0u
     }
 
+    data class Int4(override val value: Byte) : Identity<Byte>
+
     data class UInt4(override val value: UByte) : Identity<UByte>
     data class UInt8(override val value: UByte) : Identity<UByte>
     data class Unorm4(override val value: Float) : PBRValue<Float, UByte> {

@@ -1,6 +1,5 @@
 package dev.luna5ama.shadesmith.blockcode
 
-import kotlin.math.pow
 import kotlin.math.sqrt
 
 object SSS : PBRProvider<PBRValue.UInt4> {
@@ -116,6 +115,23 @@ object Roughness : PBRProvider<PBRValue.Unorm8> {
         }
         if (nameEquals("ice")) {
             yield(baseState to encodeRoughness(0.01f))
+        }
+    }
+}
+
+object EmissiveMultiplier : PBRProvider<PBRValue.Int4> {
+    private fun encodeEmissiveOverride(override: Int): PBRValue.Int4 {
+        return PBRValue.Int4((override and 0b1111).toByte())
+    }
+
+    override val defaultValue: PBRValue.Int4 = encodeEmissiveOverride(0)
+
+    override fun BlockScope.provide(): Sequence<Pair<BlockState, PBRValue.Int4>> = sequence {
+        if (nameEquals(BlockNames.EndRod)) {
+            yield(baseState to encodeEmissiveOverride(-2))
+        }
+        if (nameEquals(BlockNames.LightningRod)) {
+            yield(baseState to encodeEmissiveOverride(-4))
         }
     }
 }
