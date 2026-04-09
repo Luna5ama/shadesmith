@@ -40,7 +40,7 @@ context(ioContext: IOContext)
 fun readOtherShaders(): List<ShaderFile> {
     val validExtensions = setOf("vsh", "fsh", "gsh", "csh", "tcs", "tes")
     return ioContext.inputPath.listDirectoryEntries().parallelStream()
-        .filter { it.extension in validExtensions }
+        .filter { it.extension in validExtensions || it.name.startsWith("voxy_") }
         .filter { path -> IRIS_PASS_PREFIX.none { path.name.startsWith(it.actualName) } }
         .map { ioContext.readInputRoot(it.name) }
         .filter { it != null }
