@@ -35,9 +35,9 @@ sealed interface PBRValue<T, R> {
 }
 
 class BlockScope(val baseState: BlockState, val property: BlockProperty) {
-    fun nameEndsWith(vararg suffixes: String): Boolean = suffixes.any { baseState.name.endsWith(it) }
-    fun nameEquals(vararg names: String): Boolean = names.any { baseState.name == it }
-    fun nameContains(vararg substrings: String): Boolean = substrings.any { baseState.name.contains(it) }
+    fun nameEndsWith(vararg suffixes: String): Boolean = suffixes.any { baseState.blockID.endsWith(it) }
+    fun nameEquals(vararg names: String): Boolean = names.any { baseState.blockID == it }
+    fun nameContains(vararg substrings: String): Boolean = substrings.any { baseState.blockID.contains(it) }
 }
 
 interface PBRProvider<P : PBRValue<*, *>> {
@@ -47,6 +47,6 @@ interface PBRProvider<P : PBRValue<*, *>> {
 
 context(scope: BlockScope)
 fun <P : PBRValue<*, *>> PBRProvider<P>.provide() = with(scope) {
-    if (baseState.name.isEmpty()) sequenceOf(baseState to defaultValue)
+    if (baseState.blockID.isEmpty()) sequenceOf(baseState to defaultValue)
     else provide()
 }.toMap()

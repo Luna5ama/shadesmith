@@ -27,13 +27,11 @@ fun generateHardcodedPBR() {
     println("Generating PBR data for blocks...")
     val blockStateToPBRData = mutableMapOf<BlockState, List<LUTData>>()
 
-    for ((minecraftId, statePropertyMap) in blocks) {
+    for ((blockState, property) in blocks) {
         // For each block type, we need to pass each state separately to the assembler
-        for ((blockState, property) in statePropertyMap) {
-            val pbrData = PBRAssemblerImpl.provide(blockState, property)
-            for ((state, data) in pbrData) {
-                blockStateToPBRData[state] = data
-            }
+        val pbrData = PBRAssemblerImpl.provide(blockState, property)
+        for ((state, data) in pbrData) {
+            blockStateToPBRData[state] = data
         }
     }
     println("Generated PBR data for ${blockStateToPBRData.size} block states")
@@ -50,14 +48,14 @@ fun generateHardcodedPBR() {
         .toMap()
     val reservedByName = reservedByState
         .entries
-        .groupBy({ it.key.name }, { it.value })
+        .groupBy({ it.key.blockID }, { it.value })
         .mapValues { (_, ids) -> ids.first() }
 
     val blockStateToMaterialId = mutableMapOf<BlockState, Int>()
     var nextMaterialId = reservedMaterialIDs.size
 
     for (state in blockStateToPBRData.keys) {
-        val reservedMaterialId = reservedByState[state] ?: reservedByName[state.name]
+        val reservedMaterialId = reservedByState[state] ?: reservedByName[state.blockID]
         if (reservedMaterialId != null) {
             blockStateToMaterialId[state] = reservedMaterialId
             continue
@@ -100,54 +98,13 @@ private fun loadBlockList(): JsonArray {
     return Json.parseToJsonElement(jsonText).jsonArray
 }
 
-private fun loadBlockNameMapping(): Map<String, String> {
-    val resourceStream = object {}.javaClass.getResourceAsStream("/blockdata/list_of_block_by_version.csv")
-        ?: error("Could not find list_of_block_by_version.csv in resources")
-    val mapping = mutableMapOf<String, String>()
-    resourceStream.bufferedReader().useLines { lines ->
-        lines.drop(1).forEach { line ->
-            val parts = line.split(',')
-            if (parts.size >= 2) {
-                val displayName = parts[0].trim()
-                val minecraftId = parts[1].trim()
-                mapping[displayName] = minecraftId
-            }
-        }
-    }
-    return mapping
-}
-
-private fun parseBlocks(blockListJson: JsonArray): Map<String, Map<BlockState, BlockProperty>> {
-    val blocks = mutableMapOf<String, MutableMap<BlockState, BlockProperty>>()
-    val nameMapping = loadBlockNameMapping()
+private fun parseBlocks(blockListJson: JsonArray): Map<BlockState, BlockProperty> {
+    val blocks = mutableMapOf<BlockState, BlockProperty>()
 
     for (element in blockListJson) {
         val jsonObject = element.jsonObject
-        // BlockProperty.fromJsonObject returns Map<BlockState, BlockProperty>
         val blockStateProperties = BlockProperty.fromJsonObject(jsonObject)
-
-        // Convert each BlockState's variant name to Minecraft ID using the CSV mapping
-        for ((blockState, property) in blockStateProperties) {
-            val variantDisplayName = blockState.name
-
-            // Clean up "No Translation Key: " prefix if present
-            val cleanedName = if (variantDisplayName.startsWith("No Translation Key: ")) {
-                variantDisplayName.substring("No Translation Key: ".length)
-            } else {
-                variantDisplayName
-            }
-
-            val minecraftId = nameMapping[cleanedName] ?: run {
-                val name = cleanedName.lowercase().replace(" ", "_").replace("-", "_")
-                println("No Minecraft ID found for block state '$variantDisplayName', falling back to guessed name '$name'")
-                name
-            }
-
-            // Create a new BlockState with the Minecraft ID instead of display name
-            val minecraftBlockState = BlockState(minecraftId, blockState.states)
-
-            blocks.getOrPut(minecraftId) { mutableMapOf() }[minecraftBlockState] = property
-        }
+        blocks.putAll(blockStateProperties)
     }
 
     return blocks
@@ -169,7 +126,7 @@ private fun writeBlockProperties(path: Path, blockStateToMaterialId: Map<BlockSt
         for ((materialId, states) in materialIdToStates.entries.sortedBy { it.key }) {
             val blockIds = states.joinToString(" ") { state ->
                 buildString {
-                    append(state.name)
+                    append(state.blockID)
                     if (state.states.isNotEmpty()) {
                         append(":")
                         append(state.states.entries.joinToString(":") { "${it.key}=${it.value}" })

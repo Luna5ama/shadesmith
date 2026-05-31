@@ -4,7 +4,7 @@ import kotlinx.serialization.json.*
 
 data class BlockProperty(
     val block: String = "",
-    val variants: List<String> = emptyList(),
+    val blockID: String = "",
     val isFullCube: Boolean = false,
     val luminance: Int = 0,
     val isOpaque: Boolean = true,
@@ -16,59 +16,15 @@ data class BlockProperty(
     }
 
     companion object {
-        // Split variant names that contain <br> as a separator
-        private fun splitVariantName(name: String): List<String> {
-            return name.split("<br>", "<br/>", "<BR>", ignoreCase = true)
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-        }
-
         fun fromJsonObject(jsonObject: JsonObject): Map<BlockState, BlockProperty> {
             val block = jsonObject["block"]!!.jsonPrimitive.content
-            val variantsRaw = jsonObject["variants"]!!
-            val variants = if (variantsRaw is JsonArray) {
-                variantsRaw.flatMap { splitVariantName(it.jsonPrimitive.content) }
-            } else {
-                splitVariantName(variantsRaw.jsonPrimitive.content)
-            }
+            val blockID = jsonObject["block_id"]!!.jsonPrimitive.content.substringAfterLast(':')
 
-            fun booleanTag(name: String, variantName: String? = null, stateKey: String? = null): Boolean {
+            fun booleanTag(name: String): Boolean {
                 val element = jsonObject[name] ?: return false
                 return when (element) {
                     is JsonPrimitive -> element.content == "Yes"
-                    is JsonObject -> {
-                        if (variantName != null) {
-                            // Try exact match first
-                            var matchedKey: String? = null
-                            if (element.containsKey(variantName)) {
-                                matchedKey = variantName
-                            } else {
-                                // Try matching against keys with <br> separators
-                                matchedKey = element.keys.firstOrNull { key ->
-                                    splitVariantName(key).contains(variantName)
-                                }
-                            }
-
-                            if (matchedKey != null) {
-                                val variantElement = element[matchedKey]!!
-                                when (variantElement) {
-                                    is JsonPrimitive -> variantElement.content == "Yes"
-                                    is JsonObject -> {
-                                        if (stateKey != null && variantElement.containsKey(stateKey)) {
-                                            variantElement[stateKey]!!.jsonPrimitive.content == "Yes"
-                                        } else {
-                                            false
-                                        }
-                                    }
-                                    else -> false
-                                }
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    }
+                    is JsonObject -> false
                     else -> false
                 }
             }
@@ -80,92 +36,36 @@ data class BlockProperty(
                 return mapOf(parts[0].trim() to parts[1].trim())
             }
 
-            fun getLuminanceData(variantName: String? = null): Map<Map<String, String>, Int> {
+            fun getLuminanceData(): Map<Map<String, String>, Int> {
                 val element = jsonObject["luminance"] ?: return mapOf(emptyMap<String, String>() to 0)
                 return when (element) {
                     is JsonPrimitive -> mapOf(emptyMap<String, String>() to element.int)
                     is JsonObject -> {
-                        // First try to find by variant name (handling <br> separators)
-                        var matchedKey: String? = null
-                        if (variantName != null) {
-                            // Try exact match first
-                            if (element.containsKey(variantName)) {
-                                matchedKey = variantName
-                            } else {
-                                // Try matching against keys with <br> separators
-                                matchedKey = element.keys.firstOrNull { key ->
-                                    splitVariantName(key).contains(variantName)
-                                }
-                            }
-                        }
+                        val result = mutableMapOf<Map<String, String>, Int>()
 
-                        if (matchedKey != null) {
-                            val variantElement = element[matchedKey]!!
-                            when (variantElement) {
-                                is JsonPrimitive -> mapOf(emptyMap<String, String>() to variantElement.int)
+                        for ((key, value) in element.entries) {
+                            val stateKey1 = parseStateKey(key)
+                            if (stateKey1.isEmpty()) continue
+
+                            when (value) {
+                                is JsonPrimitive -> {
+                                    result[stateKey1] = value.int
+                                }
                                 is JsonObject -> {
-                                    // Parse state-specific luminance values
-                                    val result = mutableMapOf<Map<String, String>, Int>()
-                                    for ((stateKey, value) in variantElement.entries) {
-                                        when (value) {
-                                            is JsonPrimitive -> {
-                                                result[parseStateKey(stateKey)] = value.int
-                                            }
-                                            is JsonObject -> {
-                                                // Nested state keys (e.g., candles: 1 -> lit: false)
-                                                val stateKey1 = parseStateKey(stateKey)
-                                                for ((nestedKey, nestedValue) in value.entries) {
-                                                    if (nestedValue is JsonPrimitive) {
-                                                        val stateKey2 = parseStateKey(nestedKey)
-                                                        val combinedStates = stateKey1 + stateKey2
-                                                        result[combinedStates] = nestedValue.int
-                                                    }
-                                                }
-                                            }
-                                            else -> {}
+                                    // Nested state keys (e.g., candles: 1 -> lit: false)
+                                    for ((nestedKey, nestedValue) in value.entries) {
+                                        if (nestedValue is JsonPrimitive) {
+                                            val stateKey2 = parseStateKey(nestedKey)
+                                            val combinedStates = stateKey1 + stateKey2
+                                            result[combinedStates] = nestedValue.int
                                         }
                                     }
-                                    result.ifEmpty { mapOf(emptyMap<String, String>() to 0) }
                                 }
-                                else -> mapOf(emptyMap<String, String>() to 0)
-                            }
-                        } else {
-                            // No variant name match, check if all keys are state keys (e.g., "candles: 1")
-                            // This handles the case where luminance is keyed by states, not variants
-                            val result = mutableMapOf<Map<String, String>, Int>()
-
-                            for ((key, value) in element.entries) {
-                                val stateKey1 = parseStateKey(key)
-                                if (stateKey1.isNotEmpty()) {
-                                    // This is a state key, check if value is primitive or object
-                                    when (value) {
-                                        is JsonPrimitive -> {
-                                            result[stateKey1] = value.int
-                                        }
-                                        is JsonObject -> {
-                                            // Nested state keys (e.g., candles: 1 -> lit: false)
-                                            for ((nestedKey, nestedValue) in value.entries) {
-                                                if (nestedValue is JsonPrimitive) {
-                                                    val stateKey2 = parseStateKey(nestedKey)
-                                                    // Combine both state keys
-                                                    val combinedStates = stateKey1 + stateKey2
-                                                    result[combinedStates] = nestedValue.int
-                                                }
-                                            }
-                                        }
-                                        else -> {}
-                                    }
-                                } else {
-                                    // Not a state key, might be a variant name we don't match
-                                }
-                            }
-
-                            if (result.isEmpty()) {
-                                mapOf(emptyMap<String, String>() to 0)
-                            } else {
-                                result
+                                else -> {}
                             }
                         }
+
+                        if (result.isEmpty()) mapOf(emptyMap<String, String>() to 0) else result
                     }
                     else -> mapOf(emptyMap<String, String>() to 0)
                 }
@@ -175,34 +75,27 @@ data class BlockProperty(
             val isOpaque = booleanTag("opaque")
 
             val result = mutableMapOf<BlockState, BlockProperty>()
+            val luminanceData = getLuminanceData()
+            val tagSmallFlower = booleanTag("tag_small_flowers")
+            val tagFlower = booleanTag("tag_flowers")
+            val tags = buildSet {
+                if (tagSmallFlower) add(Tags.SmallFlower)
+                if (tagFlower) add(Tags.Flower)
+            }
 
-            for (variant in variants) {
-                val luminanceData = getLuminanceData(variant)
-                val tagSmallFlower = booleanTag("tag_small_flowers", variant)
-                val tagFlower = booleanTag("tag_flowers", variant)
-
-                if (luminanceData.keys.any { it.isNotEmpty() }) {
-                    // Has state-specific luminance, create a BlockState for each
-                    for ((states, luminance) in luminanceData) {
-                        val tags = buildSet {
-                            if (tagSmallFlower) add(Tags.SmallFlower)
-                            if (tagFlower) add(Tags.Flower)
-                        }
-                        val blockState = BlockState(variant, states)
-                        val property = BlockProperty(block, listOf(variant), isFullCube, luminance, isOpaque, tags)
-                        result[blockState] = property
-                    }
-                } else {
-                    // No state-specific properties, create a simple BlockState
-                    val luminance = luminanceData.values.firstOrNull() ?: 0
-                    val tags = buildSet {
-                        if (tagSmallFlower) add(Tags.SmallFlower)
-                        if (tagFlower) add(Tags.Flower)
-                    }
-                    val blockState = BlockState(variant, emptyMap())
-                    val property = BlockProperty(block, listOf(variant), isFullCube, luminance, isOpaque, tags)
-                    result[blockState] = property
+            if (luminanceData.keys.any { it.isNotEmpty() }) {
+                // Has state-specific luminance, create a BlockState for each
+                for ((states, luminance) in luminanceData) {
+                    val blockState = BlockState(blockID, states)
+                    val property = BlockProperty(block, blockID, isFullCube, luminance, isOpaque, tags)
+                    check(result.putIfAbsent(blockState, property) == null) { "Duplicate block state: $blockState" }
                 }
+            } else {
+                // No state-specific properties, create a simple BlockState
+                val luminance = luminanceData.values.firstOrNull() ?: 0
+                val blockState = BlockState(blockID, emptyMap())
+                val property = BlockProperty(block, blockID, isFullCube, luminance, isOpaque, tags)
+                check(result.putIfAbsent(blockState, property) == null) { "Duplicate block state: $blockState" }
             }
 
             return result
