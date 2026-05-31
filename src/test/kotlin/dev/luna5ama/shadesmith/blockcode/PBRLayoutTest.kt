@@ -19,9 +19,9 @@ class PBRLayoutTest {
         assertEquals("R32UI", texture.format.name)
         assertEquals(32, texture.bitsPerEntry)
         assertEquals(fields.map { it.name }, texture.fields.map { it.field })
-        assertEquals(listOf(0, 4, 8, 16, 24, 25), texture.fields.map { it.bitOffset })
-        assertEquals(listOf(4, 4, 8, 8, 1, 4), texture.fields.map { it.bitWidth })
-        assertEquals(listOf(false, false, false, false, false, true), texture.fields.map { it.signed })
+        assertEquals(listOf(0, 4, 8, 16, 24, 25, 26), texture.fields.map { it.bitOffset })
+        assertEquals(listOf(4, 4, 8, 8, 1, 1, 4), texture.fields.map { it.bitWidth })
+        assertEquals(listOf(false, false, false, false, false, false, true), texture.fields.map { it.signed })
     }
 
     @Test
@@ -34,7 +34,18 @@ class PBRLayoutTest {
         val row = rows.single { it.first == BlockState(BlockNames.EndRod) }.second
         assertEquals(1, row.size)
         assertEquals("R32UI", row.single().format.name)
-        assertEquals(0x1CB47F90u, decodePackedUInt(row.single()))
+        assertEquals(0x38B47F90u, decodePackedUInt(row.single()))
+    }
+
+    @Test
+    fun `full cube provider maps property flag to the packed fullCube bit`() {
+        val row = assembler.provide(
+            BlockState("stone"),
+            BlockProperty(blockID = "stone", isFullCube = true)
+        ).single().second
+
+        val packed = decodePackedUInt(row.single())
+        assertEquals(1u, (packed shr 25) and 0x1u)
     }
 
     @Test
