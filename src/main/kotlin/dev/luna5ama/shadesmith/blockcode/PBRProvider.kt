@@ -50,3 +50,9 @@ fun <P : PBRValue<*, *>> PBRProvider<P>.provide() = with(scope) {
     if (baseState.blockID.isEmpty()) sequenceOf(baseState to defaultValue)
     else provide()
 }.toMap()
+
+context(scope: BlockScope)
+@Suppress("UNCHECKED_CAST")
+fun PBRProvider<out PBRValue<*, *>>.provideErased(): Map<BlockState, PBRValue<*, *>> {
+    return (this as PBRProvider<PBRValue<*, *>>).provide()
+}

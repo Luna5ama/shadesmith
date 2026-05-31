@@ -2,6 +2,7 @@ package dev.luna5ama.shadesmith.blockcode
 
 import dev.luna5ama.shadesmith.IOContext
 import dev.luna5ama.shadesmith.TextureFormat
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonArray
@@ -16,6 +17,8 @@ fun generateHardcodedPBR() {
     println("Generating hardcoded PBR data...")
     val blockPropertiesPath = ioContext.inputPath.resolve("block.properties")
     val texturesPath = ioContext.inputPath.resolve("textures")
+    val assembler = PBRAssembler(defaultPBRFields())
+    val defaultPBRData = assembler.defaultData
 
     // Read all blocks from blocklist.json
     println("Loading block list...")
@@ -29,7 +32,7 @@ fun generateHardcodedPBR() {
 
     for ((blockState, property) in blocks) {
         // For each block type, we need to pass each state separately to the assembler
-        val pbrData = PBRAssemblerImpl.provide(blockState, property)
+        val pbrData = assembler.provide(blockState, property)
         for ((state, data) in pbrData) {
             blockStateToPBRData[state] = data
         }
@@ -87,8 +90,25 @@ fun generateHardcodedPBR() {
 
     // Write LUT files
     println("Writing LUT files...")
-    writeLUTFiles(texturesPath, palette)
+    writeLUTFiles(texturesPath, palette, defaultPBRData)
     println("Hardcoded PBR generation complete!")
+
+
+    println("PBR layout:")
+    assembler.layout.forEach { entry ->
+        println("Texture ${entry.index}: format=${entry.format}")
+        val pad = entry.fields.maxOf { it.field.length }
+        entry.fields.forEach { field ->
+            print("\t")
+            print("${field.field}:".padEnd(pad + 1))
+            print("encoding=${field.encoding},".padEnd(12))
+            print('\t')
+            print("bitOffset=${field.bitOffset},\t")
+            print("bitWidth=${field.bitWidth},\t")
+            print("signed=${field.signed}")
+            println()
+        }
+    }
 }
 
 private fun loadBlockList(): JsonArray {
@@ -138,7 +158,11 @@ private fun writeBlockProperties(path: Path, blockStateToMaterialId: Map<BlockSt
     }
 }
 
-private fun writeLUTFiles(texturesPath: Path, pbrDataToPalette: List<Pair<List<LUTData>, Int>>) {
+private fun writeLUTFiles(
+    texturesPath: Path,
+    pbrDataToPalette: List<Pair<List<LUTData>, Int>>,
+    defaultPBRData: List<LUTData>
+) {
     texturesPath.createDirectories()
 
     if (pbrDataToPalette.isEmpty()) {
@@ -184,8 +208,7 @@ private fun writeLUTFiles(texturesPath: Path, pbrDataToPalette: List<Pair<List<L
 
         // Create a buffer for the entire LUT (1D texture)
         val textureData = ByteArray((maxMaterialId + 1) * bytesPerEntry)
-        val prepended =
-            pbrDataToPalette + (PBRAssemblerImpl.provide(BlockState(""), BlockProperty()).first().second to 0)
+        val prepended = pbrDataToPalette + (defaultPBRData to 0)
 
         // Fill in the data for each material ID
         for ((dataList, materialId) in prepended) {
