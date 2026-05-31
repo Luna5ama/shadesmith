@@ -38,34 +38,50 @@ fun generateHardcodedPBR() {
     }
     println("Generated PBR data for ${blockStateToPBRData.size} block states")
 
-    // Create palette by deduplicating PBR data
+    // Create palette with dedicated IDs per block state, except reserved mappings.
     println("Creating palette...")
-    val pbrDataToPalette = mutableMapOf<List<LUTData>, Int>()
     val reservedMaterialIDs = listOf(
         listOf("water", "flowing_water")
     )
 
-    val reserved = reservedMaterialIDs.asSequence()
+    val reservedByState = reservedMaterialIDs.asSequence()
         .withIndex()
         .flatMap { (index, blockNames) -> blockNames.map { BlockState(it) to (index + 1) } }
         .toMap()
-    val blockStateToMaterialId = reserved.toMutableMap()
+    val reservedByName = reservedByState
+        .entries
+        .groupBy({ it.key.name }, { it.value })
+        .mapValues { (_, ids) -> ids.first() }
+
+    val blockStateToMaterialId = mutableMapOf<BlockState, Int>()
     var nextMaterialId = reservedMaterialIDs.size
 
-    for ((state, data) in blockStateToPBRData) {
-        if (state in blockStateToMaterialId) {
-            continue // Skip reserved IDs
+    for (state in blockStateToPBRData.keys) {
+        val reservedMaterialId = reservedByState[state] ?: reservedByName[state.name]
+        if (reservedMaterialId != null) {
+            blockStateToMaterialId[state] = reservedMaterialId
+            continue
         }
-        val materialId = pbrDataToPalette.getOrPut(data) {
-            ++nextMaterialId
-        }
-        blockStateToMaterialId[state] = materialId
+        blockStateToMaterialId[state] = ++nextMaterialId
     }
-    val palette = pbrDataToPalette.toList() +
-            reserved.entries
-                .distinctBy { it.value }
-                .map { (state, id) -> blockStateToPBRData[state]!! to id }
-    println("Created palette with ${pbrDataToPalette.size} unique material IDs")
+
+    val materialIdToPBRData = mutableMapOf<Int, List<LUTData>>()
+    for ((state, materialId) in blockStateToMaterialId) {
+        val pbrData = blockStateToPBRData[state] ?: continue
+        val existing = materialIdToPBRData[materialId]
+        if (existing == null) {
+            materialIdToPBRData[materialId] = pbrData
+        } else {
+            require(existing == pbrData) {
+                "Material ID $materialId is assigned to multiple block states with different PBR data"
+            }
+        }
+    }
+
+    val palette = materialIdToPBRData.entries
+        .sortedBy { it.key }
+        .map { (materialId, data) -> data to materialId }
+    println("Created palette with ${palette.size} material IDs")
 
     // Write block.properties
     println("Writing block.properties...")
