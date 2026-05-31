@@ -16,89 +16,230 @@ data class BlockProperty(
     }
 
     companion object {
+        private typealias StateSelector = Map<String, String>
+
+        private val stateSelectorSeparator = Regex("<br\\s*/?>")
+
+        private class BlockPropertyBuilder(
+            private val block: String,
+            private val blockID: String,
+            private val isOpaque: Boolean,
+            private val tags: Set<Tags>
+        ) {
+            var isFullCube: Boolean = false
+            var luminance: Int = 0
+
+            fun build(): BlockProperty {
+                return BlockProperty(
+                    block = block,
+                    blockID = blockID,
+                    isFullCube = isFullCube,
+                    luminance = luminance,
+                    isOpaque = isOpaque,
+                    tags = tags
+                )
+            }
+        }
+
+        private interface ParsedStateAwareField {
+            val name: String
+            val selectors: Set<StateSelector>
+
+            fun applyTo(builder: BlockPropertyBuilder, state: StateSelector)
+        }
+
+        private class ParsedStateAwareFieldImpl<T>(
+            override val name: String,
+            private val values: Map<StateSelector, T>,
+            private val assignValue: BlockPropertyBuilder.(T) -> Unit
+        ) : ParsedStateAwareField {
+            override val selectors: Set<StateSelector> = values.keys
+
+            override fun applyTo(builder: BlockPropertyBuilder, state: StateSelector) {
+                assignValue(builder, resolveStateAwareValue(name, values, state))
+            }
+        }
+
+        private class StateAwareFieldDefinition<T>(
+            private val name: String,
+            private val defaultValue: T,
+            private val parsePrimitive: (JsonPrimitive) -> T,
+            private val assignValue: BlockPropertyBuilder.(T) -> Unit
+        ) {
+            fun parse(jsonObject: JsonObject): ParsedStateAwareField {
+                return ParsedStateAwareFieldImpl(
+                    name = name,
+                    values = parseStateAwareValues(jsonObject[name], defaultValue, parsePrimitive),
+                    assignValue = assignValue
+                )
+            }
+        }
+
         fun fromJsonObject(jsonObject: JsonObject): Map<BlockState, BlockProperty> {
             val block = jsonObject["block"]!!.jsonPrimitive.content
             val blockID = jsonObject["block_id"]!!.jsonPrimitive.content.substringAfterLast(':')
 
-            fun booleanTag(name: String): Boolean {
-                val element = jsonObject[name] ?: return false
-                return when (element) {
-                    is JsonPrimitive -> element.content == "Yes"
-                    is JsonObject -> false
-                    else -> false
-                }
-            }
+            val stateAwareFields = listOf(
+                StateAwareFieldDefinition("full_cube", false, ::parseYesNo) { isFullCube = it },
+                StateAwareFieldDefinition("luminance", 0, { primitive -> primitive.int }) { luminance = it }
+            ).map { it.parse(jsonObject) }
 
-            fun parseStateKey(stateKey: String): Map<String, String> {
-                // Parse "lit: false" or "candles: 1" into a map
-                val parts = stateKey.split(":")
-                if (parts.size != 2) return emptyMap()
-                return mapOf(parts[0].trim() to parts[1].trim())
-            }
-
-            fun getLuminanceData(): Map<Map<String, String>, Int> {
-                val element = jsonObject["luminance"] ?: return mapOf(emptyMap<String, String>() to 0)
-                return when (element) {
-                    is JsonPrimitive -> mapOf(emptyMap<String, String>() to element.int)
-                    is JsonObject -> {
-                        val result = mutableMapOf<Map<String, String>, Int>()
-
-                        for ((key, value) in element.entries) {
-                            val stateKey1 = parseStateKey(key)
-                            if (stateKey1.isEmpty()) continue
-
-                            when (value) {
-                                is JsonPrimitive -> {
-                                    result[stateKey1] = value.int
-                                }
-                                is JsonObject -> {
-                                    // Nested state keys (e.g., candles: 1 -> lit: false)
-                                    for ((nestedKey, nestedValue) in value.entries) {
-                                        if (nestedValue is JsonPrimitive) {
-                                            val stateKey2 = parseStateKey(nestedKey)
-                                            val combinedStates = stateKey1 + stateKey2
-                                            result[combinedStates] = nestedValue.int
-                                        }
-                                    }
-                                }
-                                else -> {}
-                            }
-                        }
-
-                        if (result.isEmpty()) mapOf(emptyMap<String, String>() to 0) else result
-                    }
-                    else -> mapOf(emptyMap<String, String>() to 0)
-                }
-            }
-
-            val isFullCube = booleanTag("full_cube")
-            val isOpaque = booleanTag("opaque")
-
-            val result = mutableMapOf<BlockState, BlockProperty>()
-            val luminanceData = getLuminanceData()
-            val tagSmallFlower = booleanTag("tag_small_flowers")
-            val tagFlower = booleanTag("tag_flowers")
+            val isOpaque = parsePrimitiveYesNoFlag(jsonObject, "opaque")
+            val result = linkedMapOf<BlockState, BlockProperty>()
+            val tagSmallFlower = parsePrimitiveYesNoFlag(jsonObject, "tag_small_flowers")
+            val tagFlower = parsePrimitiveYesNoFlag(jsonObject, "tag_flowers")
             val tags = buildSet {
                 if (tagSmallFlower) add(Tags.SmallFlower)
                 if (tagFlower) add(Tags.Flower)
             }
 
-            if (luminanceData.keys.any { it.isNotEmpty() }) {
-                // Has state-specific luminance, create a BlockState for each
-                for ((states, luminance) in luminanceData) {
-                    val blockState = BlockState(blockID, states)
-                    val property = BlockProperty(block, blockID, isFullCube, luminance, isOpaque, tags)
-                    check(result.putIfAbsent(blockState, property) == null) { "Duplicate block state: $blockState" }
+            for (state in combineStateSelectors(stateAwareFields)) {
+                val builder = BlockPropertyBuilder(block, blockID, isOpaque, tags)
+                for (field in stateAwareFields) {
+                    field.applyTo(builder, state)
                 }
-            } else {
-                // No state-specific properties, create a simple BlockState
-                val luminance = luminanceData.values.firstOrNull() ?: 0
-                val blockState = BlockState(blockID, emptyMap())
-                val property = BlockProperty(block, blockID, isFullCube, luminance, isOpaque, tags)
+
+                val blockState = BlockState(blockID, state)
+                val property = builder.build()
+                println("$blockState -> $property")
                 check(result.putIfAbsent(blockState, property) == null) { "Duplicate block state: $blockState" }
             }
 
             return result
+        }
+
+        private fun parsePrimitiveYesNoFlag(jsonObject: JsonObject, name: String): Boolean {
+            val element = jsonObject[name] as? JsonPrimitive ?: return false
+            return parseYesNo(element)
+        }
+
+        private fun parseYesNo(primitive: JsonPrimitive): Boolean {
+            return when (primitive.content.trim().lowercase()) {
+                "yes", "true" -> true
+                "no", "false" -> false
+                else -> error("Unsupported boolean value: ${primitive.content}")
+            }
+        }
+
+        private fun <T> parseStateAwareValues(
+            element: JsonElement?,
+            defaultValue: T,
+            parsePrimitive: (JsonPrimitive) -> T
+        ): Map<StateSelector, T> {
+            if (element == null) {
+                return linkedMapOf(emptyMap<String, String>() to defaultValue)
+            }
+
+            return when (element) {
+                is JsonPrimitive -> linkedMapOf(emptyMap<String, String>() to parsePrimitive(element))
+                is JsonObject -> buildStateAwareValues(element, emptyMap(), parsePrimitive)
+                    .ifEmpty { linkedMapOf(emptyMap<String, String>() to defaultValue) }
+                else -> error("Unsupported state-aware value: $element")
+            }
+        }
+
+        private fun <T> buildStateAwareValues(
+            element: JsonObject,
+            inheritedSelector: StateSelector,
+            parsePrimitive: (JsonPrimitive) -> T
+        ): Map<StateSelector, T> {
+            val result = linkedMapOf<StateSelector, T>()
+
+            for ((rawSelector, nestedElement) in element.entries) {
+                for (selector in parseStateSelectors(rawSelector)) {
+                    val mergedSelector = mergeSelectors(inheritedSelector, selector)
+                        ?: error("Conflicting state selector while parsing '$rawSelector'")
+
+                    when (nestedElement) {
+                        is JsonPrimitive -> putSelectorValue(result, mergedSelector, parsePrimitive(nestedElement))
+                        is JsonObject -> {
+                            for ((nestedSelector, nestedValue) in buildStateAwareValues(
+                                nestedElement,
+                                mergedSelector,
+                                parsePrimitive
+                            )) {
+                                putSelectorValue(result, nestedSelector, nestedValue)
+                            }
+                        }
+                        else -> error("Unsupported nested state-aware value: $nestedElement")
+                    }
+                }
+            }
+
+            return result
+        }
+
+        private fun parseStateSelectors(rawSelector: String): List<StateSelector> {
+            return stateSelectorSeparator.split(rawSelector)
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+                .map { selector ->
+                    val separatorIndex = selector.indexOf(':')
+                    require(separatorIndex >= 0) { "Invalid state selector: $selector" }
+                    linkedMapOf(
+                        selector.substring(0, separatorIndex).trim() to
+                            selector.substring(separatorIndex + 1).trim()
+                    )
+                }
+        }
+
+        private fun combineStateSelectors(fields: List<ParsedStateAwareField>): Set<StateSelector> {
+            return fields.fold(linkedSetOf(emptyMap<String, String>())) { states, field ->
+                val nextStates = linkedSetOf<StateSelector>()
+
+                for (state in states) {
+                    for (selector in field.selectors) {
+                        mergeSelectors(state, selector)?.let(nextStates::add)
+                    }
+                }
+
+                nextStates
+            }
+        }
+
+        private fun mergeSelectors(left: StateSelector, right: StateSelector): StateSelector? {
+            if (left.isEmpty()) return LinkedHashMap(right)
+            if (right.isEmpty()) return LinkedHashMap(left)
+
+            val merged = LinkedHashMap(left)
+            for ((key, value) in right) {
+                val existingValue = merged[key]
+                if (existingValue != null && existingValue != value) return null
+                merged[key] = value
+            }
+            return merged
+        }
+
+        private fun <T> resolveStateAwareValue(
+            name: String,
+            values: Map<StateSelector, T>,
+            state: StateSelector
+        ): T {
+            val matchingEntries = values.entries.filter { (selector, _) ->
+                selector.all { (key, value) -> state[key] == value }
+            }
+            require(matchingEntries.isNotEmpty()) { "Missing value for '$name' at state $state" }
+
+            val maxSpecificity = matchingEntries.maxOf { it.key.size }
+            val mostSpecificEntries = matchingEntries.filter { it.key.size == maxSpecificity }
+            val distinctValues = mostSpecificEntries.map { it.value }.distinct()
+
+            require(distinctValues.size == 1) {
+                "Ambiguous value for '$name' at state $state: ${mostSpecificEntries.map { it.key to it.value }}"
+            }
+
+            return distinctValues.first()
+        }
+
+        private fun <T> putSelectorValue(
+            values: MutableMap<StateSelector, T>,
+            selector: StateSelector,
+            value: T
+        ) {
+            val existingValue = values.putIfAbsent(selector, value)
+            require(existingValue == null || existingValue == value) {
+                "Conflicting values for state selector $selector: $existingValue vs $value"
+            }
         }
     }
 }
