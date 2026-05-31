@@ -28,15 +28,10 @@ fun generateHardcodedPBR() {
 
     // Generate PBR data for all blocks
     println("Generating PBR data for blocks...")
-    val blockStateToPBRData = mutableMapOf<BlockState, List<LUTData>>()
+    val blockStateToPBRData = blocks.asSequence()
+         .flatMap { (blockState, property) -> assembler.provide(blockState, property) }
+         .toMap()
 
-    for ((blockState, property) in blocks) {
-        // For each block type, we need to pass each state separately to the assembler
-        val pbrData = assembler.provide(blockState, property)
-        for ((state, data) in pbrData) {
-            blockStateToPBRData[state] = data
-        }
-    }
     println("Generated PBR data for ${blockStateToPBRData.size} block states")
 
     // Create palette with dedicated IDs per block state, except reserved mappings.
@@ -119,31 +114,27 @@ private fun loadBlockList(): JsonArray {
 }
 
 private fun parseBlocks(blockListJson: JsonArray): Map<BlockState, BlockProperty> {
-    val blocks = mutableMapOf<BlockState, BlockProperty>()
-
-    for (element in blockListJson) {
-        val jsonObject = element.jsonObject
-        val blockStateProperties = BlockProperty.fromJsonObject(jsonObject)
-        blocks.putAll(blockStateProperties)
-    }
-
-    return blocks
+    return blockListJson.asSequence()
+        .flatMap {
+            val jsonObject = it.jsonObject
+            BlockProperty.fromJsonObject(jsonObject).toList()
+        }
+        .toMap()
 }
 
 
 private fun writeBlockProperties(path: Path, blockStateToMaterialId: Map<BlockState, Int>) {
     path.parent?.createDirectories()
 
-    val materialIdToStates = mutableMapOf<Int, MutableList<BlockState>>()
-    for ((state, materialId) in blockStateToMaterialId) {
-        materialIdToStates.getOrPut(materialId) { mutableListOf() }.add(state)
-    }
+    val materialIdToStates = blockStateToMaterialId.entries
+        .groupingBy { it.value }
+        .fold(listOf<BlockState>()) { states, entry -> states + entry.key }
 
     path.bufferedWriter().use { writer ->
         writer.write("# Generated hardcoded PBR material IDs\n")
         writer.write("# Material ID to block states mapping\n\n")
 
-        for ((materialId, states) in materialIdToStates.entries.sortedBy { it.key }) {
+        for ((materialId, states) in materialIdToStates.toList().sortedBy { it.first }) {
             val blockIds = states.joinToString(" ") { state ->
                 buildString {
                     append(state.blockID)

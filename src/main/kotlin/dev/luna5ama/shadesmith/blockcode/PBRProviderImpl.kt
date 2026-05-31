@@ -65,7 +65,11 @@ object SmallFoliageFlag: PBRProvider<PBRValue.Bool> {
 object FullCubeFlag : PBRProvider<PBRValue.Bool> {
     override val defaultValue: PBRValue.Bool = PBRValue.Bool(false)
     override fun BlockScope.provide(): Sequence<Pair<BlockState, PBRValue.Bool>> = sequence {
-        yield(baseState to PBRValue.Bool(property.isFullCube))
+        if (nameEquals("lava")) {
+            yield(baseState to PBRValue.Bool(true))
+        } else {
+            yield(baseState to PBRValue.Bool(property.isFullCube))
+        }
     }
 }
 
