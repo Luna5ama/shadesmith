@@ -2,6 +2,7 @@ package dev.luna5ama.shadesmith
 
 import org.intellij.lang.annotations.Language
 import java.util.*
+import kotlin.io.path.Path
 import kotlin.io.path.name
 
 private val REGEX_PREFIX = """^[^#\n\r]+((?:transient|history|persistent)_$IDENTIFIER_REGEX_STR)""".toRegex()
@@ -10,6 +11,70 @@ private val READ_REGEX =
     """${REGEX_PREFIX.pattern}_(sample|gather|gatherTexel|fetch|load|${ATOMIC_REGEX.pattern})\(""".toRegex(RegexOption.MULTILINE)
 private val WRITE_REGEX =
     """^${REGEX_PREFIX.pattern}_(store|${ATOMIC_REGEX.pattern})\(""".toRegex(RegexOption.MULTILINE)
+
+private data class TextureFormatInfo(
+    val pixelFormat: String,
+    val pixelType: String,
+    val fixedPixelType: String = pixelType,
+    val samplerType: String = "sampler2D",
+)
+
+private val TextureFormat.info: TextureFormatInfo
+    get() = when (this) {
+        TextureFormat.RGBA32F -> TextureFormatInfo("RGBA", "FLOAT")
+        TextureFormat.RGBA16F -> TextureFormatInfo("RGBA", "HALF_FLOAT", fixedPixelType = "FLOAT")
+        TextureFormat.RG32F -> TextureFormatInfo("RG", "FLOAT")
+        TextureFormat.RG16F -> TextureFormatInfo("RG", "HALF_FLOAT", fixedPixelType = "FLOAT")
+        TextureFormat.R11F_G11F_B10F -> TextureFormatInfo("RGB", "UNSIGNED_INT_10F_11F_11F_REV")
+        TextureFormat.R32F -> TextureFormatInfo("RED", "FLOAT")
+        TextureFormat.R16F -> TextureFormatInfo("RED", "HALF_FLOAT", fixedPixelType = "FLOAT")
+        TextureFormat.RGBA16 -> TextureFormatInfo("RGBA", "UNSIGNED_SHORT")
+        TextureFormat.RGB10_A2 -> TextureFormatInfo("RGBA", "UNSIGNED_INT_2_10_10_10_REV")
+        TextureFormat.RGBA8 -> TextureFormatInfo("RGBA", "UNSIGNED_BYTE")
+        TextureFormat.RG16 -> TextureFormatInfo("RG", "UNSIGNED_SHORT")
+        TextureFormat.RG8 -> TextureFormatInfo("RG", "UNSIGNED_BYTE")
+        TextureFormat.R16 -> TextureFormatInfo("RED", "UNSIGNED_SHORT")
+        TextureFormat.R8 -> TextureFormatInfo("RED", "UNSIGNED_BYTE")
+        TextureFormat.RGBA16_SNORM -> TextureFormatInfo("RGBA", "SHORT")
+        TextureFormat.RGBA8_SNORM -> TextureFormatInfo("RGBA", "BYTE")
+        TextureFormat.RG16_SNORM -> TextureFormatInfo("RG", "SHORT")
+        TextureFormat.RG8_SNORM -> TextureFormatInfo("RG", "BYTE")
+        TextureFormat.R16_SNORM -> TextureFormatInfo("RED", "SHORT")
+        TextureFormat.R8_SNORM -> TextureFormatInfo("RED", "BYTE")
+
+        TextureFormat.RGBA32I -> TextureFormatInfo("RGBA_INTEGER", "INT", samplerType = "isampler2D")
+        TextureFormat.RGBA16I -> TextureFormatInfo("RGBA_INTEGER", "SHORT", samplerType = "isampler2D")
+        TextureFormat.RGBA8I -> TextureFormatInfo("RGBA_INTEGER", "BYTE", samplerType = "isampler2D")
+        TextureFormat.RG32I -> TextureFormatInfo("RG_INTEGER", "INT", samplerType = "isampler2D")
+        TextureFormat.RG16I -> TextureFormatInfo("RG_INTEGER", "SHORT", samplerType = "isampler2D")
+        TextureFormat.RG8I -> TextureFormatInfo("RG_INTEGER", "BYTE", samplerType = "isampler2D")
+        TextureFormat.R32I -> TextureFormatInfo("RED_INTEGER", "INT", samplerType = "isampler2D")
+        TextureFormat.R16I -> TextureFormatInfo("RED_INTEGER", "SHORT", samplerType = "isampler2D")
+        TextureFormat.R8I -> TextureFormatInfo("RED_INTEGER", "BYTE", samplerType = "isampler2D")
+
+        TextureFormat.RGBA32UI -> TextureFormatInfo("RGBA_INTEGER", "UNSIGNED_INT", samplerType = "usampler2D")
+        TextureFormat.RGBA16UI -> TextureFormatInfo("RGBA_INTEGER", "UNSIGNED_SHORT", samplerType = "usampler2D")
+        TextureFormat.RGB10_A2UI -> TextureFormatInfo(
+            "RGBA_INTEGER",
+            "UNSIGNED_INT_2_10_10_10_REV",
+            samplerType = "usampler2D"
+        )
+        TextureFormat.RGBA8UI -> TextureFormatInfo("RGBA_INTEGER", "UNSIGNED_BYTE", samplerType = "usampler2D")
+        TextureFormat.RG32UI -> TextureFormatInfo("RG_INTEGER", "UNSIGNED_INT", samplerType = "usampler2D")
+        TextureFormat.RG16UI -> TextureFormatInfo("RG_INTEGER", "UNSIGNED_SHORT", samplerType = "usampler2D")
+        TextureFormat.RG8UI -> TextureFormatInfo("RG_INTEGER", "UNSIGNED_BYTE", samplerType = "usampler2D")
+        TextureFormat.R32UI -> TextureFormatInfo("RED_INTEGER", "UNSIGNED_INT", samplerType = "usampler2D")
+        TextureFormat.R16UI -> TextureFormatInfo("RED_INTEGER", "UNSIGNED_SHORT", samplerType = "usampler2D")
+        TextureFormat.R8UI -> TextureFormatInfo("RED_INTEGER", "UNSIGNED_BYTE", samplerType = "usampler2D")
+    }
+
+private fun TextureFormat.atlasSamplerName(fixed: Boolean): String {
+    return "usam_${if (fixed) "f" else ""}${name.lowercase()}"
+}
+
+private fun TextureFormat.atlasImageName(fixed: Boolean): String {
+    return "uimg_${if (fixed) "f" else ""}${name.lowercase()}"
+}
 
 private tailrec fun findSlot(tiles: MutableList<BitSet>, allocateBitSet: BitSet, currSlot: Int): Int {
     while (tiles.lastIndex < currSlot) {
@@ -280,6 +345,59 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
     val xSizeArray = arrayOf(1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4)
     val ySizeArray = arrayOf(1, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5)
 
+    val screenAtlasProperties = slots.map { (format, allocationInfo) ->
+        val info = format.info
+        val xSize = xSizeArray[allocationInfo.tileCount - 1]
+        val ySize = ySizeArray[allocationInfo.tileCount - 1]
+        "image.${format.atlasImageName(false)}=${format.atlasSamplerName(false)} ${info.pixelFormat} ${format.name} ${info.pixelType} false true $xSize.0 $ySize.0"
+    }
+
+    val fixedAtlasProperties = fixedSlots.map { (format, allocationInfo) ->
+        val info = format.info
+        "image.${format.atlasImageName(true)}=${format.atlasSamplerName(true)} ${info.pixelFormat} ${format.name} ${info.fixedPixelType} false false ${allocationInfo.atlasWidth} ${allocationInfo.atlasHeight}"
+    }
+
+    val shadesmithProperties = buildString {
+        screenAtlasProperties.forEach {
+            append(it)
+            append('\n')
+        }
+
+        if (screenAtlasProperties.isNotEmpty() && fixedAtlasProperties.isNotEmpty()) {
+            append('\n')
+        }
+
+        fixedAtlasProperties.forEach {
+            append(it)
+            append('\n')
+        }
+    }
+
+    val textileUniforms = buildString {
+        val screenUniforms = slots.keys.map { format ->
+            "uniform ${format.info.samplerType} ${format.atlasSamplerName(false)};"
+        }
+        val fixedUniforms = fixedSlots.keys.map { format ->
+            "uniform ${format.info.samplerType} ${format.atlasSamplerName(true)};"
+        }
+
+        if (screenUniforms.isNotEmpty() || fixedUniforms.isNotEmpty()) {
+            append("#ifndef SKIP_UNIFORMS\n")
+            screenUniforms.forEach {
+                append(it)
+                append('\n')
+            }
+            if (screenUniforms.isNotEmpty() && fixedUniforms.isNotEmpty()) {
+                append('\n')
+            }
+            fixedUniforms.forEach {
+                append(it)
+                append('\n')
+            }
+            append("#endif")
+        }
+    }
+
     val textTileCode = buildString {
         // Generate code for screen-based textures
         slots.forEach { (format, allocationInfo) ->
@@ -393,9 +511,8 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
                 append(")\n")
             }
 
-            val formatLowercase = format.name.lowercase()
-            val usamFormat = "usam_$formatLowercase"
-            val uimgFormat = "uimg_$formatLowercase"
+            val usamFormat = format.atlasSamplerName(false)
+            val uimgFormat = format.atlasImageName(false)
 
             allocationInfo.tileID.forEach {
                 append("#define ")
@@ -593,9 +710,8 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
                 append(")\n")
             }
 
-            val formatLowercase = format.name.lowercase()
-            val usamFormat = "usam_f$formatLowercase"
-            val uimgFormat = "uimg_f$formatLowercase"
+            val usamFormat = format.atlasSamplerName(true)
+            val uimgFormat = format.atlasImageName(true)
 
             allocationInfo.tileID.forEach { (texName, tileID) ->
                 append("#define ")
@@ -679,7 +795,12 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
         }
     }
 
-    val textileCode = textTileTemplate + "\n\n" + textTileCode
+    val shadesmithPropertiesPath = Path("shadesmith.shaders.properties")
+    ioContext.writeOutput(shadesmithPropertiesPath, shadesmithProperties)
+
+    val textileCode = listOf(textileUniforms, textTileTemplate, textTileCode)
+        .filter { it.isNotEmpty() }
+        .joinToString("\n\n")
     val textileInputPath = ioContext.resolveInputPath("/base/Textile.glsl")
-    ioContext.writeOutput(ShaderFile(textileInputPath, textileCode))
+    ioContext.writeOutput(textileInputPath, textileCode)
 }
