@@ -78,6 +78,66 @@ class BlockModelGLSLTest {
     }
 
     @Test
+    fun `keeps model boundary hits when dda interval times round inward`() {
+        val position = 0.9825858f
+        val direction = 0.15522195f
+        val invDirection = 1.0f / direction
+        val ddaEntryT = Math.fma(1.0f, invDirection, -position * invDirection)
+        val modelT = -(position - 1.0f) / direction
+        assertTrue(modelT < ddaEntryT)
+        assertTrue(Float.fromBits(0x3F800001) > 1.0f)
+
+        val entryFace = quad(
+            vertex(0.0, 0.3125, 0.375),
+            vertex(0.0, 0.3125, 0.625),
+            vertex(0.0, 0.6875, 0.625),
+            vertex(0.0, 0.6875, 0.375)
+        )
+        assertNotNull(intersectQuad(vertex((position - 1.0f).toDouble(), 0.4, 0.5), vertex(direction.toDouble(), 0.98787963, 1e-7), entryFace))
+
+        val model = state("boundary", 2, listOf(entryFace)).model
+        val shader = generateBlockModelGLSL(
+            buildBlockModelPalette(BlockModelsResult(listOf(model), emptyList())),
+            assets()
+        ).shader
+        assertTrue(shader.contains("if (!(t >= 0.0 && t <= hitT)) return false;"))
+        assertFalse(shader.contains("tMin"))
+        assertFalse(shader.contains("tMax"))
+    }
+
+    @Test
+    fun `keeps distant edge hits when float reconstruction crosses the quad boundary`() {
+        val originX = -670.0273f
+        val originY = 240.47926f
+        val originZ = 759.6277f
+        val directionX = 0.84266585f
+        val directionY = -0.3024409f
+        val directionZ = -0.95451576f
+        val face = quad(
+            vertex(0.0, 0.0, 0.0),
+            vertex(0.0, 0.0, 1.0),
+            vertex(0.0, 1.0, 1.0),
+            vertex(0.0, 1.0, 0.0)
+        )
+        val origin = vertex(originX.toDouble(), originY.toDouble(), originZ.toDouble())
+        val direction = vertex(directionX.toDouble(), directionY.toDouble(), directionZ.toDouble())
+        assertNotNull(intersectQuad(origin, direction, face))
+
+        val distance = -originX / directionX
+        val reconstructedY = originY + directionY * distance
+        assertTrue(reconstructedY < -1e-6f)
+        assertTrue(reconstructedY > -5e-5f)
+
+        val model = state("distant_edge", 2, listOf(face)).model
+        val shader = generateBlockModelGLSL(
+            buildBlockModelPalette(BlockModelsResult(listOf(model), emptyList())),
+            assets()
+        ).shader
+        assertTrue(shader.contains("const float edgeTolerance = 5e-5;"))
+        assertEquals(4, Regex("< -edgeTolerance").findAll(shader).count())
+    }
+
+    @Test
     fun `deduplicates quarter turn model rotations and preserves their transforms`() {
         // Given
         val full = state("full", 2, cube(), isFullCube = true)
