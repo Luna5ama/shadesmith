@@ -206,20 +206,10 @@ internal fun generateBlockModelGLSL(
         appendLine("    rayDir = _voxel_rotateBlockModelVector(rotation, rayDir);")
         appendLine("    hitT = tMax;")
         appendLine("    hitNormal = vec3(0.0);")
-        for ((index, quads) in palette.geometries.withIndex()) {
-            appendLine("    if (modelID == ${index + 1}u) {")
-            appendLine("        bool hit = false;")
-            for (quad in quads) {
-                append("        hit = _voxel_intersectBlockModelQuad(rayOrigin, rayDir, ")
-                append(quad.vertices.joinToString(", ") { it.glsl() })
-                append(", ${quad.normal.glsl()}, tMin, tMax, hitT, hitNormal) || hit;")
-                appendLine()
-            }
-            appendLine("        if (hit) hitNormal = _voxel_unrotateBlockModelVector(rotation, hitNormal);")
-            appendLine("        return hit;")
-            appendLine("    }")
-        }
-        appendLine("    return false;")
+        appendLine("    bool hit = false;")
+        appendBlockModelDispatch(palette.geometries, 0, palette.geometries.size, "    ")
+        appendLine("    if (hit) hitNormal = _voxel_unrotateBlockModelVector(rotation, hitNormal);")
+        appendLine("    return hit;")
         appendLine("}")
         appendLine()
         appendLine("#endif")
@@ -247,6 +237,33 @@ internal fun generateBlockModelGLSL(
         })
     }.toString() + "\n"
     return BlockModelGLSLOutput(shader, diagnostics, counts)
+}
+
+private fun StringBuilder.appendBlockModelDispatch(
+    geometries: List<List<GeometryQuad>>,
+    fromIndex: Int,
+    toIndex: Int,
+    indent: String
+) {
+    if (fromIndex >= toIndex) return
+    if (toIndex - fromIndex == 1) {
+        appendLine(indent + "if (modelID == " + (fromIndex + 1) + "u) {")
+        for (quad in geometries[fromIndex]) {
+            append(indent + "    hit = _voxel_intersectBlockModelQuad(rayOrigin, rayDir, ")
+            append(quad.vertices.joinToString(", ") { it.glsl() })
+            append(", " + quad.normal.glsl() + ", tMin, tMax, hitT, hitNormal) || hit;")
+            appendLine()
+        }
+        appendLine(indent + "}")
+        return
+    }
+
+    val middle = (fromIndex + toIndex) / 2
+    appendLine(indent + "if (modelID < " + (middle + 1) + "u) {")
+    appendBlockModelDispatch(geometries, fromIndex, middle, indent + "    ")
+    appendLine(indent + "} else {")
+    appendBlockModelDispatch(geometries, middle, toIndex, indent + "    ")
+    appendLine(indent + "}")
 }
 
 context(ioContext: IOContext)

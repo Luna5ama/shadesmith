@@ -115,6 +115,12 @@ class BlockModelGLSLTest {
         assertEquals(2, palette.geometries.size)
         assertTrue(first.shader.contains("uint modelID = modelData >> 9u;"))
         assertTrue(first.shader.contains("_voxel_unrotateBlockModelVector"))
+        val modelFunction = first.shader.substringAfter("bool voxel_intersectBlockModel(")
+        assertEquals(1, Regex("(?m)^    bool hit = false;$").findAll(modelFunction).count())
+        assertEquals(1, Regex("_voxel_unrotateBlockModelVector").findAll(modelFunction).count())
+        assertEquals(1, modelFunction.lineSequence().count { it.trimStart().startsWith("return ") })
+        assertTrue(modelFunction.contains("if (modelID < 2u)"))
+        assertTrue(modelFunction.contains("} else {"))
         assertFalse(first.shader.contains("switch"))
         assertFalse(first.shader.contains("0.499999"))
         val impreciseModelId = palette.modelIdByState.getValue(imprecise.model.state) shr BLOCK_MODEL_ROTATION_BITS
