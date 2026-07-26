@@ -109,9 +109,6 @@ class BlockModelGLSLTest {
             }
             val expectedOrigin = rotateBlockModelTestVector(doubleArrayOf(0.625, 0.5, 0.375), rotatedData and BLOCK_MODEL_ROTATION_MASK, true)
             assertTrue(decodedOrigin.zip(expectedOrigin.asList()).all { kotlin.math.abs(it.first - it.second) <= step })
-            assertTrue(decodedSize.zip(listOf(kotlin.math.sqrt(2.0) / 4.0, 0.5, kotlin.math.sqrt(2.0) / 2.0)).all {
-                kotlin.math.abs(it.first - it.second) <= kotlin.math.sqrt(2.0) * step
-            })
             assertEquals(1u, (decode(packedLut, stoneId) shr 28) and 1u)
             assertEquals(0u, decode(modelLut, stoneId))
         } finally {
@@ -178,7 +175,8 @@ class BlockModelGLSLTest {
             assets()
         ).shader
         assertTrue(shader.contains("abs(localDir[axis]) <= 1e-8"))
-        assertTrue(shader.contains("halfSize[axis] + 1e-6"))
+        assertTrue(shader.contains("* 0.5 + 1e-6;"))
+        assertTrue(shader.contains("abs(localOrigin[axis]) > halfSize[axis]"))
     }
 
     @Test
@@ -272,7 +270,7 @@ class BlockModelGLSLTest {
     }
 
     @Test
-    fun `quantizes final aabb bytes half up and rejects oversized model lists`() {
+    fun `uses BigDecimal conservative aabb bytes and rejects oversized model lists`() {
         val aabb = GeometryAABB(
             GeometryQuaternion(0.0, 0.0, 0.0, 1.0),
             vertex(0.5, 0.5, 0.5),
@@ -286,24 +284,93 @@ class BlockModelGLSLTest {
         )
 
         val bytes = generateBlockModelGLSL(
-            buildBlockModelPalette(BlockModelsResult(listOf(model), emptyList())),
+            BlockModelPalette(emptyMap(), emptyList(), listOf(aabb), emptyList()),
             assets()
         ).aabbData
 
-        assertEquals(listOf(54, 54, 54), bytes.slice(8..10).map { it.toUByte().toInt() })
+        assertEquals(listOf(128, 128, 128, 255), bytes.slice(0..3).map { it.toUByte().toInt() })
+        assertEquals(listOf(128, 128, 128), bytes.slice(4..6).map { it.toUByte().toInt() })
+        assertTrue(bytes.slice(8..10).all { it.toUByte().toInt() >= 54 })
         val rescaledSize = 1.2727922061357853
         val rescaled = generateBlockModelGLSL(
-            buildBlockModelPalette(BlockModelsResult(listOf(model.copy(
-                aabbs = listOf(aabb.copy(size = vertex(rescaledSize, rescaledSize, rescaledSize)))
-            )), emptyList())),
+            BlockModelPalette(emptyMap(), emptyList(), listOf(
+                aabb.copy(size = vertex(rescaledSize, rescaledSize, rescaledSize))
+            ), emptyList()),
             assets()
         )
         val decodedSize = rescaled.aabbData[8].toUByte().toDouble() / 255.0 * kotlin.math.sqrt(2.0)
-        assertEquals(rescaledSize, decodedSize, kotlin.math.sqrt(2.0) / 255.0)
-        assertTrue(rescaled.shader.contains("* 1.4142135623730951 * 0.5;"))
+        assertTrue(decodedSize >= rescaledSize)
+        assertTrue(decodedSize - rescaledSize < kotlin.math.sqrt(2.0) / 255.0 * 8.0)
+        assertTrue(rescaled.shader.contains("* 1.4142135623730951 * 0.5 + 1e-6;"))
         assertFailsWith<IllegalArgumentException> {
             buildBlockModelPalette(BlockModelsResult(listOf(model.copy(aabbs = List(256) { aabb })), emptyList()))
         }
+    }
+
+    @Test
+    fun `encoded aabbs conservatively contain their source corners`() {
+        val halfAngle = Math.toRadians(22.5) * 0.5
+        val aabbs = listOf(
+            GeometryAABB(
+                GeometryQuaternion(0.0, 0.0, 0.0, 1.0),
+                vertex(0.5, 0.25, 0.5),
+                vertex(1.0, 0.5, 1.0)
+            ),
+            GeometryAABB(
+                GeometryQuaternion(0.0, kotlin.math.sin(halfAngle), 0.0, kotlin.math.cos(halfAngle)),
+                vertex(0.46875, 0.5, 0.53125),
+                vertex(0.0625, 1.0, 0.5)
+            )
+        )
+        val generated = generateBlockModelGLSL(
+            BlockModelPalette(emptyMap(), emptyList(), aabbs, emptyList()),
+            assets()
+        )
+
+        aabbs.forEachIndexed { index, source ->
+            val offset = index * 12
+            val decodedQuaternion = GeometryQuaternion(
+                decodeSignedUNorm(generated.aabbData[offset]),
+                decodeSignedUNorm(generated.aabbData[offset + 1]),
+                decodeSignedUNorm(generated.aabbData[offset + 2]),
+                decodeSignedUNorm(generated.aabbData[offset + 3])
+            ).normalized()
+            val decodedOrigin = vertex(
+                decodeUNorm(generated.aabbData[offset + 4]),
+                decodeUNorm(generated.aabbData[offset + 5]),
+                decodeUNorm(generated.aabbData[offset + 6])
+            )
+            val decodedHalfSize = vertex(
+                decodeSizeUNorm(generated.aabbData[offset + 8]) * 0.5 + 1e-6,
+                decodeSizeUNorm(generated.aabbData[offset + 9]) * 0.5 + 1e-6,
+                decodeSizeUNorm(generated.aabbData[offset + 10]) * 0.5 + 1e-6
+            )
+            val inverseQuaternion = GeometryQuaternion(
+                -decodedQuaternion.x,
+                -decodedQuaternion.y,
+                -decodedQuaternion.z,
+                decodedQuaternion.w
+            )
+
+            for (x in listOf(-0.5, 0.5)) {
+                for (y in listOf(-0.5, 0.5)) {
+                    for (z in listOf(-0.5, 0.5)) {
+                        val sourceCorner = source.origin + rotate(
+                            source.quaternion,
+                            vertex(source.size.x * x, source.size.y * y, source.size.z * z)
+                        )
+                        val decodedCorner = rotate(inverseQuaternion, sourceCorner - decodedOrigin)
+                        assertTrue(
+                            abs(decodedCorner.x) <= decodedHalfSize.x &&
+                                abs(decodedCorner.y) <= decodedHalfSize.y &&
+                                abs(decodedCorner.z) <= decodedHalfSize.z,
+                            "encoded AABB $index excludes source corner $sourceCorner at decoded $decodedCorner"
+                        )
+                    }
+                }
+            }
+        }
+        assertTrue(generated.shader.contains("* 0.5 + 1e-6;"))
     }
 
     @Test
@@ -458,6 +525,18 @@ class BlockModelGLSLTest {
 
     private fun decode(data: LUTData): UInt = ByteBuffer.wrap(data.data)
         .order(ByteOrder.nativeOrder()).int.toUInt()
+
+    private fun decodeUNorm(value: Byte) = value.toUByte().toDouble() / 255.0
+
+    private fun decodeSignedUNorm(value: Byte) = decodeUNorm(value) * 2.0 - 1.0
+
+    private fun decodeSizeUNorm(value: Byte) = decodeUNorm(value) * kotlin.math.sqrt(2.0)
+
+    private fun rotate(quaternion: GeometryQuaternion, value: GeometryVertex): GeometryVertex {
+        val rotated = quaternion * GeometryQuaternion(value.x, value.y, value.z, 0.0) *
+            GeometryQuaternion(-quaternion.x, -quaternion.y, -quaternion.z, quaternion.w)
+        return vertex(rotated.x, rotated.y, rotated.z)
+    }
 
     private data class TestQuaternion(val x: Double, val y: Double, val z: Double, val w: Double) {
         val values get() = listOf(x, y, z, w)

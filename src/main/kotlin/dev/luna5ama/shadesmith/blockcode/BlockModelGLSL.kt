@@ -237,7 +237,7 @@ internal fun generateBlockModelGLSL(
         appendLine("    vec4 quaternion = normalize(texelFetch(usam_blockModelAABBs, texelIndex, 0) * 2.0 - 1.0);")
         appendLine("    vec3 origin = texelFetch(usam_blockModelAABBs, texelIndex + 1, 0).xyz;")
         appendLine("    vec3 halfSize = texelFetch(usam_blockModelAABBs, texelIndex + 2, 0).xyz * " +
-            BLOCK_MODEL_AABB_SIZE_SCALE + " * 0.5;")
+            BLOCK_MODEL_AABB_SIZE_SCALE + " * 0.5 + 1e-6;")
         appendLine("    vec4 inverseQuaternion = vec4(-quaternion.xyz, quaternion.w);")
         appendLine("    vec3 localOrigin = _voxel_rotateBlockModelQuaternion(inverseQuaternion, rayOrigin - origin);")
         appendLine("    vec3 localDir = _voxel_rotateBlockModelQuaternion(inverseQuaternion, rayDir);")
@@ -247,7 +247,7 @@ internal fun generateBlockModelGLSL(
         appendLine("    vec3 exitNormal = vec3(0.0);")
         appendLine("    for (int axis = 0; axis < 3; ++axis) {")
         appendLine("        if (abs(localDir[axis]) <= 1e-8) {")
-        appendLine("            if (abs(localOrigin[axis]) > halfSize[axis] + 1e-6) return false;")
+        appendLine("            if (abs(localOrigin[axis]) > halfSize[axis]) return false;")
         appendLine("            continue;")
         appendLine("        }")
         appendLine("        float nearT = (-halfSize[axis] - localOrigin[axis]) / localDir[axis];")
@@ -330,37 +330,84 @@ internal fun generateBlockModelGLSL(
 
 private fun encodeBlockModelAABBs(aabbs: List<GeometryAABB>): List<Byte> = buildList(aabbs.size * 12) {
     for (aabb in aabbs) {
-        add(aabb.quaternion.x.signedUNormByte())
-        add(aabb.quaternion.y.signedUNormByte())
-        add(aabb.quaternion.z.signedUNormByte())
-        add(aabb.quaternion.w.signedUNormByte())
-        add(aabb.origin.x.uNormByte())
-        add(aabb.origin.y.uNormByte())
-        add(aabb.origin.z.uNormByte())
+        val quaternion = listOf(
+            aabb.quaternion.x.signedUNormByte(),
+            aabb.quaternion.y.signedUNormByte(),
+            aabb.quaternion.z.signedUNormByte(),
+            aabb.quaternion.w.signedUNormByte()
+        )
+        val origin = listOf(aabb.origin.x.uNormByte(), aabb.origin.y.uNormByte(), aabb.origin.z.uNormByte())
+        val decodedQuaternion = GeometryQuaternion(
+            quaternion[0].signedUNorm(),
+            quaternion[1].signedUNorm(),
+            quaternion[2].signedUNorm(),
+            quaternion[3].signedUNorm()
+        ).normalized()
+        val inverseQuaternion = GeometryQuaternion(
+            -decodedQuaternion.x,
+            -decodedQuaternion.y,
+            -decodedQuaternion.z,
+            decodedQuaternion.w
+        )
+        val decodedOrigin = GeometryVertex(origin[0].uNorm(), origin[1].uNorm(), origin[2].uNorm())
+        var requiredX = 0.0
+        var requiredY = 0.0
+        var requiredZ = 0.0
+        for (x in listOf(-0.5, 0.5)) {
+            for (y in listOf(-0.5, 0.5)) {
+                for (z in listOf(-0.5, 0.5)) {
+                    val offset = rotateQuaternion(
+                        aabb.quaternion,
+                        GeometryVertex(aabb.size.x * x, aabb.size.y * y, aabb.size.z * z)
+                    )
+                    val relative = GeometryVertex(
+                        aabb.origin.x + offset.x - decodedOrigin.x,
+                        aabb.origin.y + offset.y - decodedOrigin.y,
+                        aabb.origin.z + offset.z - decodedOrigin.z
+                    )
+                    val corner = rotateQuaternion(inverseQuaternion, relative)
+                    requiredX = maxOf(requiredX, kotlin.math.abs(corner.x))
+                    requiredY = maxOf(requiredY, kotlin.math.abs(corner.y))
+                    requiredZ = maxOf(requiredZ, kotlin.math.abs(corner.z))
+                }
+            }
+        }
+        addAll(quaternion)
+        addAll(origin)
         add(0)
-        add(aabb.size.x.sizeUNormByte())
-        add(aabb.size.y.sizeUNormByte())
-        add(aabb.size.z.sizeUNormByte())
+        add((requiredX * 2.0).sizeUNormByte(RoundingMode.CEILING))
+        add((requiredY * 2.0).sizeUNormByte(RoundingMode.CEILING))
+        add((requiredZ * 2.0).sizeUNormByte(RoundingMode.CEILING))
         add(0)
     }
 }
+
+private fun rotateQuaternion(quaternion: GeometryQuaternion, value: GeometryVertex): GeometryVertex {
+    val rotated = quaternion * GeometryQuaternion(value.x, value.y, value.z, 0.0) *
+        GeometryQuaternion(-quaternion.x, -quaternion.y, -quaternion.z, quaternion.w)
+    return GeometryVertex(rotated.x, rotated.y, rotated.z)
+}
+
+private fun Byte.uNorm() = toUByte().toDouble() / 255.0
+
+private fun Byte.signedUNorm() = uNorm() * 2.0 - 1.0
 
 private fun Double.signedUNormByte(): Byte {
     require(this in -1.0..1.0) { "Block model AABB quaternion component is outside [-1, 1]: $this" }
     return ((this + 1.0) * 0.5).uNormByte()
 }
 
-private fun Double.sizeUNormByte(): Byte {
+private fun Double.sizeUNormByte(roundingMode: RoundingMode): Byte {
     require(this in 0.0..BLOCK_MODEL_AABB_SIZE_SCALE) {
         "Block model AABB size is outside [0, $BLOCK_MODEL_AABB_SIZE_SCALE]: $this"
     }
-    return (this / BLOCK_MODEL_AABB_SIZE_SCALE).uNormByte()
+    return (this / BLOCK_MODEL_AABB_SIZE_SCALE).uNormByte(roundingMode)
 }
 
-private fun Double.uNormByte(): Byte {
+private fun Double.uNormByte(roundingMode: RoundingMode = RoundingMode.HALF_UP): Byte {
     require(this in 0.0..1.0) { "Block model AABB value is outside [0, 1]: $this" }
     return BigDecimal.valueOf(this).multiply(BigDecimal.valueOf(255L))
-        .setScale(0, RoundingMode.HALF_UP).toInt().toByte()
+        .setScale(0, roundingMode).toInt().toByte()
 }
 
 context(ioContext: IOContext)
