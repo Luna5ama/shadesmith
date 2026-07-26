@@ -60,8 +60,8 @@ class BlockModelGLSLTest {
             val shader = input.resolve("techniques/voxel/BlockModels.glsl").readText()
             val packedLut = input.resolve("textures/pbr_lut_0.bin").readBytes()
             val modelLut = input.resolve("textures/pbr_lut_1.bin").readBytes()
-            val bottomModelId = decode(modelLut, bottomId)
-            val topModelId = decode(modelLut, topId)
+            val bottomModelId = decode(modelLut, bottomId) shr BLOCK_MODEL_ROTATION_BITS
+            val topModelId = decode(modelLut, topId) shr BLOCK_MODEL_ROTATION_BITS
             assertTrue(bottomModelId > 0u)
             assertTrue(topModelId > 0u)
             assertTrue(shader.contains("if (modelID == ${bottomModelId}u)"))
@@ -75,18 +75,25 @@ class BlockModelGLSLTest {
     }
 
     @Test
-    fun `emits deterministic grouped model intersections and excludes full cubes`() {
+    fun `deduplicates quarter turn model rotations and preserves their transforms`() {
         // Given
         val full = state("full", 2, cube(), isFullCube = true)
-        val slab = state("slab", 3, box(0.0, 0.0, 0.0, 1.0, 0.5, 1.0))
-        val slabAlias = state("slab_alias", 5, slab.model.quads.reversed())
-        val rotated = state("rotated", 4, listOf(quad(
+        val shape = state("shape", 3, box(0.0, 0.0, 0.0, 0.25, 0.5, 1.0))
+        val shapeAlias = state("shape_alias", 4, shape.model.quads.reversed())
+        val rotated90 = state("rotated_90", 5, box(0.0, 0.0, 0.75, 1.0, 0.5, 1.0))
+        val rotated180 = state("rotated_180", 6, box(0.75, 0.0, 0.0, 1.0, 0.5, 1.0))
+        val rotated270 = state("rotated_270", 7, box(0.0, 0.0, 0.0, 1.0, 0.5, 0.25))
+        val imprecise = state("imprecise", 8, listOf(quad(
             vertex(0.49999999999999994, 0.0, 0.0),
             vertex(1.0, 0.0, 1.0),
             vertex(1.0, 1.0, 1.0),
             vertex(0.5, 1.0, 0.0)
         )))
-        val models = BlockModelsResult(listOf(full.model, slab.model, slabAlias.model, rotated.model), emptyList())
+        val equivalent = listOf(shape, rotated90, rotated180, rotated270)
+        val models = BlockModelsResult(
+            listOf(full, shape, shapeAlias, rotated90, rotated180, rotated270, imprecise).map { it.model },
+            emptyList()
+        )
 
         // When
         val palette = buildBlockModelPalette(models)
@@ -95,12 +102,25 @@ class BlockModelGLSLTest {
 
         // Then
         assertEquals(first, second)
-        assertEquals(palette.modelIdByState.getValue(slab.model.state), palette.modelIdByState.getValue(slabAlias.model.state))
+        assertEquals(palette.modelIdByState.getValue(shape.model.state), palette.modelIdByState.getValue(shapeAlias.model.state))
+        val modelData = equivalent.map { palette.modelIdByState.getValue(it.model.state) }
+        assertEquals(1, modelData.map { it shr BLOCK_MODEL_ROTATION_BITS }.distinct().size)
+        assertEquals(4, modelData.distinct().size)
+        equivalent.zip(modelData).forEach { (model, data) ->
+            assertEquals(
+                palette.geometries.first(),
+                rotateBlockModelGeometry(model.model.quads, data and BLOCK_MODEL_ROTATION_MASK)
+            )
+        }
         assertEquals(2, palette.geometries.size)
-        assertTrue(first.shader.contains("bool voxel_intersectBlockModel("))
+        assertTrue(first.shader.contains("uint modelID = modelData >> 9u;"))
+        assertTrue(first.shader.contains("_voxel_unrotateBlockModelVector"))
         assertFalse(first.shader.contains("switch"))
         assertFalse(first.shader.contains("0.499999"))
-        assertTrue(first.shader.contains("vec3(0.5, 0.0, 0.0)"))
+        val impreciseModelId = palette.modelIdByState.getValue(imprecise.model.state) shr BLOCK_MODEL_ROTATION_BITS
+        assertTrue(palette.geometries[impreciseModelId.toInt() - 1].any { quad ->
+            quad.vertices.any { vertex -> vertex.x == 0.5 || vertex.y == 0.5 || vertex.z == 0.5 }
+        })
         assertFalse(Regex("\\b(?:const\\s+)?vec[234]\\s+\\w+\\s*\\[").containsMatchIn(first.shader))
         assertTrue(first.shader.contains("version_metadata_sha1: metadata-sha1"))
         assertTrue(first.shader.contains("client_sha1: client-sha1"))
