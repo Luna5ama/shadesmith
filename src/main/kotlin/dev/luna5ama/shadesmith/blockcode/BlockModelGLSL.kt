@@ -20,6 +20,7 @@ internal data class BlockModelGLSLOutput(
 
 internal const val BLOCK_MODEL_ROTATION_BITS = 9
 internal const val BLOCK_MODEL_ROTATION_MASK = 0x1FFu
+private const val BLOCK_MODEL_AABB_SIZE_SCALE = 1.4142135623730951
 
 internal data class BlockModelPalette(
     val modelIdByState: Map<BlockState, UInt>,
@@ -235,7 +236,8 @@ internal fun generateBlockModelGLSL(
         appendLine("    int texelIndex = int(aabbIndex * 3u);")
         appendLine("    vec4 quaternion = normalize(texelFetch(usam_blockModelAABBs, texelIndex, 0) * 2.0 - 1.0);")
         appendLine("    vec3 origin = texelFetch(usam_blockModelAABBs, texelIndex + 1, 0).xyz;")
-        appendLine("    vec3 halfSize = texelFetch(usam_blockModelAABBs, texelIndex + 2, 0).xyz * 0.5;")
+        appendLine("    vec3 halfSize = texelFetch(usam_blockModelAABBs, texelIndex + 2, 0).xyz * " +
+            BLOCK_MODEL_AABB_SIZE_SCALE + " * 0.5;")
         appendLine("    vec4 inverseQuaternion = vec4(-quaternion.xyz, quaternion.w);")
         appendLine("    vec3 localOrigin = _voxel_rotateBlockModelQuaternion(inverseQuaternion, rayOrigin - origin);")
         appendLine("    vec3 localDir = _voxel_rotateBlockModelQuaternion(inverseQuaternion, rayDir);")
@@ -336,9 +338,9 @@ private fun encodeBlockModelAABBs(aabbs: List<GeometryAABB>): List<Byte> = build
         add(aabb.origin.y.uNormByte())
         add(aabb.origin.z.uNormByte())
         add(0)
-        add(aabb.size.x.uNormByte())
-        add(aabb.size.y.uNormByte())
-        add(aabb.size.z.uNormByte())
+        add(aabb.size.x.sizeUNormByte())
+        add(aabb.size.y.sizeUNormByte())
+        add(aabb.size.z.sizeUNormByte())
         add(0)
     }
 }
@@ -346,6 +348,13 @@ private fun encodeBlockModelAABBs(aabbs: List<GeometryAABB>): List<Byte> = build
 private fun Double.signedUNormByte(): Byte {
     require(this in -1.0..1.0) { "Block model AABB quaternion component is outside [-1, 1]: $this" }
     return ((this + 1.0) * 0.5).uNormByte()
+}
+
+private fun Double.sizeUNormByte(): Byte {
+    require(this in 0.0..BLOCK_MODEL_AABB_SIZE_SCALE) {
+        "Block model AABB size is outside [0, $BLOCK_MODEL_AABB_SIZE_SCALE]: $this"
+    }
+    return (this / BLOCK_MODEL_AABB_SIZE_SCALE).uNormByte()
 }
 
 private fun Double.uNormByte(): Byte {

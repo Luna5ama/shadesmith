@@ -104,11 +104,13 @@ class BlockModelGLSLTest {
                 .normalized()
             assertTrue(kotlin.math.abs(decodedQuaternion.zip(expectedQuaternion.values).sumOf { it.first * it.second }) >= 1.0 - step * 4.0)
             val decodedOrigin = DoubleArray(3) { rotatedAABB[4 + it].toUByte().toDouble() / 255.0 }
-            val decodedSize = DoubleArray(3) { rotatedAABB[8 + it].toUByte().toDouble() / 255.0 }
+            val decodedSize = DoubleArray(3) {
+                rotatedAABB[8 + it].toUByte().toDouble() / 255.0 * kotlin.math.sqrt(2.0)
+            }
             val expectedOrigin = rotateBlockModelTestVector(doubleArrayOf(0.625, 0.5, 0.375), rotatedData and BLOCK_MODEL_ROTATION_MASK, true)
             assertTrue(decodedOrigin.zip(expectedOrigin.asList()).all { kotlin.math.abs(it.first - it.second) <= step })
             assertTrue(decodedSize.zip(listOf(kotlin.math.sqrt(2.0) / 4.0, 0.5, kotlin.math.sqrt(2.0) / 2.0)).all {
-                kotlin.math.abs(it.first - it.second) <= step
+                kotlin.math.abs(it.first - it.second) <= kotlin.math.sqrt(2.0) * step
             })
             assertEquals(1u, (decode(packedLut, stoneId) shr 28) and 1u)
             assertEquals(0u, decode(modelLut, stoneId))
@@ -288,7 +290,17 @@ class BlockModelGLSLTest {
             assets()
         ).aabbData
 
-        assertEquals(listOf(77, 77, 77), bytes.slice(8..10).map { it.toUByte().toInt() })
+        assertEquals(listOf(54, 54, 54), bytes.slice(8..10).map { it.toUByte().toInt() })
+        val rescaledSize = 1.2727922061357853
+        val rescaled = generateBlockModelGLSL(
+            buildBlockModelPalette(BlockModelsResult(listOf(model.copy(
+                aabbs = listOf(aabb.copy(size = vertex(rescaledSize, rescaledSize, rescaledSize)))
+            )), emptyList())),
+            assets()
+        )
+        val decodedSize = rescaled.aabbData[8].toUByte().toDouble() / 255.0 * kotlin.math.sqrt(2.0)
+        assertEquals(rescaledSize, decodedSize, kotlin.math.sqrt(2.0) / 255.0)
+        assertTrue(rescaled.shader.contains("* 1.4142135623730951 * 0.5;"))
         assertFailsWith<IllegalArgumentException> {
             buildBlockModelPalette(BlockModelsResult(listOf(model.copy(aabbs = List(256) { aabb })), emptyList()))
         }
