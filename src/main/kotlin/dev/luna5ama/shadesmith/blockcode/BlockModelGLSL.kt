@@ -272,9 +272,9 @@ private fun StringBuilder.appendBlockModelDispatch(
 
 private fun StringBuilder.appendBlockModelQuads(quads: List<GeometryQuad>, indent: String) {
     for (quad in quads) {
-        append(indent + "hit = _voxel_intersectBlockModelQuad(rayOrigin, rayDir, ")
+        append(indent + "hit = hit || _voxel_intersectBlockModelQuad(rayOrigin, rayDir, ")
         append(quad.vertices.joinToString(", ") { it.glsl() })
-        append(", " + quad.normal.glsl() + ", hitT, hitNormal) || hit;")
+        append(", " + quad.normal.glsl() + ", hitT, hitNormal);")
         appendLine()
     }
 }
