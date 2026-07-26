@@ -16,7 +16,7 @@ fun <P : PBRValue<*, *>> pbrField(name: String, provider: PBRProvider<P>): PBRFi
     return PBRField(name, provider)
 }
 
-fun defaultPBRFields(blockModelStates: Set<BlockState> = emptySet()): List<PBRField> = listOf(
+fun defaultPBRFields(blockModelIds: Map<BlockState, UInt> = emptyMap()): List<PBRField> = listOf(
     pbrField("sss", SSS),
     pbrField("emissive", Emissive),
     pbrField("ior", IOR),
@@ -24,7 +24,7 @@ fun defaultPBRFields(blockModelStates: Set<BlockState> = emptySet()): List<PBRFi
     pbrField("emissiveMultiplier", EmissiveMultiplier),
     pbrField("fullCube", FullCubeFlag),
     pbrField("smallFoliage", SmallFoliageFlag),
-    pbrField("hasBlockModel", BlockModelFlag(blockModelStates)),
+    pbrField("blockModel", BlockModelID(blockModelIds)),
 )
 
 @Serializable
@@ -126,6 +126,7 @@ fun PBRValue<*, *>.encodingName(): String {
         is PBRValue.Int4 -> "int4"
         is PBRValue.UInt4 -> "uint4"
         is PBRValue.UInt8 -> "uint8"
+        is PBRValue.UInt32 -> "uint32"
         is PBRValue.Unorm4 -> "unorm4"
         is PBRValue.Unorm8 -> "unorm8"
         is PBRValue.F16 -> "f16"
@@ -138,6 +139,7 @@ private fun PBRValue<*, *>.packedBitWidth(): Int {
         is PBRValue.Int4 -> 4
         is PBRValue.UInt4 -> 4
         is PBRValue.UInt8 -> 8
+        is PBRValue.UInt32 -> 32
         is PBRValue.Unorm4 -> 4
         is PBRValue.Unorm8 -> 8
         is PBRValue.F16 -> 16
@@ -154,6 +156,7 @@ private fun PBRValue<*, *>.packedRawBits(): UInt {
         is PBRValue.Int4 -> (rawData.toInt() and 0xF).toUInt()
         is PBRValue.UInt4 -> (rawData.toInt() and 0xF).toUInt()
         is PBRValue.UInt8 -> (rawData.toInt() and 0xFF).toUInt()
+        is PBRValue.UInt32 -> rawData
         is PBRValue.Unorm4 -> (rawData.toInt() and 0xF).toUInt()
         is PBRValue.Unorm8 -> (rawData.toInt() and 0xFF).toUInt()
         is PBRValue.F16 -> (rawData.toInt() and 0xFFFF).toUInt()

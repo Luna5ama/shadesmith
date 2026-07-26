@@ -4,11 +4,12 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import java.math.BigDecimal
+import java.math.RoundingMode
 import java.nio.file.Path
 import java.util.zip.ZipFile
 import kotlin.math.abs
 import kotlin.math.cos
-import kotlin.math.round
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -364,10 +365,9 @@ internal object BlockModels {
         selector.toSortedMap().entries.joinToString(",") { "${it.key}=${it.value}" }
 
     private fun quantize(vertex: GeometryVertex) = v(quantize(vertex.x), quantize(vertex.y), quantize(vertex.z))
-    private fun quantize(value: Double): Double {
-        val result = round(value / epsilon) * epsilon
-        return if (result == -0.0) 0.0 else result
-    }
+    private fun quantize(value: Double): Double = BigDecimal.valueOf(value)
+        .setScale(6, RoundingMode.HALF_UP)
+        .toDouble()
 
     private fun v(x: Double, y: Double, z: Double) = GeometryVertex(x, y, z)
 

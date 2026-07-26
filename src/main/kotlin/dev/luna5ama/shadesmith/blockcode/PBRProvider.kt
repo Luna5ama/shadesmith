@@ -18,6 +18,7 @@ sealed interface PBRValue<T, R> {
 
     data class UInt4(override val value: UByte) : Identity<UByte>
     data class UInt8(override val value: UByte) : Identity<UByte>
+    data class UInt32(override val value: UInt) : Identity<UInt>
     data class Unorm4(override val value: Float) : PBRValue<Float, UByte> {
         override val rawData: UByte
             get() = (value * 15.0f).toInt().coerceIn(0, 15).toUByte()

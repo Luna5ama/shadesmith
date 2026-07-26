@@ -37,7 +37,8 @@ internal fun generateHardcodedPBR(assets: MinecraftAssets) {
             .forEach { blocks[BlockState(it)] = BlockProperty(blockID = it) }
     }
     val models = BlockModels.load(assets.clientJar, blocks)
-    val generation = preparePBRGeneration(blocks, models)
+    val modelPalette = buildBlockModelPalette(models)
+    val generation = preparePBRGeneration(blocks, models, modelPalette)
     println("Generated PBR data for ${generation.blockStateToMaterialId.size} block states")
     println("Created palette with ${generation.palette.size} material IDs")
 
@@ -46,7 +47,7 @@ internal fun generateHardcodedPBR(assets: MinecraftAssets) {
     println("Writing LUT files...")
     writeLUTFiles(texturesPath, generation.palette, generation.defaultPBRData)
 
-    val blockModelGLSL = generateBlockModelGLSL(generation.blockStateToMaterialId, models, assets)
+    val blockModelGLSL = generateBlockModelGLSL(modelPalette, assets)
     writeBlockModelOutputs(blockModelGLSL)
     println(
         "Generated block models: ${blockModelGLSL.counts.states} states, " +
@@ -80,14 +81,11 @@ internal data class PBRGeneration(
 
 internal fun preparePBRGeneration(
     properties: Map<BlockState, BlockProperty>,
-    models: BlockModelsResult
+    models: BlockModelsResult,
+    modelPalette: BlockModelPalette
 ): PBRGeneration {
     val expandedProperties = expandBlockProperties(properties, models)
-    val modeledStates = models.supported.asSequence()
-        .filterNot { it.property.isFullCube }
-        .map(ExpandedGeometryState::state)
-        .toSet()
-    val assembler = PBRAssembler(defaultPBRFields(modeledStates))
+    val assembler = PBRAssembler(defaultPBRFields(modelPalette.modelIdByState))
     val blockStateToPBRData = linkedMapOf<BlockState, List<LUTData>>()
     for ((state, property) in expandedProperties.entries.sortedWith(compareBy({ it.key.blockID }, { selectorKey(it.key.states) }))) {
         for ((providedState, data) in assembler.provide(state, property)) {

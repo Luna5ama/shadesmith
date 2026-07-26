@@ -161,7 +161,7 @@ class BlockModelsTest {
         assertTrue(GeometryVertex(0.635299, 0.0, 0.826641) in quad.vertices, quad.vertices.toString())
         assertEquals(0.923879, quad.normal.x, 1e-6)
         assertEquals(0.0, quad.normal.y, 1e-6)
-        assertEquals(0.382683, quad.normal.z, 1e-6)
+        assertEquals(0.382684, quad.normal.z, 1e-6)
         val plane = quad.vertices.map { (it - quad.vertices.first()).dot(quad.normal) }
         assertTrue(plane.all { kotlin.math.abs(it) <= 1e-6 })
     }

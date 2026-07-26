@@ -14,14 +14,18 @@ class PBRLayoutTest {
     fun `plans compact packed layout with minimal textures`() {
         val layout = planPBRLayout(fields)
 
-        assertEquals(1, layout.size)
-        val texture = layout.single()
-        assertEquals("R32UI", texture.format.name)
-        assertEquals(32, texture.bitsPerEntry)
-        assertEquals(fields.map { it.name }, texture.fields.map { it.field })
-        assertEquals(listOf(0, 4, 8, 16, 24, 28, 29, 30), texture.fields.map { it.bitOffset })
-        assertEquals(listOf(4, 4, 8, 8, 4, 1, 1, 1), texture.fields.map { it.bitWidth })
-        assertEquals(listOf(false, false, false, false, true, false, false, false), texture.fields.map { it.signed })
+        assertEquals(2, layout.size)
+        val packed = layout[0]
+        assertEquals("R32UI", packed.format.name)
+        assertEquals(fields.dropLast(1).map { it.name }, packed.fields.map { it.field })
+        assertEquals(listOf(0, 4, 8, 16, 24, 28, 29), packed.fields.map { it.bitOffset })
+        assertEquals(listOf(4, 4, 8, 8, 4, 1, 1), packed.fields.map { it.bitWidth })
+        assertEquals(listOf(false, false, false, false, true, false, false), packed.fields.map { it.signed })
+        val model = layout[1]
+        assertEquals("R32UI", model.format.name)
+        assertEquals(listOf("blockModel"), model.fields.map { it.field })
+        assertEquals(listOf(0), model.fields.map { it.bitOffset })
+        assertEquals(listOf(32), model.fields.map { it.bitWidth })
     }
 
     @Test
@@ -32,9 +36,10 @@ class PBRLayoutTest {
         ).toList()
 
         val row = rows.single { it.first == BlockState(BlockNames.EndRod) }.second
-        assertEquals(1, row.size)
-        assertEquals("R32UI", row.single().format.name)
-        assertEquals(0x0EB47F90u, decodePackedUInt(row.single()))
+        assertEquals(2, row.size)
+        assertEquals("R32UI", row[0].format.name)
+        assertEquals(0x0EB47F90u, decodePackedUInt(row[0]))
+        assertEquals(0u, decodePackedUInt(row[1]))
     }
 
     @Test
@@ -44,22 +49,20 @@ class PBRLayoutTest {
             BlockProperty(blockID = "stone", isFullCube = true)
         ).single().second
 
-        val packed = decodePackedUInt(row.single())
+        val packed = decodePackedUInt(row.first())
         assertEquals(1u, (packed shr 28) and 0x1u)
     }
 
     @Test
-    fun `block model flag uses bit thirty without changing lower packed fields`() {
+    fun `block model id uses a dedicated r32ui texture`() {
         val state = BlockState("partial")
         val property = BlockProperty(blockID = "partial", luminance = 9)
-        val baseline = PBRAssembler(defaultPBRFields()).provide(state, property).single().second.single()
-        val modeled = PBRAssembler(defaultPBRFields(setOf(state))).provide(state, property).single().second.single()
+        val baseline = PBRAssembler(defaultPBRFields()).provide(state, property).single().second
+        val modeled = PBRAssembler(defaultPBRFields(mapOf(state to 37u))).provide(state, property).single().second
 
-        val baselinePacked = decodePackedUInt(baseline)
-        val modeledPacked = decodePackedUInt(modeled)
-        assertEquals(baselinePacked and 0x3FFFFFFFu, modeledPacked and 0x3FFFFFFFu)
-        assertEquals(0u, (baselinePacked shr 30) and 1u)
-        assertEquals(1u, (modeledPacked shr 30) and 1u)
+        assertEquals(decodePackedUInt(baseline[0]), decodePackedUInt(modeled[0]))
+        assertEquals(0u, decodePackedUInt(baseline[1]))
+        assertEquals(37u, decodePackedUInt(modeled[1]))
     }
 
     @Test

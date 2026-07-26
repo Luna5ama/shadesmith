@@ -58,15 +58,17 @@ class BlockModelGLSLTest {
             assertTrue(blockProperties.lineSequence().single { it.startsWith("block.1 = ") }.contains("water"))
 
             val shader = input.resolve("techniques/voxel/BlockModels.glsl").readText()
-            assertTrue(shader.contains("case ${bottomId}u:"))
-            assertTrue(shader.contains("case ${topId}u:"))
-            assertFalse(shader.contains("case ${stoneId}u:"))
-
-            val lut = input.resolve("textures/pbr_lut_0.bin").readBytes()
-            assertEquals(1u, (decode(lut, bottomId) shr 30) and 1u)
-            assertEquals(1u, (decode(lut, topId) shr 30) and 1u)
-            assertEquals(1u, (decode(lut, stoneId) shr 28) and 1u)
-            assertEquals(0u, (decode(lut, stoneId) shr 30) and 1u)
+            val packedLut = input.resolve("textures/pbr_lut_0.bin").readBytes()
+            val modelLut = input.resolve("textures/pbr_lut_1.bin").readBytes()
+            val bottomModelId = decode(modelLut, bottomId)
+            val topModelId = decode(modelLut, topId)
+            assertTrue(bottomModelId > 0u)
+            assertTrue(topModelId > 0u)
+            assertTrue(shader.contains("if (modelID == ${bottomModelId}u)"))
+            assertTrue(shader.contains("if (modelID == ${topModelId}u)"))
+            assertFalse(shader.contains("switch"))
+            assertEquals(1u, (decode(packedLut, stoneId) shr 28) and 1u)
+            assertEquals(0u, decode(modelLut, stoneId))
         } finally {
             temporary.toFile().deleteRecursively()
         }
@@ -77,25 +79,28 @@ class BlockModelGLSLTest {
         // Given
         val full = state("full", 2, cube(), isFullCube = true)
         val slab = state("slab", 3, box(0.0, 0.0, 0.0, 1.0, 0.5, 1.0))
+        val slabAlias = state("slab_alias", 5, slab.model.quads.reversed())
         val rotated = state("rotated", 4, listOf(quad(
-            vertex(0.0, 0.0, 0.0),
+            vertex(0.49999999999999994, 0.0, 0.0),
             vertex(1.0, 0.0, 1.0),
             vertex(1.0, 1.0, 1.0),
-            vertex(0.0, 1.0, 0.0)
+            vertex(0.5, 1.0, 0.0)
         )))
-        val models = BlockModelsResult(listOf(full.model, slab.model, rotated.model), emptyList())
-        val materialIds = listOf(full, slab, rotated).associate { it.model.state to it.materialId }
+        val models = BlockModelsResult(listOf(full.model, slab.model, slabAlias.model, rotated.model), emptyList())
 
         // When
-        val first = generateBlockModelGLSL(materialIds, models, assets())
-        val second = generateBlockModelGLSL(materialIds, models, assets())
+        val palette = buildBlockModelPalette(models)
+        val first = generateBlockModelGLSL(palette, assets())
+        val second = generateBlockModelGLSL(palette, assets())
 
         // Then
         assertEquals(first, second)
+        assertEquals(palette.modelIdByState.getValue(slab.model.state), palette.modelIdByState.getValue(slabAlias.model.state))
+        assertEquals(2, palette.geometries.size)
         assertTrue(first.shader.contains("bool voxel_intersectBlockModel("))
-        assertTrue(first.shader.contains("case 3u:"))
-        assertTrue(first.shader.contains("case 4u:"))
-        assertFalse(first.shader.contains("case 2u:"))
+        assertFalse(first.shader.contains("switch"))
+        assertFalse(first.shader.contains("0.499999"))
+        assertTrue(first.shader.contains("vec3(0.5, 0.0, 0.0)"))
         assertFalse(Regex("\\b(?:const\\s+)?vec[234]\\s+\\w+\\s*\\[").containsMatchIn(first.shader))
         assertTrue(first.shader.contains("version_metadata_sha1: metadata-sha1"))
         assertTrue(first.shader.contains("client_sha1: client-sha1"))
@@ -160,8 +165,9 @@ class BlockModelGLSLTest {
         )
 
         // When
-        val first = preparePBRGeneration(properties, models)
-        val second = preparePBRGeneration(properties, models)
+        val modelPalette = buildBlockModelPalette(models)
+        val first = preparePBRGeneration(properties, models, modelPalette)
+        val second = preparePBRGeneration(properties, models, modelPalette)
 
         // Then
         assertEquals(first.blockStateToMaterialId, second.blockStateToMaterialId)
@@ -177,9 +183,9 @@ class BlockModelGLSLTest {
         val slabId = first.blockStateToMaterialId.getValue(bottom.state)
         val weightedId = first.blockStateToMaterialId.getValue(BlockState("weighted", mapOf("kind" to "a")))
         val grassId = first.blockStateToMaterialId.getValue(BlockState("grass"))
-        assertEquals(1u, (decode(palette.getValue(slabId).single()) shr 30) and 1u)
-        assertEquals(0u, (decode(palette.getValue(weightedId).single()) shr 30) and 1u)
-        assertEquals(0u, (decode(palette.getValue(grassId).single()) shr 30) and 1u)
+        assertTrue(decode(palette.getValue(slabId)[1]) > 0u)
+        assertEquals(0u, decode(palette.getValue(weightedId)[1]))
+        assertEquals(0u, decode(palette.getValue(grassId)[1]))
     }
 
     @Test
