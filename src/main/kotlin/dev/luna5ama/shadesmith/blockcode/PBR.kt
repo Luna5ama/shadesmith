@@ -5,13 +5,23 @@ import dev.luna5ama.shadesmith.TextureFormat
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
+import java.math.BigDecimal
+import java.math.RoundingMode
 import java.nio.file.Path
 import java.util.zip.ZipFile
 import kotlin.io.path.bufferedWriter
 import kotlin.io.path.createDirectories
 import kotlin.io.path.outputStream
+import kotlin.math.asin
+import kotlin.math.atan2
+
+private val readableJson = Json { prettyPrint = true }
 
 context(ioContext: IOContext)
 fun generateHardcodedPBR() = generateHardcodedPBR(acquireLatestMinecraftAssets())
@@ -49,6 +59,8 @@ internal fun generateHardcodedPBR(assets: MinecraftAssets) {
 
     val blockModelGLSL = generateBlockModelGLSL(modelPalette, assets)
     writeBlockModelOutputs(blockModelGLSL)
+    val reportPath = (ioContext.outputPath.parent ?: ioContext.outputPath).resolve("block_model_aabbs.json")
+    ioContext.writeOutput(reportPath, blockModelAABBInfo(models))
     println(
         "Generated block models: ${blockModelGLSL.counts.states} states, " +
             "${blockModelGLSL.counts.geometries} geometries, ${blockModelGLSL.counts.quads} quads"
@@ -188,19 +200,62 @@ private fun writeBlockProperties(path: Path, blockStateToMaterialId: Map<BlockSt
         writer.write("# Material ID to block states mapping\n\n")
 
         for ((materialId, states) in materialIdToStates.toList().sortedBy { it.first }) {
-            val blockIds = states.joinToString(" ") { state ->
-                buildString {
-                    append(state.blockID)
-                    if (state.states.isNotEmpty()) {
-                        append(":")
-                        append(state.states.entries.joinToString(":") { "${it.key}=${it.value}" })
-                    }
-                }
-            }
+            val blockIds = states.joinToString(" ", transform = ::blockStateKey)
             writer.write("block.$materialId = $blockIds\n")
         }
     }
 }
+
+internal fun blockModelAABBInfo(models: BlockModelsResult): String {
+    val root = buildJsonObject {
+        for (model in models.supported) {
+            put(blockStateKey(model.state), buildJsonArray {
+                for (aabb in model.aabbs) {
+                    val rotation = aabb.quaternion.toEulerDegrees()
+                    add(buildJsonObject {
+                        put("origin", vectorJson(aabb.origin.x, aabb.origin.y, aabb.origin.z))
+                        put("size", vectorJson(aabb.size.x, aabb.size.y, aabb.size.z))
+                        put("rotation", vectorJson(rotation.x, rotation.y, rotation.z))
+                    })
+                }
+            })
+        }
+    }
+    return readableJson.encodeToString(root) + "\n"
+}
+
+private fun blockStateKey(state: BlockState) = buildString {
+    append(state.blockID)
+    if (state.states.isNotEmpty()) {
+        append(":")
+        append(state.states.entries.joinToString(":") { "${it.key}=${it.value}" })
+    }
+}
+
+private fun GeometryQuaternion.toEulerDegrees(): GeometryVertex {
+    val sinY = (2.0 * (w * y - z * x)).coerceIn(-1.0, 1.0)
+    val yAngle = asin(sinY)
+    val xAngle: Double
+    val zAngle: Double
+    if (kotlin.math.abs(sinY) >= 1.0 - 1e-10) {
+        xAngle = 0.0
+        zAngle = atan2(-2.0 * (x * y - w * z), 1.0 - 2.0 * (x * x + z * z))
+    } else {
+        xAngle = atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+        zAngle = atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    }
+    return GeometryVertex(Math.toDegrees(xAngle), Math.toDegrees(yAngle), Math.toDegrees(zAngle))
+}
+
+private fun vectorJson(x: Double, y: Double, z: Double): JsonObject = buildJsonObject {
+    put("x", x.readableNumber())
+    put("y", y.readableNumber())
+    put("z", z.readableNumber())
+}
+
+private fun Double.readableNumber(): BigDecimal = BigDecimal.valueOf(this)
+    .setScale(6, RoundingMode.HALF_UP)
+    .stripTrailingZeros()
 
 private fun writeLUTFiles(
     texturesPath: Path,

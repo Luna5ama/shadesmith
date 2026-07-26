@@ -1,6 +1,11 @@
 package dev.luna5ama.shadesmith.blockcode
 
 import dev.luna5ama.shadesmith.IOContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.double
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -111,6 +116,16 @@ class BlockModelGLSLTest {
             assertTrue(decodedOrigin.zip(expectedOrigin.asList()).all { kotlin.math.abs(it.first - it.second) <= step })
             assertEquals(1u, (decode(packedLut, stoneId) shr 28) and 1u)
             assertEquals(0u, decode(modelLut, stoneId))
+
+            val aabbInfo = Json.parseToJsonElement(temporary.resolve("block_model_aabbs.json").readText()).jsonObject
+            val rotatedInfo = aabbInfo.getValue(futureRotated).jsonArray
+            assertEquals(2, rotatedInfo.size)
+            val firstOrigin = rotatedInfo[0].jsonObject.getValue("origin").jsonObject
+            val secondRotation = rotatedInfo[1].jsonObject.getValue("rotation").jsonObject
+            assertEquals(0.625, firstOrigin.getValue("x").jsonPrimitive.double)
+            assertEquals(0.0, secondRotation.getValue("x").jsonPrimitive.double)
+            assertEquals(-90.0, secondRotation.getValue("y").jsonPrimitive.double)
+            assertTrue("$futureSlab:type=bottom" in aabbInfo)
         } finally {
             temporary.toFile().deleteRecursively()
         }
