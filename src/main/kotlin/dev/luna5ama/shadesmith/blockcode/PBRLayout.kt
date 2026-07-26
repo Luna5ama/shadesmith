@@ -16,7 +16,7 @@ fun <P : PBRValue<*, *>> pbrField(name: String, provider: PBRProvider<P>): PBRFi
     return PBRField(name, provider)
 }
 
-fun defaultPBRFields(): List<PBRField> = listOf(
+fun defaultPBRFields(blockModelStates: Set<BlockState> = emptySet()): List<PBRField> = listOf(
     pbrField("sss", SSS),
     pbrField("emissive", Emissive),
     pbrField("ior", IOR),
@@ -24,6 +24,7 @@ fun defaultPBRFields(): List<PBRField> = listOf(
     pbrField("emissiveMultiplier", EmissiveMultiplier),
     pbrField("fullCube", FullCubeFlag),
     pbrField("smallFoliage", SmallFoliageFlag),
+    pbrField("hasBlockModel", BlockModelFlag(blockModelStates)),
 )
 
 @Serializable

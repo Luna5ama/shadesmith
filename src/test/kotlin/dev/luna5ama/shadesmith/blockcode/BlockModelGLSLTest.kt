@@ -1,0 +1,286 @@
+package dev.luna5ama.shadesmith.blockcode
+
+import dev.luna5ama.shadesmith.IOContext
+import java.net.URI
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+import kotlin.io.path.createDirectories
+import kotlin.io.path.readBytes
+import kotlin.io.path.readText
+import kotlin.math.abs
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
+
+class BlockModelGLSLTest {
+    @Test
+    fun `generates pbr mappings and models for vanilla blockstates absent from bundled blocklist`() {
+        val temporary = Files.createTempDirectory("shadesmith-pbr-corpus-")
+        val input = temporary.resolve("input")
+        val output = temporary.resolve("output")
+        val clientJar = temporary.resolve("client.jar")
+        val futureSlab = "future_test_slab"
+        input.createDirectories()
+        output.createDirectories()
+
+        try {
+            val entries = mapOf(
+                "assets/minecraft/blockstates/$futureSlab.json" to
+                    """{"variants":{"type=bottom":{"model":"minecraft:block/${futureSlab}_bottom"},"type=top":{"model":"minecraft:block/${futureSlab}_top"}}}""",
+                "assets/minecraft/blockstates/stone.json" to
+                    """{"variants":{"":{"model":"minecraft:block/stone"}}}""",
+                "assets/minecraft/models/block/${futureSlab}_bottom.json" to boxModel(0, 8),
+                "assets/minecraft/models/block/${futureSlab}_top.json" to boxModel(8, 16),
+                "assets/minecraft/models/block/stone.json" to boxModel(0, 16)
+            )
+            ZipOutputStream(Files.newOutputStream(clientJar)).use { zip ->
+                for ((name, contents) in entries.toSortedMap()) {
+                    zip.putNextEntry(ZipEntry(name))
+                    zip.write(contents.toByteArray())
+                    zip.closeEntry()
+                }
+            }
+
+            with(IOContext(input, output)) { generateHardcodedPBR(assets(clientJar)) }
+
+            val blockProperties = input.resolve("block.properties").readText()
+            assertTrue(blockProperties.contains("$futureSlab:type=bottom"), "Missing bottom selector mapping for $futureSlab")
+            assertTrue(blockProperties.contains("$futureSlab:type=top"), "Missing top selector mapping for $futureSlab")
+            val bottomId = materialIdFor(blockProperties, "$futureSlab:type=bottom")
+            val topId = materialIdFor(blockProperties, "$futureSlab:type=top")
+            val stoneId = materialIdFor(blockProperties, "stone")
+            assertTrue(blockProperties.lineSequence().single { it.startsWith("block.1 = ") }.contains("water"))
+
+            val shader = input.resolve("techniques/voxel/BlockModels.glsl").readText()
+            assertTrue(shader.contains("case ${bottomId}u:"))
+            assertTrue(shader.contains("case ${topId}u:"))
+            assertFalse(shader.contains("case ${stoneId}u:"))
+
+            val lut = input.resolve("textures/pbr_lut_0.bin").readBytes()
+            assertEquals(1u, (decode(lut, bottomId) shr 30) and 1u)
+            assertEquals(1u, (decode(lut, topId) shr 30) and 1u)
+            assertEquals(1u, (decode(lut, stoneId) shr 28) and 1u)
+            assertEquals(0u, (decode(lut, stoneId) shr 30) and 1u)
+        } finally {
+            temporary.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `emits deterministic grouped model intersections and excludes full cubes`() {
+        // Given
+        val full = state("full", 2, cube(), isFullCube = true)
+        val slab = state("slab", 3, box(0.0, 0.0, 0.0, 1.0, 0.5, 1.0))
+        val rotated = state("rotated", 4, listOf(quad(
+            vertex(0.0, 0.0, 0.0),
+            vertex(1.0, 0.0, 1.0),
+            vertex(1.0, 1.0, 1.0),
+            vertex(0.0, 1.0, 0.0)
+        )))
+        val models = BlockModelsResult(listOf(full.model, slab.model, rotated.model), emptyList())
+        val materialIds = listOf(full, slab, rotated).associate { it.model.state to it.materialId }
+
+        // When
+        val first = generateBlockModelGLSL(materialIds, models, assets())
+        val second = generateBlockModelGLSL(materialIds, models, assets())
+
+        // Then
+        assertEquals(first, second)
+        assertTrue(first.shader.contains("bool voxel_intersectBlockModel("))
+        assertTrue(first.shader.contains("case 3u:"))
+        assertTrue(first.shader.contains("case 4u:"))
+        assertFalse(first.shader.contains("case 2u:"))
+        assertFalse(Regex("\\b(?:const\\s+)?vec[234]\\s+\\w+\\s*\\[").containsMatchIn(first.shader))
+        assertTrue(first.shader.contains("version_metadata_sha1: metadata-sha1"))
+        assertTrue(first.shader.contains("client_sha1: client-sha1"))
+    }
+
+    @Test
+    fun `writes byte identical tracked and package shaders with deterministic diagnostics`() {
+        // Given
+        val temporary = java.nio.file.Files.createTempDirectory("shadesmith-model-output-")
+        val input = temporary.resolve("input")
+        val output = temporary.resolve("output")
+        input.resolve("techniques/voxel").createDirectories()
+        output.createDirectories()
+        val generated = BlockModelGLSLOutput(
+            shader = "generated shader\n",
+            unsupportedDiagnostics = "{\"unsupported\":[]}\n",
+            counts = GeometryCounts(1, 1, 1)
+        )
+
+        try {
+            // When
+            with(IOContext(input, output)) { writeBlockModelOutputs(generated) }
+
+            // Then
+            val tracked = input.resolve("techniques/voxel/BlockModels.glsl")
+            val packaged = output.resolve("techniques/voxel/BlockModels.glsl")
+            assertTrue(tracked.readBytes().contentEquals(packaged.readBytes()))
+            assertEquals(generated.unsupportedDiagnostics, output.resolve("techniques/voxel/BlockModels.unsupported.json").readText())
+        } finally {
+            temporary.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `expands selectors keeps unsupported pbr states and assigns stable reserved ids`() {
+        // Given
+        val properties = linkedMapOf(
+            BlockState("water") to BlockProperty(blockID = "water"),
+            BlockState("slab", mapOf("lit" to "false")) to BlockProperty(blockID = "slab"),
+            BlockState("slab", mapOf("lit" to "true")) to BlockProperty(blockID = "slab", luminance = 7),
+            BlockState("weighted") to BlockProperty(blockID = "weighted", luminance = 3),
+            BlockState(BlockNames.ShortGrass) to BlockProperty(blockID = BlockNames.ShortGrass)
+        )
+        val bottom = ExpandedGeometryState(
+            BlockState("slab", mapOf("type" to "bottom", "lit" to "false")),
+            properties.getValue(BlockState("slab", mapOf("lit" to "false"))),
+            box(0.0, 0.0, 0.0, 1.0, 0.5, 1.0)
+        )
+        val top = ExpandedGeometryState(
+            BlockState("slab", mapOf("type" to "top", "lit" to "true")),
+            properties.getValue(BlockState("slab", mapOf("lit" to "true"))),
+            box(0.0, 0.5, 0.0, 1.0, 1.0, 1.0)
+        )
+        val models = BlockModelsResult(
+            supported = listOf(bottom, top),
+            unsupported = listOf(
+                UnsupportedGeometry("weighted", mapOf("kind" to "a"), "Weighted alternatives have different geometry"),
+                UnsupportedGeometry("weighted", mapOf("kind" to "b"), "Weighted alternatives have different geometry"),
+                UnsupportedGeometry("water", emptyMap(), "Fluid geometry is unsupported"),
+                UnsupportedGeometry(BlockNames.ShortGrass, emptyMap(), "Cross model is unsupported")
+            )
+        )
+
+        // When
+        val first = preparePBRGeneration(properties, models)
+        val second = preparePBRGeneration(properties, models)
+
+        // Then
+        assertEquals(first.blockStateToMaterialId, second.blockStateToMaterialId)
+        assertEquals(1, first.blockStateToMaterialId.getValue(BlockState("water")))
+        assertTrue(BlockState("grass") in first.blockStateToMaterialId)
+        assertTrue(BlockState("weighted", mapOf("kind" to "a")) in first.blockStateToMaterialId)
+        assertTrue(BlockState("weighted", mapOf("kind" to "b")) in first.blockStateToMaterialId)
+        assertFalse(BlockState("slab", mapOf("lit" to "false")) in first.blockStateToMaterialId)
+        assertTrue(first.blockStateToMaterialId.keys.any { it.blockID == "slab" && it.states.keys == setOf("lit", "type") })
+        assertTrue(first.blockStateToMaterialId.values.max() < 16384)
+
+        val palette = first.palette.associate { (data, materialId) -> materialId to data }
+        val slabId = first.blockStateToMaterialId.getValue(bottom.state)
+        val weightedId = first.blockStateToMaterialId.getValue(BlockState("weighted", mapOf("kind" to "a")))
+        val grassId = first.blockStateToMaterialId.getValue(BlockState("grass"))
+        assertEquals(1u, (decode(palette.getValue(slabId).single()) shr 30) and 1u)
+        assertEquals(0u, (decode(palette.getValue(weightedId).single()) shr 30) and 1u)
+        assertEquals(0u, (decode(palette.getValue(grassId).single()) shr 30) and 1u)
+    }
+
+    @Test
+    fun `quad mirror hits slab top and rejects an outside ray`() {
+        // Given
+        val top = quad(
+            vertex(0.0, 0.5, 0.0),
+            vertex(0.0, 0.5, 1.0),
+            vertex(1.0, 0.5, 1.0),
+            vertex(1.0, 0.5, 0.0)
+        )
+
+        // When
+        val hit = intersectQuad(vertex(0.5, 2.0, 0.5), vertex(0.0, -1.0, 0.0), top)
+        val miss = intersectQuad(vertex(1.5, 2.0, 0.5), vertex(0.0, -1.0, 0.0), top)
+
+        // Then
+        assertEquals(1.5, assertNotNull(hit).first, 1e-6)
+        assertEquals(vertex(0.0, 1.0, 0.0), hit.second)
+        assertEquals(null, miss)
+    }
+
+    private data class FixtureState(val model: ExpandedGeometryState, val materialId: Int)
+
+    private fun state(blockID: String, materialId: Int, quads: List<GeometryQuad>, isFullCube: Boolean = false) =
+        FixtureState(
+            ExpandedGeometryState(
+                BlockState(blockID),
+                BlockProperty(blockID = blockID, isFullCube = isFullCube),
+                quads
+            ),
+            materialId
+        )
+
+    private fun assets(clientJar: Path = Path.of("client.jar")) = MinecraftAssets(
+        versionId = "test-release",
+        versionMetadata = MinecraftVersionMetadataProvenance(URI.create("https://example.test/version.json"), "metadata-sha1"),
+        clientSha1 = "client-sha1",
+        clientSize = 0,
+        clientJar = clientJar
+    )
+
+    private fun boxModel(fromY: Int, toY: Int) =
+        """{"elements":[{"from":[0,$fromY,0],"to":[16,$toY,16],"faces":{"up":{"texture":"#all"}}}]}"""
+
+    private fun materialIdFor(properties: String, state: String): Int = properties.lineSequence()
+        .first { line -> line.substringAfter(" = ").split(' ').contains(state) }
+        .substringAfter("block.")
+        .substringBefore(" = ")
+        .toInt()
+
+    private fun decode(data: ByteArray, materialId: Int): UInt = ByteBuffer
+        .wrap(data, materialId * Int.SIZE_BYTES, Int.SIZE_BYTES)
+        .order(ByteOrder.nativeOrder()).int.toUInt()
+
+    private fun cube() = box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
+
+    private fun box(x0: Double, y0: Double, z0: Double, x1: Double, y1: Double, z1: Double) = listOf(
+        quad(vertex(x0, y0, z0), vertex(x0, y0, z1), vertex(x0, y1, z1), vertex(x0, y1, z0)),
+        quad(vertex(x1, y0, z1), vertex(x1, y0, z0), vertex(x1, y1, z0), vertex(x1, y1, z1)),
+        quad(vertex(x0, y0, z1), vertex(x0, y0, z0), vertex(x1, y0, z0), vertex(x1, y0, z1)),
+        quad(vertex(x0, y1, z0), vertex(x0, y1, z1), vertex(x1, y1, z1), vertex(x1, y1, z0)),
+        quad(vertex(x1, y0, z0), vertex(x0, y0, z0), vertex(x0, y1, z0), vertex(x1, y1, z0)),
+        quad(vertex(x0, y0, z1), vertex(x1, y0, z1), vertex(x1, y1, z1), vertex(x0, y1, z1))
+    )
+
+    private fun quad(a: GeometryVertex, b: GeometryVertex, c: GeometryVertex, d: GeometryVertex): GeometryQuad {
+        val normal = (b - a).cross(c - a).normalized()
+        return GeometryQuad(listOf(a, b, c, d), normal)
+    }
+
+    private fun intersectQuad(origin: GeometryVertex, direction: GeometryVertex, quad: GeometryQuad): Pair<Double, GeometryVertex>? {
+        val denominator = quad.normal.dot(direction)
+        if (abs(denominator) <= 1e-6) return null
+        val distance = quad.normal.dot(quad.vertices.first() - origin) / denominator
+        if (distance < 0.0 || !distance.isFinite()) return null
+        val point = origin + direction * distance
+        if (quad.vertices.indices.any { index ->
+                val a = quad.vertices[index]
+                val b = quad.vertices[(index + 1) % quad.vertices.size]
+                (b - a).cross(point - a).dot(quad.normal) < -1e-6
+            }) return null
+        val normal = if (denominator < 0.0) quad.normal else quad.normal * -1.0
+        return distance to normal
+    }
+
+    private fun decode(data: LUTData): UInt = ByteBuffer.wrap(data.data)
+        .order(ByteOrder.nativeOrder()).int.toUInt()
+
+    private fun vertex(x: Double, y: Double, z: Double) = GeometryVertex(x, y, z)
+    private operator fun GeometryVertex.plus(other: GeometryVertex) = vertex(x + other.x, y + other.y, z + other.z)
+    private operator fun GeometryVertex.minus(other: GeometryVertex) = vertex(x - other.x, y - other.y, z - other.z)
+    private operator fun GeometryVertex.times(scale: Double) = vertex(x * scale, y * scale, z * scale)
+    private fun GeometryVertex.cross(other: GeometryVertex) = vertex(
+        y * other.z - z * other.y,
+        z * other.x - x * other.z,
+        x * other.y - y * other.x
+    )
+    private fun GeometryVertex.dot(other: GeometryVertex) = x * other.x + y * other.y + z * other.z
+    private fun GeometryVertex.normalized(): GeometryVertex {
+        val length = kotlin.math.sqrt(dot(this))
+        return vertex(x / length, y / length, z / length)
+    }
+}

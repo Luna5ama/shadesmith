@@ -19,9 +19,9 @@ class PBRLayoutTest {
         assertEquals("R32UI", texture.format.name)
         assertEquals(32, texture.bitsPerEntry)
         assertEquals(fields.map { it.name }, texture.fields.map { it.field })
-        assertEquals(listOf(0, 4, 8, 16, 24, 25, 26), texture.fields.map { it.bitOffset })
-        assertEquals(listOf(4, 4, 8, 8, 1, 1, 4), texture.fields.map { it.bitWidth })
-        assertEquals(listOf(false, false, false, false, false, false, true), texture.fields.map { it.signed })
+        assertEquals(listOf(0, 4, 8, 16, 24, 28, 29, 30), texture.fields.map { it.bitOffset })
+        assertEquals(listOf(4, 4, 8, 8, 4, 1, 1, 1), texture.fields.map { it.bitWidth })
+        assertEquals(listOf(false, false, false, false, true, false, false, false), texture.fields.map { it.signed })
     }
 
     @Test
@@ -34,7 +34,7 @@ class PBRLayoutTest {
         val row = rows.single { it.first == BlockState(BlockNames.EndRod) }.second
         assertEquals(1, row.size)
         assertEquals("R32UI", row.single().format.name)
-        assertEquals(0x38B47F90u, decodePackedUInt(row.single()))
+        assertEquals(0x0EB47F90u, decodePackedUInt(row.single()))
     }
 
     @Test
@@ -45,7 +45,21 @@ class PBRLayoutTest {
         ).single().second
 
         val packed = decodePackedUInt(row.single())
-        assertEquals(1u, (packed shr 25) and 0x1u)
+        assertEquals(1u, (packed shr 28) and 0x1u)
+    }
+
+    @Test
+    fun `block model flag uses bit thirty without changing lower packed fields`() {
+        val state = BlockState("partial")
+        val property = BlockProperty(blockID = "partial", luminance = 9)
+        val baseline = PBRAssembler(defaultPBRFields()).provide(state, property).single().second.single()
+        val modeled = PBRAssembler(defaultPBRFields(setOf(state))).provide(state, property).single().second.single()
+
+        val baselinePacked = decodePackedUInt(baseline)
+        val modeledPacked = decodePackedUInt(modeled)
+        assertEquals(baselinePacked and 0x3FFFFFFFu, modeledPacked and 0x3FFFFFFFu)
+        assertEquals(0u, (baselinePacked shr 30) and 1u)
+        assertEquals(1u, (modeledPacked shr 30) and 1u)
     }
 
     @Test

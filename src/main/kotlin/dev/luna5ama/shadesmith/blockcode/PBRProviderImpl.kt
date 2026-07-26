@@ -73,6 +73,16 @@ object FullCubeFlag : PBRProvider<PBRValue.Bool> {
     }
 }
 
+class BlockModelFlag(private val supportedStates: Set<BlockState>) : PBRProvider<PBRValue.Bool> {
+    override val defaultValue: PBRValue.Bool = PBRValue.Bool(false)
+
+    override fun BlockScope.provide(): Sequence<Pair<BlockState, PBRValue.Bool>> = sequence {
+        yield(baseState to PBRValue.Bool(baseState in supportedStates && !property.isFullCube))
+        if (nameEquals(BlockNames.ShortGrass)) {
+            yield(BlockState("grass") to defaultValue)
+        }
+    }
+}
 
 object Emissive : PBRProvider<PBRValue.UInt4> {
     override val defaultValue: PBRValue.UInt4 = PBRValue.UInt4(0u)
