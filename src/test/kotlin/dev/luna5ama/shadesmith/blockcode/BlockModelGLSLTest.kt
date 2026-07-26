@@ -64,8 +64,11 @@ class BlockModelGLSLTest {
             val topModelId = decode(modelLut, topId) shr BLOCK_MODEL_ROTATION_BITS
             assertTrue(bottomModelId > 0u)
             assertTrue(topModelId > 0u)
-            assertTrue(shader.contains("if (modelID == ${bottomModelId}u)"))
-            assertTrue(shader.contains("if (modelID == ${topModelId}u)"))
+            assertTrue(
+                shader.contains("if (modelID == ${bottomModelId}u)") ||
+                    shader.contains("if (modelID == ${topModelId}u)")
+            )
+            assertTrue(bottomModelId == topModelId || shader.contains("} else {"))
             assertFalse(shader.contains("switch"))
             assertEquals(1u, (decode(packedLut, stoneId) shr 28) and 1u)
             assertEquals(0u, decode(modelLut, stoneId))
@@ -119,7 +122,7 @@ class BlockModelGLSLTest {
         assertEquals(1, Regex("(?m)^    bool hit = false;$").findAll(modelFunction).count())
         assertEquals(1, Regex("_voxel_unrotateBlockModelVector").findAll(modelFunction).count())
         assertEquals(1, modelFunction.lineSequence().count { it.trimStart().startsWith("return ") })
-        assertTrue(modelFunction.contains("if (modelID < 2u)"))
+        assertFalse(modelFunction.contains("if (modelID < 2u)"))
         assertTrue(modelFunction.contains("} else {"))
         assertFalse(first.shader.contains("switch"))
         assertFalse(first.shader.contains("0.499999"))

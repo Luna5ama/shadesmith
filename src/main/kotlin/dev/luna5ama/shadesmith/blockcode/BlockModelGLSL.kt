@@ -246,14 +246,17 @@ private fun StringBuilder.appendBlockModelDispatch(
     indent: String
 ) {
     if (fromIndex >= toIndex) return
+    if (toIndex - fromIndex == 2) {
+        appendLine(indent + "if (modelID == " + (fromIndex + 1) + "u) {")
+        appendBlockModelQuads(geometries[fromIndex], indent + "    ")
+        appendLine(indent + "} else {")
+        appendBlockModelQuads(geometries[fromIndex + 1], indent + "    ")
+        appendLine(indent + "}")
+        return
+    }
     if (toIndex - fromIndex == 1) {
         appendLine(indent + "if (modelID == " + (fromIndex + 1) + "u) {")
-        for (quad in geometries[fromIndex]) {
-            append(indent + "    hit = _voxel_intersectBlockModelQuad(rayOrigin, rayDir, ")
-            append(quad.vertices.joinToString(", ") { it.glsl() })
-            append(", " + quad.normal.glsl() + ", tMin, tMax, hitT, hitNormal) || hit;")
-            appendLine()
-        }
+        appendBlockModelQuads(geometries[fromIndex], indent + "    ")
         appendLine(indent + "}")
         return
     }
@@ -264,6 +267,15 @@ private fun StringBuilder.appendBlockModelDispatch(
     appendLine(indent + "} else {")
     appendBlockModelDispatch(geometries, middle, toIndex, indent + "    ")
     appendLine(indent + "}")
+}
+
+private fun StringBuilder.appendBlockModelQuads(quads: List<GeometryQuad>, indent: String) {
+    for (quad in quads) {
+        append(indent + "hit = _voxel_intersectBlockModelQuad(rayOrigin, rayDir, ")
+        append(quad.vertices.joinToString(", ") { it.glsl() })
+        append(", " + quad.normal.glsl() + ", tMin, tMax, hitT, hitNormal) || hit;")
+        appendLine()
+    }
 }
 
 context(ioContext: IOContext)
