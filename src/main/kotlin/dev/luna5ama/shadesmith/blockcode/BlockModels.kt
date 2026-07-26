@@ -31,10 +31,33 @@ internal data class GeometryQuad(
     }
 }
 
+internal data class GeometryQuaternion(val x: Double, val y: Double, val z: Double, val w: Double) {
+    operator fun times(other: GeometryQuaternion) = GeometryQuaternion(
+        w * other.x + x * other.w + y * other.z - z * other.y,
+        w * other.y - x * other.z + y * other.w + z * other.x,
+        w * other.z + x * other.y - y * other.x + z * other.w,
+        w * other.w - x * other.x - y * other.y - z * other.z
+    )
+
+    fun normalized(): GeometryQuaternion {
+        val length = sqrt(x * x + y * y + z * z + w * w)
+        val result = GeometryQuaternion(x / length, y / length, z / length, w / length)
+        val sign = listOf(result.w, result.x, result.y, result.z).firstOrNull { abs(it) > 1e-12 } ?: 1.0
+        return if (sign < 0.0) GeometryQuaternion(-result.x, -result.y, -result.z, -result.w) else result
+    }
+}
+
+internal data class GeometryAABB(
+    val quaternion: GeometryQuaternion,
+    val origin: GeometryVertex,
+    val size: GeometryVertex
+)
+
 internal data class ExpandedGeometryState(
     val state: BlockState,
     val property: BlockProperty,
-    val quads: List<GeometryQuad>
+    val quads: List<GeometryQuad>,
+    val aabbs: List<GeometryAABB> = emptyList()
 )
 
 internal data class UnsupportedGeometry(
@@ -157,9 +180,12 @@ internal object BlockModels {
         for (state in cartesian(domains)) {
             val selected = parts.filter { it.condition?.matches(state) != false }
             resolutions[state] = try {
-                val quads = selected.flatMap { resolveApplications(it.applications, resources).quadsOrThrow() }
+                val geometries = selected.map { resolveApplications(it.applications, resources).geometryOrThrow() }
+                val quads = geometries.flatMap(ModelGeometry::quads)
                 if (quads.isEmpty()) GeometryResolution.Unsupported("Empty or special multipart geometry")
-                else GeometryResolution.Supported(normalizeQuads(quads))
+                else GeometryResolution.Supported(
+                    ModelGeometry(normalizeQuads(quads), geometries.flatMap(ModelGeometry::aabbs))
+                )
             } catch (exception: UnsupportedModel) {
                 GeometryResolution.Unsupported(exception.message ?: "Unsupported model")
             }
@@ -175,9 +201,12 @@ internal object BlockModels {
             val alternatives = applications.map { application ->
                 val elements = resources.modelElements(application.model)
                 if (elements.isEmpty()) throw UnsupportedModel("Empty or special model: ${application.model}")
-                normalizeQuads(elements.flatMap { elementQuads(it, application) })
+                ModelGeometry(
+                    normalizeQuads(elements.flatMap { elementQuads(it, application) }),
+                    elements.map { elementAABB(it, application) }
+                )
             }
-            val distinct = alternatives.distinct()
+            val distinct = alternatives.distinctBy(ModelGeometry::quads)
             if (distinct.size != 1) {
                 GeometryResolution.Unsupported("Weighted alternatives have different geometry")
             } else {
@@ -190,15 +219,15 @@ internal object BlockModels {
 
     private fun mergeProperties(
         blockID: String,
-        geometries: Map<Map<String, String>, List<GeometryQuad>>,
+        geometries: Map<Map<String, String>, ModelGeometry>,
         properties: List<Map.Entry<BlockState, BlockProperty>>
     ): List<ExpandedGeometryState> {
         val merged = linkedMapOf<BlockState, ExpandedGeometryState>()
-        for ((geometrySelector, quads) in geometries) {
+        for ((geometrySelector, geometry) in geometries) {
             for ((propertyState, property) in properties) {
                 val selector = mergeSelectors(geometrySelector, propertyState.states) ?: continue
                 val state = BlockState(blockID, selector)
-                val value = ExpandedGeometryState(state, property, quads)
+                val value = ExpandedGeometryState(state, property, geometry.quads, geometry.aabbs)
                 val previous = merged.putIfAbsent(state, value)
                 require(previous == null || previous == value) {
                     "Conflicting merged block state: $state"
@@ -215,15 +244,16 @@ internal object BlockModels {
         val unsupported = resolutions.mapNotNull { (selector, resolution) ->
             (resolution as? GeometryResolution.Unsupported)?.let { selector to it.reason }
         }
-        val supported = linkedMapOf<Map<String, String>, List<GeometryQuad>>()
+        val supported = linkedMapOf<Map<String, String>, ModelGeometry>()
         val byGeometry = resolutions.entries
             .mapNotNull { (selector, resolution) ->
-                (resolution as? GeometryResolution.Supported)?.let { selector to it.quads }
+                (resolution as? GeometryResolution.Supported)?.let { selector to it.geometry }
             }
-            .groupBy({ it.second }, { it.first })
+            .groupBy { it.second.quads }
 
-        for ((geometry, selectors) in byGeometry) {
-            var cubes = selectors.toSet()
+        for ((_, entries) in byGeometry) {
+            val geometry = entries.first().second
+            var cubes = entries.map { it.first }.toSet()
             var changed: Boolean
             do {
                 changed = false
@@ -254,6 +284,42 @@ internal object BlockModels {
                 rotateState(elementVertex, application)
             }
             normalizeQuad(transformed)
+        }
+    }
+
+    private fun elementAABB(element: ModelElement, application: ModelApplication): GeometryAABB {
+        var size = element.to - element.from
+        val elementQuaternion = when (val rotation = element.rotation) {
+            null -> identityQuaternion
+            is ElementRotation.AxisAngle -> {
+                if (rotation.rescale) {
+                    val scale = 1.0 / cos(Math.toRadians(rotation.angle))
+                    size = when (rotation.axis) {
+                        'x' -> v(size.x, size.y * scale, size.z * scale)
+                        'y' -> v(size.x * scale, size.y, size.z * scale)
+                        else -> v(size.x * scale, size.y * scale, size.z)
+                    }
+                }
+                axisQuaternion(rotation.axis, rotation.angle)
+            }
+            is ElementRotation.Euler -> axisQuaternion('z', rotation.z) *
+                axisQuaternion('y', rotation.y) * axisQuaternion('x', rotation.x)
+        }
+        val stateQuaternion = axisQuaternion('z', -application.z) *
+            axisQuaternion('y', -application.y) * axisQuaternion('x', -application.x)
+        val center = (element.from + element.to) / 2.0
+        val transformedCenter = rotateState(element.rotation?.let { rotateElement(center, it) } ?: center, application)
+        return GeometryAABB((stateQuaternion * elementQuaternion).normalized(), transformedCenter, size)
+    }
+
+    private fun axisQuaternion(axis: Char, degrees: Double): GeometryQuaternion {
+        val radians = Math.toRadians(degrees) * 0.5
+        val sine = sin(radians)
+        val cosine = cos(radians)
+        return when (axis) {
+            'x' -> GeometryQuaternion(sine, 0.0, 0.0, cosine)
+            'y' -> GeometryQuaternion(0.0, sine, 0.0, cosine)
+            else -> GeometryQuaternion(0.0, 0.0, sine, cosine)
         }
     }
 
@@ -372,22 +438,25 @@ internal object BlockModels {
     private fun v(x: Double, y: Double, z: Double) = GeometryVertex(x, y, z)
 
     private sealed interface GeometryResolution {
-        data class Supported(val quads: List<GeometryQuad>) : GeometryResolution
+        data class Supported(val geometry: ModelGeometry) : GeometryResolution
         data class Unsupported(val reason: String) : GeometryResolution
 
-        fun quadsOrThrow() = when (this) {
-            is Supported -> quads
+        fun geometryOrThrow() = when (this) {
+            is Supported -> geometry
             is Unsupported -> throw UnsupportedModel(reason)
         }
     }
 
+    private data class ModelGeometry(val quads: List<GeometryQuad>, val aabbs: List<GeometryAABB>)
+
     private data class ExpandedBlockState(
-        val supported: Map<Map<String, String>, List<GeometryQuad>>,
+        val supported: Map<Map<String, String>, ModelGeometry>,
         val unsupported: List<Pair<Map<String, String>, String>>
     )
 
     private const val epsilon = 1e-6
     private val fluidBlocks = setOf("water", "flowing_water", "lava", "flowing_lava")
+    private val identityQuaternion = GeometryQuaternion(0.0, 0.0, 0.0, 1.0)
 }
 
 private operator fun GeometryVertex.plus(other: GeometryVertex) =

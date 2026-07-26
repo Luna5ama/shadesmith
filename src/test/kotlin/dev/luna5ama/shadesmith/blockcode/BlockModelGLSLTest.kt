@@ -14,6 +14,7 @@ import kotlin.io.path.readText
 import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -26,6 +27,7 @@ class BlockModelGLSLTest {
         val output = temporary.resolve("output")
         val clientJar = temporary.resolve("client.jar")
         val futureSlab = "future_test_slab"
+        val futureRotated = "future_test_rotated"
         input.createDirectories()
         output.createDirectories()
 
@@ -35,8 +37,16 @@ class BlockModelGLSLTest {
                     """{"variants":{"type=bottom":{"model":"minecraft:block/${futureSlab}_bottom"},"type=top":{"model":"minecraft:block/${futureSlab}_top"}}}""",
                 "assets/minecraft/blockstates/stone.json" to
                     """{"variants":{"":{"model":"minecraft:block/stone"}}}""",
+                "assets/minecraft/blockstates/$futureRotated.json" to
+                    """{"variants":{"":{"model":"minecraft:block/$futureRotated","x":90,"y":90,"z":90}}}""",
                 "assets/minecraft/models/block/${futureSlab}_bottom.json" to boxModel(0, 8),
                 "assets/minecraft/models/block/${futureSlab}_top.json" to boxModel(8, 16),
+                "assets/minecraft/models/block/$futureRotated.json" to """{"elements":[
+                  {"from":[4,4,4],"to":[8,12,12],
+                   "rotation":{"origin":[8,8,8],"axis":"y","angle":45,"rescale":true},
+                   "faces":{"west":{}}},
+                  {"from":[8,8,8],"to":[12,12,12],"faces":{"east":{}}}
+                ]}""",
                 "assets/minecraft/models/block/stone.json" to boxModel(0, 16)
             )
             ZipOutputStream(Files.newOutputStream(clientJar)).use { zip ->
@@ -54,22 +64,52 @@ class BlockModelGLSLTest {
             assertTrue(blockProperties.contains("$futureSlab:type=top"), "Missing top selector mapping for $futureSlab")
             val bottomId = materialIdFor(blockProperties, "$futureSlab:type=bottom")
             val topId = materialIdFor(blockProperties, "$futureSlab:type=top")
+            val rotatedId = materialIdFor(blockProperties, futureRotated)
             val stoneId = materialIdFor(blockProperties, "stone")
             assertTrue(blockProperties.lineSequence().single { it.startsWith("block.1 = ") }.contains("water"))
 
             val shader = input.resolve("techniques/voxel/BlockModels.glsl").readText()
             val packedLut = input.resolve("textures/pbr_lut_0.bin").readBytes()
             val modelLut = input.resolve("textures/pbr_lut_1.bin").readBytes()
-            val bottomModelId = decode(modelLut, bottomId) shr BLOCK_MODEL_ROTATION_BITS
-            val topModelId = decode(modelLut, topId) shr BLOCK_MODEL_ROTATION_BITS
-            assertTrue(bottomModelId > 0u)
-            assertTrue(topModelId > 0u)
-            assertTrue(
-                shader.contains("if (modelID == ${bottomModelId}u)") ||
-                    shader.contains("if (modelID == ${topModelId}u)")
-            )
-            assertTrue(bottomModelId == topModelId || shader.contains("} else {"))
+            val modelData = listOf(bottomId, topId, rotatedId).map { decode(modelLut, it) }
+            assertTrue(shader.contains("texelFetch(usam_blockModelAABBs"))
+            assertTrue(shader.contains("uint aabbCount = modelData >> 24u;"))
+            assertTrue(shader.contains("for (uint i = 0u; i < aabbCount; ++i)"))
             assertFalse(shader.contains("switch"))
+            assertFalse(shader.contains("modelID"))
+            assertFalse(Regex("\\b(?:const\\s+)?vec[234]\\s+\\w+\\s*\\[").containsMatchIn(shader))
+            assertEquals(listOf(1u, 1u, 2u), modelData.map { it shr 24 })
+
+            val trackedAABBs = input.resolve("textures/block_model_aabbs.bin")
+            val packagedAABBs = output.resolve("textures/block_model_aabbs.bin")
+            assertTrue(Files.exists(trackedAABBs), "Missing tracked block-model AABB texture")
+            assertTrue(Files.exists(packagedAABBs), "Missing packaged block-model AABB texture")
+            val aabbBytes = trackedAABBs.readBytes()
+            assertTrue(aabbBytes.contentEquals(packagedAABBs.readBytes()))
+            val expectedAABBCount = modelData.maxOf { ((it shr 9) and 0x7FFFu) + (it shr 24) }.toInt()
+            assertEquals(expectedAABBCount * 12, aabbBytes.size)
+
+            val rotatedData = modelData.last()
+            val rotatedAABB = aabbBytes.copyOfRange(
+                (((rotatedData shr 9) and 0x7FFFu) * 12u).toInt(),
+                (((rotatedData shr 9) and 0x7FFFu) * 12u + 12u).toInt()
+            )
+            val step = 1.0 / 255.0
+            val decodedQuaternion = DoubleArray(4) { rotatedAABB[it].toUByte().toDouble() / 255.0 * 2.0 - 1.0 }
+            val expectedQuaternion = canonicalQuaternion(rotatedData and BLOCK_MODEL_ROTATION_MASK)
+                .times(axisQuaternion('z', -90.0))
+                .times(axisQuaternion('y', -90.0))
+                .times(axisQuaternion('x', -90.0))
+                .times(axisQuaternion('y', 45.0))
+                .normalized()
+            assertTrue(kotlin.math.abs(decodedQuaternion.zip(expectedQuaternion.values).sumOf { it.first * it.second }) >= 1.0 - step * 4.0)
+            val decodedOrigin = DoubleArray(3) { rotatedAABB[4 + it].toUByte().toDouble() / 255.0 }
+            val decodedSize = DoubleArray(3) { rotatedAABB[8 + it].toUByte().toDouble() / 255.0 }
+            val expectedOrigin = rotateBlockModelTestVector(doubleArrayOf(0.625, 0.5, 0.375), rotatedData and BLOCK_MODEL_ROTATION_MASK, true)
+            assertTrue(decodedOrigin.zip(expectedOrigin.asList()).all { kotlin.math.abs(it.first - it.second) <= step })
+            assertTrue(decodedSize.zip(listOf(kotlin.math.sqrt(2.0) / 4.0, 0.5, kotlin.math.sqrt(2.0) / 2.0)).all {
+                kotlin.math.abs(it.first - it.second) <= step
+            })
             assertEquals(1u, (decode(packedLut, stoneId) shr 28) and 1u)
             assertEquals(0u, decode(modelLut, stoneId))
         } finally {
@@ -101,6 +141,8 @@ class BlockModelGLSLTest {
             assets()
         ).shader
         assertTrue(shader.contains("if (!(t >= 0.0 && t <= hitT)) return false;"))
+        assertTrue(shader.contains("float t = startsInside ? exitT : entryT;"))
+        assertTrue(shader.contains("vec3 localNormal = startsInside ? -exitNormal : entryNormal;"))
         assertFalse(shader.contains("tMin"))
         assertFalse(shader.contains("tMax"))
     }
@@ -133,8 +175,8 @@ class BlockModelGLSLTest {
             buildBlockModelPalette(BlockModelsResult(listOf(model), emptyList())),
             assets()
         ).shader
-        assertTrue(shader.contains("const float edgeTolerance = 5e-5;"))
-        assertEquals(4, Regex("< -edgeTolerance").findAll(shader).count())
+        assertTrue(shader.contains("abs(localDir[axis]) <= 1e-8"))
+        assertTrue(shader.contains("halfSize[axis] + 1e-6"))
     }
 
     @Test
@@ -167,7 +209,8 @@ class BlockModelGLSLTest {
         assertEquals(first, second)
         assertEquals(palette.modelIdByState.getValue(shape.model.state), palette.modelIdByState.getValue(shapeAlias.model.state))
         val modelData = equivalent.map { palette.modelIdByState.getValue(it.model.state) }
-        assertEquals(1, modelData.map { it shr BLOCK_MODEL_ROTATION_BITS }.distinct().size)
+        assertEquals(1, modelData.map { (it shr BLOCK_MODEL_ROTATION_BITS) and 0x7FFFu }.distinct().size)
+        assertTrue(modelData.all { it shr 24 == 1u })
         assertEquals(4, modelData.distinct().size)
         equivalent.zip(modelData).forEach { (model, data) ->
             assertEquals(
@@ -176,18 +219,18 @@ class BlockModelGLSLTest {
             )
         }
         assertEquals(2, palette.geometries.size)
-        assertTrue(first.shader.contains("uint modelID = modelData >> 9u;"))
+        assertTrue(first.shader.contains("uint aabbOffset = (modelData >> 9u) & 0x7FFFu;"))
+        assertTrue(first.shader.contains("uint aabbCount = modelData >> 24u;"))
         assertTrue(first.shader.contains("_voxel_unrotateBlockModelVector"))
         val modelFunction = first.shader.substringAfter("bool voxel_intersectBlockModel(")
         assertEquals(1, Regex("(?m)^    bool hit = false;$").findAll(modelFunction).count())
         assertEquals(1, Regex("_voxel_unrotateBlockModelVector").findAll(modelFunction).count())
         assertEquals(1, modelFunction.lineSequence().count { it.trimStart().startsWith("return ") })
-        assertFalse(modelFunction.contains("if (modelID < 2u)"))
-        assertTrue(modelFunction.contains("} else {"))
+        assertFalse(modelFunction.contains("modelID"))
+        assertEquals(24, first.aabbData.size)
         assertFalse(first.shader.contains("switch"))
         assertFalse(first.shader.contains("0.499999"))
-        val impreciseModelId = palette.modelIdByState.getValue(imprecise.model.state) shr BLOCK_MODEL_ROTATION_BITS
-        assertTrue(palette.geometries[impreciseModelId.toInt() - 1].any { quad ->
+        assertTrue(palette.geometries.flatten().any { quad ->
             quad.vertices.any { vertex -> vertex.x == 0.5 || vertex.y == 0.5 || vertex.z == 0.5 }
         })
         assertFalse(Regex("\\b(?:const\\s+)?vec[234]\\s+\\w+\\s*\\[").containsMatchIn(first.shader))
@@ -217,9 +260,37 @@ class BlockModelGLSLTest {
             val tracked = input.resolve("techniques/voxel/BlockModels.glsl")
             val packaged = output.resolve("techniques/voxel/BlockModels.glsl")
             assertTrue(tracked.readBytes().contentEquals(packaged.readBytes()))
+            assertTrue(input.resolve("textures/block_model_aabbs.bin").readBytes().contentEquals(
+                output.resolve("textures/block_model_aabbs.bin").readBytes()
+            ))
             assertEquals(generated.unsupportedDiagnostics, output.resolve("techniques/voxel/BlockModels.unsupported.json").readText())
         } finally {
             temporary.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `quantizes final aabb bytes half up and rejects oversized model lists`() {
+        val aabb = GeometryAABB(
+            GeometryQuaternion(0.0, 0.0, 0.0, 1.0),
+            vertex(0.5, 0.5, 0.5),
+            vertex(0.3, 0.3, 0.3)
+        )
+        val model = ExpandedGeometryState(
+            BlockState("quantized"),
+            BlockProperty(blockID = "quantized"),
+            cube(),
+            listOf(aabb)
+        )
+
+        val bytes = generateBlockModelGLSL(
+            buildBlockModelPalette(BlockModelsResult(listOf(model), emptyList())),
+            assets()
+        ).aabbData
+
+        assertEquals(listOf(77, 77, 77), bytes.slice(8..10).map { it.toUByte().toInt() })
+        assertFailsWith<IllegalArgumentException> {
+            buildBlockModelPalette(BlockModelsResult(listOf(model.copy(aabbs = List(256) { aabb })), emptyList()))
         }
     }
 
@@ -304,10 +375,22 @@ class BlockModelGLSLTest {
             ExpandedGeometryState(
                 BlockState(blockID),
                 BlockProperty(blockID = blockID, isFullCube = isFullCube),
-                quads
+                quads,
+                listOf(aabb(quads))
             ),
             materialId
         )
+
+    private fun aabb(quads: List<GeometryQuad>): GeometryAABB {
+        val vertices = quads.flatMap(GeometryQuad::vertices)
+        val minimum = vertex(vertices.minOf(GeometryVertex::x), vertices.minOf(GeometryVertex::y), vertices.minOf(GeometryVertex::z))
+        val maximum = vertex(vertices.maxOf(GeometryVertex::x), vertices.maxOf(GeometryVertex::y), vertices.maxOf(GeometryVertex::z))
+        return GeometryAABB(
+            GeometryQuaternion(0.0, 0.0, 0.0, 1.0),
+            vertex((minimum.x + maximum.x) * 0.5, (minimum.y + maximum.y) * 0.5, (minimum.z + maximum.z) * 0.5),
+            vertex(maximum.x - minimum.x, maximum.y - minimum.y, maximum.z - minimum.z)
+        )
+    }
 
     private fun assets(clientJar: Path = Path.of("client.jar")) = MinecraftAssets(
         versionId = "test-release",
@@ -363,6 +446,65 @@ class BlockModelGLSLTest {
 
     private fun decode(data: LUTData): UInt = ByteBuffer.wrap(data.data)
         .order(ByteOrder.nativeOrder()).int.toUInt()
+
+    private data class TestQuaternion(val x: Double, val y: Double, val z: Double, val w: Double) {
+        val values get() = listOf(x, y, z, w)
+
+        fun times(other: TestQuaternion) = TestQuaternion(
+            w * other.x + x * other.w + y * other.z - z * other.y,
+            w * other.y - x * other.z + y * other.w + z * other.x,
+            w * other.z + x * other.y - y * other.x + z * other.w,
+            w * other.w - x * other.x - y * other.y - z * other.z
+        )
+
+        fun normalized(): TestQuaternion {
+            val length = kotlin.math.sqrt(values.sumOf { it * it })
+            return TestQuaternion(x / length, y / length, z / length, w / length)
+        }
+    }
+
+    private fun axisQuaternion(axis: Char, degrees: Double): TestQuaternion {
+        val radians = Math.toRadians(degrees) * 0.5
+        val sine = kotlin.math.sin(radians)
+        val cosine = kotlin.math.cos(radians)
+        return when (axis) {
+            'x' -> TestQuaternion(sine, 0.0, 0.0, cosine)
+            'y' -> TestQuaternion(0.0, sine, 0.0, cosine)
+            else -> TestQuaternion(0.0, 0.0, sine, cosine)
+        }
+    }
+
+    private fun canonicalQuaternion(rotation: UInt): TestQuaternion {
+        val x = rotateBlockModelTestVector(doubleArrayOf(1.0, 0.0, 0.0), rotation, false)
+        val y = rotateBlockModelTestVector(doubleArrayOf(0.0, 1.0, 0.0), rotation, false)
+        val z = rotateBlockModelTestVector(doubleArrayOf(0.0, 0.0, 1.0), rotation, false)
+        val trace = x[0] + y[1] + z[2]
+        if (trace > 0.0) {
+            val scale = kotlin.math.sqrt(trace + 1.0) * 2.0
+            return TestQuaternion((y[2] - z[1]) / scale, (z[0] - x[2]) / scale, (x[1] - y[0]) / scale, scale / 4.0)
+        }
+        if (x[0] > y[1] && x[0] > z[2]) {
+            val scale = kotlin.math.sqrt(1.0 + x[0] - y[1] - z[2]) * 2.0
+            return TestQuaternion(scale / 4.0, (x[1] + y[0]) / scale, (z[0] + x[2]) / scale, (y[2] - z[1]) / scale)
+        }
+        if (y[1] > z[2]) {
+            val scale = kotlin.math.sqrt(1.0 + y[1] - x[0] - z[2]) * 2.0
+            return TestQuaternion((x[1] + y[0]) / scale, scale / 4.0, (y[2] + z[1]) / scale, (z[0] - x[2]) / scale)
+        }
+        val scale = kotlin.math.sqrt(1.0 + z[2] - x[0] - y[1]) * 2.0
+        return TestQuaternion((z[0] + x[2]) / scale, (y[2] + z[1]) / scale, scale / 4.0, (x[1] - y[0]) / scale)
+    }
+
+    private fun rotateBlockModelTestVector(value: DoubleArray, rotation: UInt, aroundCenter: Boolean): DoubleArray {
+        val input = if (aroundCenter) DoubleArray(3) { value[it] - 0.5 } else value
+        val result = DoubleArray(3) { outputAxis ->
+            val transform = rotation shr (outputAxis * 3)
+            val component = input[(transform and 3u).toInt()]
+            if (transform and 4u == 0u) component else -component
+        }
+        if (aroundCenter) for (axis in result.indices) result[axis] += 0.5
+        return result
+    }
 
     private fun vertex(x: Double, y: Double, z: Double) = GeometryVertex(x, y, z)
     private operator fun GeometryVertex.plus(other: GeometryVertex) = vertex(x + other.x, y + other.y, z + other.z)
