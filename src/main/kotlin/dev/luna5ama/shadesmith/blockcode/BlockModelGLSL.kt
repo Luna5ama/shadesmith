@@ -230,19 +230,34 @@ internal fun generateBlockModelGLSL(
         appendLine("    return value + 2.0 * cross(quaternion.xyz, cross(quaternion.xyz, value) + quaternion.w * value);")
         appendLine("}")
         appendLine()
+        appendLine("uint _voxel_expandBlockModelRotation(uint rotation) {")
+        appendLine("    uint x = rotation & 7u;")
+        appendLine("    uint y = (rotation >> 3u) & 7u;")
+        appendLine("    uint xAxis = x & 3u;")
+        appendLine("    uint yAxis = y & 3u;")
+        appendLine("    uint zAxis = 3u - xAxis - yAxis;")
+        appendLine("    uint z = zAxis | ((rotation >> 4u) & 4u);")
+        appendLine("    return x | (y << 3u) | (z << 6u);")
+        appendLine("}")
+        appendLine()
         appendLine("bool _voxel_intersectBlockModelAABB(")
         appendLine("    vec3 rayOrigin, vec3 rayDir, uint aabbIndex, inout float hitT, inout vec3 hitNormal")
         appendLine(") {")
         appendLine("    int texelIndex = int(aabbIndex * 3u);")
         appendLine("    vec4 originData = texelFetch(usam_blockModelAABBs, texelIndex + 1, 0);")
-        appendLine("    bool axisAligned = originData.w > 0.5;")
+        appendLine("    uint discreteRotation = uint(originData.w * 255.0 + 0.5);")
+        appendLine("    bool discrete = discreteRotation != 255u;")
+        appendLine("    if (discrete) discreteRotation = _voxel_expandBlockModelRotation(discreteRotation);")
         appendLine("    vec4 quaternion = vec4(0.0, 0.0, 0.0, 1.0);")
         appendLine("    vec3 origin = originData.xyz;")
         appendLine("    vec3 halfSize = texelFetch(usam_blockModelAABBs, texelIndex + 2, 0).xyz * " +
             BLOCK_MODEL_AABB_SIZE_SCALE + " * 0.5 + 1e-6;")
         appendLine("    vec3 localOrigin = rayOrigin - origin;")
         appendLine("    vec3 localDir = rayDir;")
-        appendLine("    if (!axisAligned) {")
+        appendLine("    if (discrete) {")
+        appendLine("        localOrigin = _voxel_rotateBlockModelVector(discreteRotation, localOrigin);")
+        appendLine("        localDir = _voxel_rotateBlockModelVector(discreteRotation, localDir);")
+        appendLine("    } else {")
         appendLine("        quaternion = normalize(texelFetch(usam_blockModelAABBs, texelIndex, 0) * " +
             "(255.0 / 126.0) - 1.0);")
         appendLine("        vec4 inverseQuaternion = vec4(-quaternion.xyz, quaternion.w);")
@@ -286,8 +301,11 @@ internal fun generateBlockModelGLSL(
         appendLine("    if (!(t >= 0.0 && t <= hitT)) return false;")
         appendLine("    vec3 localNormal = startsInside ? -exitNormal : entryNormal;")
         appendLine("    hitT = t;")
-        appendLine("    hitNormal = localNormal;")
-        appendLine("    if (!axisAligned) hitNormal = _voxel_rotateBlockModelQuaternion(quaternion, localNormal);")
+        appendLine("    if (discrete) {")
+        appendLine("        hitNormal = _voxel_unrotateBlockModelVector(discreteRotation, localNormal);")
+        appendLine("    } else {")
+        appendLine("        hitNormal = _voxel_rotateBlockModelQuaternion(quaternion, localNormal);")
+        appendLine("    }")
         appendLine("    return true;")
         appendLine("}")
         appendLine()
@@ -339,27 +357,30 @@ internal fun generateBlockModelGLSL(
 
 private fun encodeBlockModelAABBs(aabbs: List<GeometryAABB>): List<Byte> = buildList(aabbs.size * 12) {
     for (aabb in aabbs) {
-        val axisAligned = listOf(
+        val discreteTransforms = listOf(
             GeometryVertex(1.0, 0.0, 0.0),
             GeometryVertex(0.0, 1.0, 0.0),
             GeometryVertex(0.0, 0.0, 1.0)
-        ).all { axis ->
+        ).map { axis ->
             val rotated = rotateQuaternion(aabb.quaternion, axis)
-            listOf(rotated.x, rotated.y, rotated.z).all { component ->
+            val components = listOf(rotated.x, rotated.y, rotated.z)
+            val sourceAxis = components.indices.maxBy { kotlin.math.abs(components[it]) }
+            val discrete = components.all { component ->
                 val magnitude = kotlin.math.abs(component)
                 magnitude < 1e-9 || kotlin.math.abs(magnitude - 1.0) < 1e-9
             }
+            if (discrete) sourceAxis or if (components[sourceAxis] < 0.0) 4 else 0 else null
         }
-        val quaternion = if (axisAligned) {
-            listOf(126.toByte(), 126.toByte(), 126.toByte(), 252.toByte())
-        } else {
-            listOf(
-                aabb.quaternion.x.signedUNormByte(),
-                aabb.quaternion.y.signedUNormByte(),
-                aabb.quaternion.z.signedUNormByte(),
-                aabb.quaternion.w.signedUNormByte()
-            )
-        }
+        val discreteRotation = if (discreteTransforms.all { it != null }) {
+            discreteTransforms[0]!! + (discreteTransforms[1]!! shl 3) +
+                ((discreteTransforms[2]!! and 4) shl 4)
+        } else 255
+        val quaternion = listOf(
+            aabb.quaternion.x.signedUNormByte(),
+            aabb.quaternion.y.signedUNormByte(),
+            aabb.quaternion.z.signedUNormByte(),
+            aabb.quaternion.w.signedUNormByte()
+        )
         val origin = listOf(aabb.origin.x.uNormByte(), aabb.origin.y.uNormByte(), aabb.origin.z.uNormByte())
         val decodedQuaternion = GeometryQuaternion(
             quaternion[0].signedUNorm(),
@@ -398,7 +419,7 @@ private fun encodeBlockModelAABBs(aabbs: List<GeometryAABB>): List<Byte> = build
         }
         addAll(quaternion)
         addAll(origin)
-        add(if (axisAligned) 255.toByte() else 0)
+        add(discreteRotation.toByte())
         add((requiredX * 2.0).sizeUNormByte(RoundingMode.CEILING))
         add((requiredY * 2.0).sizeUNormByte(RoundingMode.CEILING))
         add((requiredZ * 2.0).sizeUNormByte(RoundingMode.CEILING))
