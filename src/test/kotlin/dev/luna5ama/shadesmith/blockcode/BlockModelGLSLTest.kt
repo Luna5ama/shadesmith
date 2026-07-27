@@ -343,6 +343,7 @@ class BlockModelGLSLTest {
         )
 
         assertEquals(listOf(126, 126, 126, 252), output.aabbData.take(4).map { it.toUByte().toInt() })
+        assertEquals(255, output.aabbData[7].toUByte().toInt())
         val decodedThickness = output.aabbData[9].toUByte().toDouble() / 255.0 * kotlin.math.sqrt(2.0)
         assertTrue(decodedThickness < 0.19, "Thin AABB expanded to $decodedThickness")
         assertTrue(output.shader.contains("* (255.0 / 126.0) - 1.0"))
@@ -364,9 +365,13 @@ class BlockModelGLSLTest {
             assets()
         )
 
-        assertEquals(listOf(63, 63, 63, 189), output.aabbData.take(4).map { it.toUByte().toInt() })
-        val decodedThickness = output.aabbData[9].toUByte().toDouble() / 255.0 * kotlin.math.sqrt(2.0)
+        assertEquals(listOf(126, 126, 126, 252), output.aabbData.take(4).map { it.toUByte().toInt() })
+        val decodedThickness = output.aabbData.slice(8..10).minOf { byte ->
+            byte.toUByte().toDouble() / 255.0 * kotlin.math.sqrt(2.0)
+        }
         assertTrue(decodedThickness < 0.07, "Thin AABB expanded to $decodedThickness")
+        assertTrue(output.shader.contains("bool axisAligned = originData.w > 0.5;"))
+        assertTrue(output.shader.contains("if (!axisAligned) {"))
     }
 
     @Test
@@ -388,6 +393,9 @@ class BlockModelGLSLTest {
             BlockModelPalette(emptyMap(), emptyList(), aabbs, emptyList()),
             assets()
         )
+
+        assertEquals(255, generated.aabbData[7].toUByte().toInt())
+        assertEquals(0, generated.aabbData[19].toUByte().toInt())
 
         aabbs.forEachIndexed { index, source ->
             val offset = index * 12
