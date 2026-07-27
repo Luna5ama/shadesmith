@@ -26,6 +26,43 @@ import kotlin.test.assertTrue
 
 class BlockModelGLSLTest {
     @Test
+    fun `orders slab times by direction sign without changing float bits`() {
+        val shader = generateBlockModelGLSL(
+            BlockModelPalette(emptyMap(), emptyList(), emptyList(), emptyList()),
+            assets()
+        ).shader
+        assertTrue(shader.contains("float signedHalfSize = halfSize[axis] * sign(localDir[axis]);"))
+        assertTrue(shader.contains("float nearT = (-signedHalfSize - localOrigin[axis]) / localDir[axis];"))
+        assertTrue(shader.contains("float farT = (signedHalfSize - localOrigin[axis]) / localDir[axis];"))
+        assertFalse(shader.contains("if (nearT > farT)"))
+
+        val cases = listOf(
+            floatArrayOf(1.0f, 0.0f, 0.5f),
+            floatArrayOf(-1.0f, -0.0f, 0.5f),
+            floatArrayOf(Math.nextUp(1e-8f), Float.MIN_VALUE, java.lang.Float.MIN_NORMAL),
+            floatArrayOf(-Math.nextUp(1e-8f), -Float.MIN_VALUE, java.lang.Float.MIN_NORMAL),
+            floatArrayOf(Float.MAX_VALUE, Float.MAX_VALUE, java.lang.Float.MIN_NORMAL),
+            floatArrayOf(-Float.MAX_VALUE, -Float.MAX_VALUE, Float.MAX_VALUE)
+        )
+        for ((index, case) in cases.withIndex()) {
+            val (direction, origin, halfSize) = case
+            var oldNearT = (-halfSize - origin) / direction
+            var oldFarT = (halfSize - origin) / direction
+            if (oldNearT > oldFarT) {
+                val swapT = oldNearT
+                oldNearT = oldFarT
+                oldFarT = swapT
+            }
+
+            val signedHalfSize = halfSize * kotlin.math.sign(direction)
+            val newNearT = (-signedHalfSize - origin) / direction
+            val newFarT = (signedHalfSize - origin) / direction
+            assertEquals(oldNearT.toRawBits(), newNearT.toRawBits(), "nearT case $index")
+            assertEquals(oldFarT.toRawBits(), newFarT.toRawBits(), "farT case $index")
+        }
+    }
+
+    @Test
     fun `generates pbr mappings and models for vanilla blockstates absent from bundled blocklist`() {
         val temporary = Files.createTempDirectory("shadesmith-pbr-corpus-")
         val input = temporary.resolve("input")
@@ -160,7 +197,16 @@ class BlockModelGLSLTest {
         ).shader
         assertTrue(shader.contains("if (!(t >= 0.0 && t <= hitT)) return false;"))
         assertTrue(shader.contains("float t = startsInside ? exitT : entryT;"))
-        assertTrue(shader.contains("vec3 localNormal = startsInside ? -exitNormal : entryNormal;"))
+        for (expected in listOf(
+            "int entryAxis = 0;",
+            "int exitAxis = 0;",
+            "entryAxis = axis;",
+            "exitAxis = axis;",
+            "localNormal[normalAxis] = -sign(localDir[normalAxis]);"
+        )) assertTrue(shader.contains(expected), "Missing slab state: $expected")
+        for (oldState in listOf("entryNormal", "exitNormal", "nearSign", "farSign")) {
+            assertFalse(shader.contains(oldState), "Found old slab state: $oldState")
+        }
         assertFalse(shader.contains("tMin"))
         assertFalse(shader.contains("tMax"))
     }
