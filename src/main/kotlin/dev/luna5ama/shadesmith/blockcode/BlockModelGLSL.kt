@@ -234,7 +234,8 @@ internal fun generateBlockModelGLSL(
         appendLine("    vec3 rayOrigin, vec3 rayDir, uint aabbIndex, inout float hitT, inout vec3 hitNormal")
         appendLine(") {")
         appendLine("    int texelIndex = int(aabbIndex * 3u);")
-        appendLine("    vec4 quaternion = normalize(texelFetch(usam_blockModelAABBs, texelIndex, 0) * 2.0 - 1.0);")
+        appendLine("    vec4 quaternion = normalize(texelFetch(usam_blockModelAABBs, texelIndex, 0) * " +
+            "(255.0 / 127.0) - 1.0);")
         appendLine("    vec3 origin = texelFetch(usam_blockModelAABBs, texelIndex + 1, 0).xyz;")
         appendLine("    vec3 halfSize = texelFetch(usam_blockModelAABBs, texelIndex + 2, 0).xyz * " +
             BLOCK_MODEL_AABB_SIZE_SCALE + " * 0.5 + 1e-6;")
@@ -390,11 +391,12 @@ private fun rotateQuaternion(quaternion: GeometryQuaternion, value: GeometryVert
 
 private fun Byte.uNorm() = toUByte().toDouble() / 255.0
 
-private fun Byte.signedUNorm() = uNorm() * 2.0 - 1.0
+private fun Byte.signedUNorm() = toUByte().toDouble() / 127.0 - 1.0
 
 private fun Double.signedUNormByte(): Byte {
     require(this in -1.0..1.0) { "Block model AABB quaternion component is outside [-1, 1]: $this" }
-    return ((this + 1.0) * 0.5).uNormByte()
+    return BigDecimal.valueOf(this).add(BigDecimal.ONE).multiply(BigDecimal.valueOf(127L))
+        .setScale(0, RoundingMode.HALF_UP).toInt().toByte()
 }
 
 private fun Double.sizeUNormByte(roundingMode: RoundingMode): Byte {

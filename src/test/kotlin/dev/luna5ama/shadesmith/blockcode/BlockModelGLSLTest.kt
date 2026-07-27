@@ -99,21 +99,25 @@ class BlockModelGLSLTest {
                 (((rotatedData shr 9) and 0x7FFFu) * 12u).toInt(),
                 (((rotatedData shr 9) and 0x7FFFu) * 12u + 12u).toInt()
             )
-            val step = 1.0 / 255.0
-            val decodedQuaternion = DoubleArray(4) { rotatedAABB[it].toUByte().toDouble() / 255.0 * 2.0 - 1.0 }
+            val originStep = 1.0 / 255.0
+            val quaternionStep = 1.0 / 127.0
+            val decodedQuaternion = DoubleArray(4) { rotatedAABB[it].toUByte().toDouble() / 127.0 - 1.0 }
             val expectedQuaternion = canonicalQuaternion(rotatedData and BLOCK_MODEL_ROTATION_MASK)
                 .times(axisQuaternion('z', -90.0))
                 .times(axisQuaternion('y', -90.0))
                 .times(axisQuaternion('x', -90.0))
                 .times(axisQuaternion('y', 45.0))
                 .normalized()
-            assertTrue(kotlin.math.abs(decodedQuaternion.zip(expectedQuaternion.values).sumOf { it.first * it.second }) >= 1.0 - step * 4.0)
+            assertTrue(kotlin.math.abs(decodedQuaternion.zip(expectedQuaternion.values).sumOf { it.first * it.second }) >=
+                1.0 - quaternionStep * 4.0)
             val decodedOrigin = DoubleArray(3) { rotatedAABB[4 + it].toUByte().toDouble() / 255.0 }
             val decodedSize = DoubleArray(3) {
                 rotatedAABB[8 + it].toUByte().toDouble() / 255.0 * kotlin.math.sqrt(2.0)
             }
             val expectedOrigin = rotateBlockModelTestVector(doubleArrayOf(0.625, 0.5, 0.375), rotatedData and BLOCK_MODEL_ROTATION_MASK, true)
-            assertTrue(decodedOrigin.zip(expectedOrigin.asList()).all { kotlin.math.abs(it.first - it.second) <= step })
+            assertTrue(decodedOrigin.zip(expectedOrigin.asList()).all {
+                kotlin.math.abs(it.first - it.second) <= originStep
+            })
             assertEquals(1u, (decode(packedLut, stoneId) shr 28) and 1u)
             assertEquals(0u, decode(modelLut, stoneId))
 
@@ -303,7 +307,7 @@ class BlockModelGLSLTest {
             assets()
         ).aabbData
 
-        assertEquals(listOf(128, 128, 128, 255), bytes.slice(0..3).map { it.toUByte().toInt() })
+        assertEquals(listOf(127, 127, 127, 254), bytes.slice(0..3).map { it.toUByte().toInt() })
         assertEquals(listOf(128, 128, 128), bytes.slice(4..6).map { it.toUByte().toInt() })
         assertTrue(bytes.slice(8..10).all { it.toUByte().toInt() >= 54 })
         val rescaledSize = 1.2727922061357853
@@ -320,6 +324,28 @@ class BlockModelGLSLTest {
         assertFailsWith<IllegalArgumentException> {
             buildBlockModelPalette(BlockModelsResult(listOf(model.copy(aabbs = List(256) { aabb })), emptyList()))
         }
+    }
+
+    @Test
+    fun `encodes axis aligned thin aabbs without quaternion tilt`() {
+        val output = generateBlockModelGLSL(
+            BlockModelPalette(
+                emptyMap(),
+                emptyList(),
+                listOf(GeometryAABB(
+                    GeometryQuaternion(0.0, 0.0, 0.0, 1.0),
+                    vertex(0.5, 0.09375, 0.5),
+                    vertex(1.0, 0.1875, 1.0)
+                )),
+                emptyList()
+            ),
+            assets()
+        )
+
+        assertEquals(listOf(127, 127, 127, 254), output.aabbData.take(4).map { it.toUByte().toInt() })
+        val decodedThickness = output.aabbData[9].toUByte().toDouble() / 255.0 * kotlin.math.sqrt(2.0)
+        assertTrue(decodedThickness < 0.19, "Thin AABB expanded to $decodedThickness")
+        assertTrue(output.shader.contains("* (255.0 / 127.0) - 1.0"))
     }
 
     @Test
@@ -543,7 +569,7 @@ class BlockModelGLSLTest {
 
     private fun decodeUNorm(value: Byte) = value.toUByte().toDouble() / 255.0
 
-    private fun decodeSignedUNorm(value: Byte) = decodeUNorm(value) * 2.0 - 1.0
+    private fun decodeSignedUNorm(value: Byte) = value.toUByte().toDouble() / 127.0 - 1.0
 
     private fun decodeSizeUNorm(value: Byte) = decodeUNorm(value) * kotlin.math.sqrt(2.0)
 

@@ -203,7 +203,7 @@ internal object BlockModels {
                 if (elements.isEmpty()) throw UnsupportedModel("Empty or special model: ${application.model}")
                 ModelGeometry(
                     normalizeQuads(elements.flatMap { elementQuads(it, application) }),
-                    elements.map { elementAABB(it, application) }
+                    elements.flatMap { elementAABBs(it, application) }
                 )
             }
             val distinct = alternatives.distinctBy(ModelGeometry::quads)
@@ -310,6 +310,48 @@ internal object BlockModels {
         val center = (element.from + element.to) / 2.0
         val transformedCenter = rotateState(element.rotation?.let { rotateElement(center, it) } ?: center, application)
         return GeometryAABB((stateQuaternion * elementQuaternion).normalized(), transformedCenter, size)
+    }
+
+    private fun elementAABBs(element: ModelElement, application: ModelApplication): List<GeometryAABB> {
+        val path = application.model.substringAfter(':', application.model)
+        val elements = if (path.startsWith("block/") && "_trapdoor_" in path) {
+            splitTrapdoorElement(element)
+        } else {
+            listOf(element)
+        }
+        return elements.map { elementAABB(it, application) }
+    }
+
+    private fun splitTrapdoorElement(element: ModelElement): List<ModelElement> {
+        val size = element.to - element.from
+        fun subElement(x0: Double, x1: Double, y0: Double, y1: Double, z0: Double, z1: Double) = element.copy(
+            from = v(
+                element.from.x + size.x * x0,
+                element.from.y + size.y * y0,
+                element.from.z + size.z * z0
+            ),
+            to = v(
+                element.from.x + size.x * x1,
+                element.from.y + size.y * y1,
+                element.from.z + size.z * z1
+            )
+        )
+        return trapdoorFrameSpans.flatMap { (start, end) ->
+            when (minOf(size.x, size.y, size.z)) {
+                size.x -> listOf(
+                    subElement(0.0, 1.0, start, end, 0.0, 1.0),
+                    subElement(0.0, 1.0, 0.0, 1.0, start, end)
+                )
+                size.y -> listOf(
+                    subElement(start, end, 0.0, 1.0, 0.0, 1.0),
+                    subElement(0.0, 1.0, 0.0, 1.0, start, end)
+                )
+                else -> listOf(
+                    subElement(start, end, 0.0, 1.0, 0.0, 1.0),
+                    subElement(0.0, 1.0, start, end, 0.0, 1.0)
+                )
+            }
+        }
     }
 
     private fun axisQuaternion(axis: Char, degrees: Double): GeometryQuaternion {
@@ -455,6 +497,7 @@ internal object BlockModels {
     )
 
     private const val epsilon = 1e-6
+    private val trapdoorFrameSpans = listOf(0.0 to 3.0 / 16.0, 6.0 / 16.0 to 10.0 / 16.0, 13.0 / 16.0 to 1.0)
     private val fluidBlocks = setOf("water", "flowing_water", "lava", "flowing_lava")
     private val identityQuaternion = GeometryQuaternion(0.0, 0.0, 0.0, 1.0)
 }
