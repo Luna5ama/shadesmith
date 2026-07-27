@@ -100,8 +100,8 @@ class BlockModelGLSLTest {
                 (((rotatedData shr 9) and 0x7FFFu) * 12u + 12u).toInt()
             )
             val originStep = 1.0 / 255.0
-            val quaternionStep = 1.0 / 127.0
-            val decodedQuaternion = DoubleArray(4) { rotatedAABB[it].toUByte().toDouble() / 127.0 - 1.0 }
+            val quaternionStep = 1.0 / 126.0
+            val decodedQuaternion = DoubleArray(4) { rotatedAABB[it].toUByte().toDouble() / 126.0 - 1.0 }
             val expectedQuaternion = canonicalQuaternion(rotatedData and BLOCK_MODEL_ROTATION_MASK)
                 .times(axisQuaternion('z', -90.0))
                 .times(axisQuaternion('y', -90.0))
@@ -307,7 +307,7 @@ class BlockModelGLSLTest {
             assets()
         ).aabbData
 
-        assertEquals(listOf(127, 127, 127, 254), bytes.slice(0..3).map { it.toUByte().toInt() })
+        assertEquals(listOf(126, 126, 126, 252), bytes.slice(0..3).map { it.toUByte().toInt() })
         assertEquals(listOf(128, 128, 128), bytes.slice(4..6).map { it.toUByte().toInt() })
         assertTrue(bytes.slice(8..10).all { it.toUByte().toInt() >= 54 })
         val rescaledSize = 1.2727922061357853
@@ -342,10 +342,31 @@ class BlockModelGLSLTest {
             assets()
         )
 
-        assertEquals(listOf(127, 127, 127, 254), output.aabbData.take(4).map { it.toUByte().toInt() })
+        assertEquals(listOf(126, 126, 126, 252), output.aabbData.take(4).map { it.toUByte().toInt() })
         val decodedThickness = output.aabbData[9].toUByte().toDouble() / 255.0 * kotlin.math.sqrt(2.0)
         assertTrue(decodedThickness < 0.19, "Thin AABB expanded to $decodedThickness")
-        assertTrue(output.shader.contains("* (255.0 / 127.0) - 1.0"))
+        assertTrue(output.shader.contains("* (255.0 / 126.0) - 1.0"))
+    }
+
+    @Test
+    fun `encodes half component rotations without thin aabb inflation`() {
+        val output = generateBlockModelGLSL(
+            BlockModelPalette(
+                emptyMap(),
+                emptyList(),
+                listOf(GeometryAABB(
+                    GeometryQuaternion(-0.5, -0.5, -0.5, 0.5),
+                    vertex(0.03125, 0.5, 0.5),
+                    vertex(0.875, 0.0625, 0.875)
+                )),
+                emptyList()
+            ),
+            assets()
+        )
+
+        assertEquals(listOf(63, 63, 63, 189), output.aabbData.take(4).map { it.toUByte().toInt() })
+        val decodedThickness = output.aabbData[9].toUByte().toDouble() / 255.0 * kotlin.math.sqrt(2.0)
+        assertTrue(decodedThickness < 0.07, "Thin AABB expanded to $decodedThickness")
     }
 
     @Test
@@ -569,7 +590,7 @@ class BlockModelGLSLTest {
 
     private fun decodeUNorm(value: Byte) = value.toUByte().toDouble() / 255.0
 
-    private fun decodeSignedUNorm(value: Byte) = value.toUByte().toDouble() / 127.0 - 1.0
+    private fun decodeSignedUNorm(value: Byte) = value.toUByte().toDouble() / 126.0 - 1.0
 
     private fun decodeSizeUNorm(value: Byte) = decodeUNorm(value) * kotlin.math.sqrt(2.0)
 
