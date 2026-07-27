@@ -63,6 +63,41 @@ class BlockModelGLSLTest {
     }
 
     @Test
+    fun `preserves strict swap normals when face times collapse`() {
+        val shader = generateBlockModelGLSL(
+            BlockModelPalette(emptyMap(), emptyList(), emptyList(), emptyList()),
+            assets()
+        ).shader
+        val encodesCollapsedNegativeAxis = shader.contains(
+            "nearT == farT && localDir[axis] < 0.0 ? -axis - 1 : axis"
+        )
+        val cases = listOf(
+            "collapsed negative" to floatArrayOf(1e-6f, 1023.5f, -0.5f),
+            "collapsed positive" to floatArrayOf(1e-6f, -1023.5f, 0.5f),
+            "ordinary positive" to floatArrayOf(0.5f, -2.0f, 1.0f),
+            "ordinary negative" to floatArrayOf(0.5f, 2.0f, -1.0f)
+        )
+
+        for ((label, case) in cases) {
+            val (halfSize, origin, direction) = case
+            val oldNearT = (-halfSize - origin) / direction
+            val oldFarT = (halfSize - origin) / direction
+            val oldNormal = if (oldNearT > oldFarT) 1.0f else -1.0f
+            val signedHalfSize = halfSize * kotlin.math.sign(direction)
+            val nearT = (-signedHalfSize - origin) / direction
+            val farT = (signedHalfSize - origin) / direction
+            val encodedAxis = if (encodesCollapsedNegativeAxis && nearT == farT && direction < 0.0f) -1 else 0
+            val generatedNormal = if (encodedAxis < 0) -1.0f else -kotlin.math.sign(direction)
+            assertEquals(oldNormal, generatedNormal, "$label: old=$oldNormal, new=$generatedNormal")
+        }
+        for (expected in listOf(
+            "int encodedAxis = nearT == farT && localDir[axis] < 0.0 ? -axis - 1 : axis;",
+            "bool collapsedNegative = normalAxis < 0;",
+            "normalAxis = max(normalAxis, -normalAxis - 1);"
+        )) assertTrue(shader.contains(expected), "Missing collapsed-normal state: $expected")
+    }
+
+    @Test
     fun `generates pbr mappings and models for vanilla blockstates absent from bundled blocklist`() {
         val temporary = Files.createTempDirectory("shadesmith-pbr-corpus-")
         val input = temporary.resolve("input")
@@ -200,9 +235,9 @@ class BlockModelGLSLTest {
         for (expected in listOf(
             "int entryAxis = 0;",
             "int exitAxis = 0;",
-            "entryAxis = axis;",
-            "exitAxis = axis;",
-            "localNormal[normalAxis] = -sign(localDir[normalAxis]);"
+            "entryAxis = encodedAxis;",
+            "exitAxis = encodedAxis;",
+            "localNormal[normalAxis] = collapsedNegative ? -1.0 : -sign(localDir[normalAxis]);"
         )) assertTrue(shader.contains(expected), "Missing slab state: $expected")
         for (oldState in listOf("entryNormal", "exitNormal", "nearSign", "farSign")) {
             assertFalse(shader.contains(oldState), "Found old slab state: $oldState")
