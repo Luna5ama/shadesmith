@@ -20,6 +20,8 @@ internal data class BlockModelGLSLOutput(
 
 internal const val BLOCK_MODEL_ROTATION_BITS = 9
 internal const val BLOCK_MODEL_ROTATION_MASK = 0x1FFu
+internal const val BLOCK_MODEL_QUAD_TEXTURE_WIDTH = 32768
+private const val BLOCK_MODEL_QUAD_TEXTURE_ROW_BYTES = BLOCK_MODEL_QUAD_TEXTURE_WIDTH * 4
 
 internal data class BlockModelPalette(
     val modelIdByState: Map<BlockState, List<UInt>>,
@@ -194,9 +196,9 @@ internal fun generateBlockModelGLSL(
         appendLine("bool _voxel_intersectBlockModelQuad(")
         appendLine("    vec3 rayOrigin, vec3 rayDir, uint quadIndex, inout float hitT, inout vec3 hitNormal")
         appendLine(") {")
-        appendLine("    int texelIndex = int(quadIndex * 2u);")
-        appendLine("    vec4 originNormalX = texelFetch(usam_blockModelQuads, texelIndex, 0);")
-        appendLine("    vec4 normalYZHalfSize = texelFetch(usam_blockModelQuads, texelIndex + 1, 0);")
+        appendLine("    ivec2 texelCoord = ivec2(int((quadIndex << 1u) & 0x7FFFu), int(quadIndex >> 14u));")
+        appendLine("    vec4 originNormalX = texelFetch(usam_blockModelQuads, texelCoord, 0);")
+        appendLine("    vec4 normalYZHalfSize = texelFetch(usam_blockModelQuads, texelCoord + ivec2(1, 0), 0);")
         appendLine("    vec3 origin = originNormalX.xyz;")
         appendLine("    vec3 normal = normalize(vec3(originNormalX.w, normalYZHalfSize.xy) * (255.0 / 126.0) - 1.0);")
         appendLine("    vec2 halfSize = normalYZHalfSize.zw + 1e-6;")
@@ -304,6 +306,9 @@ private fun encodeBlockModelQuads(quads: List<GeometryQuad>): List<Byte> = build
         add(normalBytes[2])
         add(halfSizeU.uNormByte(RoundingMode.CEILING))
         add(halfSizeV.uNormByte(RoundingMode.CEILING))
+    }
+    repeat((BLOCK_MODEL_QUAD_TEXTURE_ROW_BYTES - size % BLOCK_MODEL_QUAD_TEXTURE_ROW_BYTES) % BLOCK_MODEL_QUAD_TEXTURE_ROW_BYTES) {
+        add(0)
     }
 }
 

@@ -265,6 +265,12 @@ internal object BlockModels {
     }
 
     private fun elementQuads(element: ModelElement, application: ModelApplication): List<GeometryQuad> {
+        val path = application.model.substringAfter(':', application.model)
+        val elements = if (path.startsWith("block/") && "_trapdoor_" in path) splitTrapdoorElement(element) else listOf(element)
+        return elements.flatMap { rawElementQuads(it, application) }
+    }
+
+    private fun rawElementQuads(element: ModelElement, application: ModelApplication): List<GeometryQuad> {
         val corners = faceVertices(element.from, element.to)
         return element.faces.mapNotNull { (face, cullFace) ->
             val vertices = corners[face] ?: throw IllegalArgumentException("Unknown model face: $face")
@@ -273,6 +279,38 @@ internal object BlockModels {
                 rotateState(elementVertex, application)
             }
             normalizeQuad(transformed, cullFace?.let { rotateState(it, application) })
+        }
+    }
+
+    private fun splitTrapdoorElement(element: ModelElement): List<ModelElement> {
+        val size = element.to - element.from
+        fun subElement(x0: Double, x1: Double, y0: Double, y1: Double, z0: Double, z1: Double) = element.copy(
+            from = v(
+                element.from.x + size.x * x0,
+                element.from.y + size.y * y0,
+                element.from.z + size.z * z0
+            ),
+            to = v(
+                element.from.x + size.x * x1,
+                element.from.y + size.y * y1,
+                element.from.z + size.z * z1
+            )
+        )
+        return trapdoorFrameSpans.flatMap { (start, end) ->
+            when (minOf(size.x, size.y, size.z)) {
+                size.x -> listOf(
+                    subElement(0.0, 1.0, start, end, 0.0, 1.0),
+                    subElement(0.0, 1.0, 0.0, 1.0, start, end)
+                )
+                size.y -> listOf(
+                    subElement(start, end, 0.0, 1.0, 0.0, 1.0),
+                    subElement(0.0, 1.0, 0.0, 1.0, start, end)
+                )
+                else -> listOf(
+                    subElement(start, end, 0.0, 1.0, 0.0, 1.0),
+                    subElement(0.0, 1.0, start, end, 0.0, 1.0)
+                )
+            }
         }
     }
 
@@ -416,6 +454,7 @@ internal object BlockModels {
     )
 
     private const val epsilon = 1e-6
+    private val trapdoorFrameSpans = listOf(0.0 to 3.0 / 16.0, 6.0 / 16.0 to 10.0 / 16.0, 13.0 / 16.0 to 1.0)
     private val fluidBlocks = setOf("water", "flowing_water", "lava", "flowing_lava")
 }
 

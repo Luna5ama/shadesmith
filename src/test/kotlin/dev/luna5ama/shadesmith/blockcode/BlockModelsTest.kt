@@ -67,6 +67,30 @@ class BlockModelsTest {
     }
 
     @Test
+    fun `trapdoor quad frames leave alpha holes open through state rotations`() = withJar(
+        mapOf(
+            blockstate("horizontal") to singleVariant("oak_trapdoor_bottom"),
+            blockstate("horizontal_rotated") to
+                """{"variants":{"":{"model":"minecraft:block/oak_trapdoor_bottom","y":90}}}""",
+            blockstate("vertical") to singleVariant("oak_trapdoor_open"),
+            blockstate("vertical_rotated") to
+                """{"variants":{"":{"model":"minecraft:block/oak_trapdoor_open","y":90}}}""",
+            model("oak_trapdoor_bottom") to fullElementModel(0, 0, 0, 16, 3, 16),
+            model("oak_trapdoor_open") to fullElementModel(0, 0, 13, 16, 16, 16)
+        )
+    ) { jar ->
+        val quads = BlockModels.load(
+            jar,
+            properties("horizontal", "horizontal_rotated", "vertical", "vertical_rotated")
+        ).supported.associate { it.state.blockID to it.quads }
+
+        assertOpening(quads.getValue("horizontal"), GeometryVertex(0.25, 1.0, 0.25), GeometryVertex(0.0625, 1.0, 0.25), GeometryVertex(0.0, -1.0, 0.0))
+        assertOpening(quads.getValue("horizontal_rotated"), GeometryVertex(0.25, 1.0, 0.25), GeometryVertex(0.0625, 1.0, 0.25), GeometryVertex(0.0, -1.0, 0.0))
+        assertOpening(quads.getValue("vertical"), GeometryVertex(0.25, 0.25, -1.0), GeometryVertex(0.0625, 0.25, -1.0), GeometryVertex(0.0, 0.0, 1.0))
+        assertOpening(quads.getValue("vertical_rotated"), GeometryVertex(-1.0, 0.25, 0.25), GeometryVertex(-1.0, 0.25, 0.0625), GeometryVertex(1.0, 0.0, 0.0))
+    }
+
+    @Test
     fun `multipart evaluates nested conjunction disjunction alternatives and unconditional parts`() = withJar(
         mapOf(
             blockstate("multipart") to """{"multipart":[
@@ -352,6 +376,9 @@ class BlockModelsTest {
     private fun elementModel(x0: Int, y0: Int, z0: Int, x1: Int, y1: Int, z1: Int) =
         """{"elements":[${element(x0, y0, z0, x1, y1, z1)}]}"""
 
+    private fun fullElementModel(x0: Int, y0: Int, z0: Int, x1: Int, y1: Int, z1: Int) =
+        """{"elements":[${elementWithFaces(x0, y0, z0, x1, y1, z1, "west", "east", "down", "up", "north", "south")}]}"""
+
     private fun element(x0: Int, y0: Int, z0: Int, x1: Int, y1: Int, z1: Int) =
         elementWithFaces(x0, y0, z0, x1, y1, z1, "west")
 
@@ -376,7 +403,37 @@ class BlockModelsTest {
     }
 
     private fun GeometryVertex.length() = kotlin.math.sqrt(dot(this))
+    private fun assertOpening(
+        quads: List<GeometryQuad>,
+        holeRayOrigin: GeometryVertex,
+        frameRayOrigin: GeometryVertex,
+        direction: GeometryVertex
+    ) {
+        assertFalse(quads.any { it.intersectsRay(holeRayOrigin, direction) }, "center-hole ray hit a trapdoor quad")
+        assertTrue(quads.any { it.intersectsRay(frameRayOrigin, direction) }, "frame ray missed every trapdoor quad")
+    }
+
+    private fun GeometryQuad.intersectsRay(origin: GeometryVertex, direction: GeometryVertex): Boolean {
+        val denominator = normal.dot(direction)
+        if (kotlin.math.abs(denominator) <= 1e-9) return false
+        val distance = (vertices.first() - origin).dot(normal) / denominator
+        if (distance < 0.0) return false
+        val point = origin + direction * distance
+        return vertices.indices.all { index ->
+            val start = vertices[index]
+            (vertices[(index + 1) % vertices.size] - start).cross(point - start).dot(normal) >= -1e-6
+        }
+    }
+
+    private operator fun GeometryVertex.plus(other: GeometryVertex) =
+        GeometryVertex(x + other.x, y + other.y, z + other.z)
     private operator fun GeometryVertex.minus(other: GeometryVertex) =
         GeometryVertex(x - other.x, y - other.y, z - other.z)
+    private operator fun GeometryVertex.times(scale: Double) = GeometryVertex(x * scale, y * scale, z * scale)
+    private fun GeometryVertex.cross(other: GeometryVertex) = GeometryVertex(
+        y * other.z - z * other.y,
+        z * other.x - x * other.z,
+        x * other.y - y * other.x
+    )
     private fun GeometryVertex.dot(other: GeometryVertex) = x * other.x + y * other.y + z * other.z
 }
