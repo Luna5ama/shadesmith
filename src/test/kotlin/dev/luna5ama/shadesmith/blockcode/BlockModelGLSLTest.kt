@@ -60,17 +60,17 @@ class BlockModelGLSLTest {
         for (openMask in 0 until 64) {
             val metadata = mixedRows[openMask]
             val expectedCount = 1 + bits.count { bit -> openMask.toUInt() and bit != 0u }
-            assertEquals(expectedCount.toUInt(), metadata shr 24, "openMask=$openMask")
+            assertEquals(expectedCount.toUInt(), metadata shr 25, "openMask=$openMask")
             val rotation = metadata and BLOCK_MODEL_ROTATION_MASK
-            val quadOffset = (metadata shr BLOCK_MODEL_ROTATION_BITS) and 0x7FFFu
+            val quadOffset = (metadata shr BLOCK_MODEL_ROTATION_BITS) and 0xFFFFu
             assertEquals(
-                rotation or (quadOffset shl BLOCK_MODEL_ROTATION_BITS) or (expectedCount.toUInt() shl 24),
+                rotation or (quadOffset shl BLOCK_MODEL_ROTATION_BITS) or (expectedCount.toUInt() shl 25),
                 metadata,
-                "rotation9 | quadOffset15<<9 | quadCount8<<24 for openMask=$openMask"
+                "rotation9 | quadOffset16<<9 | quadCount7<<25 for openMask=$openMask"
             )
         }
-        assertEquals(1u, mixedRows[0] shr 24)
-        assertEquals(7u, mixedRows[63] shr 24)
+        assertEquals(1u, mixedRows[0] shr 25)
+        assertEquals(7u, mixedRows[63] shr 25)
 
         val alwaysRows = palette.modelIdByState.getValue(alwaysState)
         val conditionalRows = palette.modelIdByState.getValue(conditionalState)
@@ -95,7 +95,7 @@ class BlockModelGLSLTest {
         val palette = buildBlockModelPalette(BlockModelsResult(listOf(model(state, listOf(source))), emptyList()))
         val generated = generateBlockModelGLSL(palette, assets())
         val metadata = palette.modelIdByState.getValue(state)[0]
-        val quadOffset = ((metadata shr BLOCK_MODEL_ROTATION_BITS) and 0x7FFFu).toInt()
+        val quadOffset = ((metadata shr BLOCK_MODEL_ROTATION_BITS) and 0xFFFFu).toInt()
         val bytes = generated.quadData.slice(quadOffset * 8 until quadOffset * 8 + 8)
 
         assertEquals(8, generated.quadData.size)
@@ -139,8 +139,9 @@ class BlockModelGLSLTest {
         assertTrue(shader.contains("vec2 halfSize"))
         assertTrue(shader.contains("dot(normal, rayDir)"))
         assertTrue(shader.contains("cross(axis, normal)"))
-        assertTrue(shader.contains("uint quadOffset = (modelData >> 9u) & 0x7FFFu;"))
-        assertTrue(shader.contains("uint quadCount = modelData >> 24u;"))
+        assertTrue(shader.contains("uint rotation = modelData & 0x1FFu;"))
+        assertTrue(shader.contains("uint quadOffset = (modelData >> 9u) & 0xFFFFu;"))
+        assertTrue(shader.contains("uint quadCount = modelData >> 25u;"))
         assertFalse(shader.contains("aabb", ignoreCase = true))
         assertFalse(Regex("\\b(?:const\\s+)?vec[234]\\s+\\w+\\s*\\[").containsMatchIn(shader))
     }
@@ -221,13 +222,13 @@ class BlockModelGLSLTest {
                     decodeModelMetadata(modelLut, materialId, 63)
                 )
             }
-            assertEquals(listOf(1u, 1u, 2u), rows.map { it[0] shr 24 })
+            assertEquals(listOf(1u, 1u, 2u), rows.map { it[0] shr 25 })
             assertEquals(rows.map { it[0] }, rows.map { it[1] }, "unculled quads survive masks 0 and 63")
             assertEquals(0u, decodeModelMetadata(modelLut, stoneId, 0))
             assertEquals(0u, decodeModelMetadata(modelLut, stoneId, 63))
 
             assertTrue(shader.contains("texelFetch(usam_blockModelQuads"))
-            assertTrue(shader.contains("uint quadCount = modelData >> 24u;"))
+            assertTrue(shader.contains("uint quadCount = modelData >> 25u;"))
             assertTrue(shader.contains("for (uint i = 0u; i < quadCount; ++i)"))
             assertFalse(shader.contains("switch"))
             assertFalse(shader.contains("modelID"))
@@ -243,7 +244,7 @@ class BlockModelGLSLTest {
             val expectedQuadCount = (0..maxMaterialId).maxOf { materialId ->
                 (0 until 64).maxOf { openMask ->
                     val metadata = decodeModelMetadata(modelLut, materialId, openMask)
-                    ((metadata shr 9) and 0x7FFFu) + (metadata shr 24)
+                    ((metadata shr 9) and 0xFFFFu) + (metadata shr 25)
                 }
             }.toInt()
             assertEquals(expectedQuadCount * 8, quadBytes.size)
@@ -349,8 +350,8 @@ class BlockModelGLSLTest {
         val modelRows = equivalent.map { palette.modelIdByState.getValue(it.model.state) }
         assertTrue(modelRows.all { rows -> rows.all { it == rows[0] } })
         val modelData = modelRows.map { it[0] }
-        assertEquals(1, modelData.map { (it shr BLOCK_MODEL_ROTATION_BITS) and 0x7FFFu }.distinct().size)
-        assertTrue(modelData.all { it shr 24 == shape.model.quads.size.toUInt() })
+        assertEquals(1, modelData.map { (it shr BLOCK_MODEL_ROTATION_BITS) and 0xFFFFu }.distinct().size)
+        assertTrue(modelData.all { it shr 25 == shape.model.quads.size.toUInt() })
         assertEquals(4, modelData.distinct().size)
         equivalent.zip(modelData).forEach { (model, data) ->
             assertEquals(
@@ -359,8 +360,8 @@ class BlockModelGLSLTest {
             )
         }
         assertEquals(2, palette.geometries.size)
-        assertTrue(first.shader.contains("uint quadOffset = (modelData >> 9u) & 0x7FFFu;"))
-        assertTrue(first.shader.contains("uint quadCount = modelData >> 24u;"))
+        assertTrue(first.shader.contains("uint quadOffset = (modelData >> 9u) & 0xFFFFu;"))
+        assertTrue(first.shader.contains("uint quadCount = modelData >> 25u;"))
         assertTrue(first.shader.contains("_voxel_unrotateBlockModelVector"))
         val modelFunction = first.shader.substringAfter("bool voxel_intersectBlockModel(")
         assertEquals(1, Regex("(?m)^    bool hit = false;$").findAll(modelFunction).count())
@@ -415,7 +416,7 @@ class BlockModelGLSLTest {
     }
 
     @Test
-    fun `uses BigDecimal UNORM rounding and rejects more than 255 quads per row`() {
+    fun `uses BigDecimal UNORM rounding and rejects more than 127 quads per row`() {
         val square = quad(
             vertex(0.2, 0.2, 0.5),
             vertex(0.8, 0.2, 0.5),
@@ -432,8 +433,8 @@ class BlockModelGLSLTest {
         assertEquals(2, normalBytes.count { it == 126 })
         assertTrue(normalBytes.any { it == 0 || it == 252 })
 
-        val tooMany = List(256) { index ->
-            val z = (index + 1.0) / 257.0
+        val tooMany = List(128) { index ->
+            val z = (index + 1.0) / 129.0
             quad(vertex(0.2, 0.2, z), vertex(0.8, 0.2, z), vertex(0.8, 0.8, z), vertex(0.2, 0.8, z))
         }
         assertFailsWith<IllegalArgumentException> {

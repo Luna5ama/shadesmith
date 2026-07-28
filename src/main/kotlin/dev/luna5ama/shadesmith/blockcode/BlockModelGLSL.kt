@@ -46,10 +46,10 @@ internal fun buildBlockModelPalette(models: BlockModelsResult): BlockModelPalett
             val canonical = canonicalBlockModel(filtered)
             val metadata = geometryMetadata.getOrPut(canonical.quads) {
                 val offset = quads.size
-                require(offset <= 32767) { "Block model quad offset exceeds packed UInt32 capacity" }
-                require(canonical.quads.size <= 255) { "Block model quad count exceeds packed UInt32 capacity" }
+                require(offset <= 65535) { "Block model quad offset exceeds packed UInt32 capacity" }
+                require(canonical.quads.size <= 127) { "Block model quad count exceeds packed UInt32 capacity" }
                 quads += canonical.quads
-                (canonical.quads.size.toUInt() shl 24) or (offset.toUInt() shl BLOCK_MODEL_ROTATION_BITS)
+                (canonical.quads.size.toUInt() shl 25) or (offset.toUInt() shl BLOCK_MODEL_ROTATION_BITS)
             }
             metadata or canonical.rotation
         }
@@ -219,9 +219,9 @@ internal fun generateBlockModelGLSL(
         appendLine("    uint modelData, vec3 rayOrigin, vec3 rayDir,")
         appendLine("    out float hitT, out vec3 hitNormal")
         appendLine(") {")
-        appendLine("    uint rotation = modelData & " + BLOCK_MODEL_ROTATION_MASK + "u;")
-        appendLine("    uint quadOffset = (modelData >> " + BLOCK_MODEL_ROTATION_BITS + "u) & 0x7FFFu;")
-        appendLine("    uint quadCount = modelData >> 24u;")
+        appendLine("    uint rotation = modelData & 0x1FFu;")
+        appendLine("    uint quadOffset = (modelData >> 9u) & 0xFFFFu;")
+        appendLine("    uint quadCount = modelData >> 25u;")
         appendLine("    rayOrigin = _voxel_rotateBlockModelVector(rotation, rayOrigin - vec3(0.5)) + vec3(0.5);")
         appendLine("    rayDir = _voxel_rotateBlockModelVector(rotation, rayDir);")
         appendLine("    hitT = uintBitsToFloat(0x7F800000u);")
