@@ -522,6 +522,46 @@ class BlockModelGLSLTest {
         assertEquals(null, miss)
     }
 
+    @Test
+    fun `encodes quad extents in the unnormalized runtime basis`() {
+        val u = vertex(-1.0, 1.0, 0.0).normalized() * 0.2
+        val v = vertex(-1.0, -1.0, 2.0).normalized() * 0.2
+        val center = vertex(0.5, 0.5, 0.5)
+        val model = model(BlockState("diagonal"), listOf(quad(
+            center - u - v,
+            center + u - v,
+            center + u + v,
+            center - u + v
+        )))
+        val palette = buildBlockModelPalette(BlockModelsResult(listOf(model), emptyList()))
+        val generated = generateBlockModelGLSL(palette, assets())
+        val encoded = generated.quadData.take(8)
+        val normal = vertex(
+            decodeSignedUNorm(encoded[3]),
+            decodeSignedUNorm(encoded[4]),
+            decodeSignedUNorm(encoded[5])
+        )
+        val axis = if (abs(normal.z) < 0.999) vertex(0.0, 0.0, 1.0) else vertex(0.0, 1.0, 0.0)
+        val tangent = axis.cross(normal)
+        val bitangent = normal.cross(tangent)
+        val origin = vertex(
+            decodeUNorm(encoded[0]),
+            decodeUNorm(encoded[1]),
+            decodeUNorm(encoded[2])
+        )
+        val quad = palette.quads.single()
+        val expected = listOf(tangent, bitangent).map { basis ->
+            quad.vertices.maxOf { vertex -> abs((vertex - origin).dot(basis)) }
+        }
+
+        assertEquals(expected[0], decodeUNorm(encoded[6]), 1.0 / 255.0)
+        assertEquals(expected[1], decodeUNorm(encoded[7]), 1.0 / 255.0)
+        val intersection = generated.shader.substringAfter("bool _voxel_intersectBlockModelQuad(")
+            .substringBefore("bool voxel_intersectBlockModel(")
+        assertFalse(intersection.contains("normalize"))
+        assertTrue(generated.shader.contains("normalize(hitNormal)"))
+    }
+
     private data class FixtureState(val model: ExpandedGeometryState, val materialId: Int)
 
     private fun state(blockID: String, materialId: Int, quads: List<GeometryQuad>, isFullCube: Boolean = false) =

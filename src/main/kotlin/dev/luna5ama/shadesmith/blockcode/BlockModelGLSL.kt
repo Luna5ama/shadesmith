@@ -200,14 +200,14 @@ internal fun generateBlockModelGLSL(
         appendLine("    vec4 originNormalX = texelFetch(usam_blockModelQuads, texelCoord, 0);")
         appendLine("    vec4 normalYZHalfSize = texelFetch(usam_blockModelQuads, texelCoord + ivec2(1, 0), 0);")
         appendLine("    vec3 origin = originNormalX.xyz;")
-        appendLine("    vec3 normal = normalize(vec3(originNormalX.w, normalYZHalfSize.xy) * (255.0 / 126.0) - 1.0);")
+        appendLine("    vec3 normal = vec3(originNormalX.w, normalYZHalfSize.xy) * (255.0 / 126.0) - 1.0;")
         appendLine("    vec2 halfSize = normalYZHalfSize.zw + 1e-6;")
         appendLine("    float denominator = dot(normal, rayDir);")
         appendLine("    if (abs(denominator) <= 1e-8) return false;")
         appendLine("    float t = dot(normal, origin - rayOrigin) / denominator;")
         appendLine("    if (!(t >= 0.0 && t <= hitT)) return false;")
         appendLine("    vec3 axis = abs(normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);")
-        appendLine("    vec3 u = normalize(cross(axis, normal));")
+        appendLine("    vec3 u = cross(axis, normal);")
         appendLine("    vec3 v = cross(normal, u);")
         appendLine("    vec3 offset = rayOrigin + rayDir * t - origin;")
         appendLine("    vec2 projected = abs(vec2(dot(offset, u), dot(offset, v)));")
@@ -232,7 +232,7 @@ internal fun generateBlockModelGLSL(
         appendLine("    for (uint i = 0u; i < quadCount; ++i) {")
         appendLine("        hit = _voxel_intersectBlockModelQuad(rayOrigin, rayDir, quadOffset + i, hitT, hitNormal) || hit;")
         appendLine("    }")
-        appendLine("    if (hit) hitNormal = _voxel_unrotateBlockModelVector(rotation, hitNormal);")
+        appendLine("    if (hit) hitNormal = _voxel_unrotateBlockModelVector(rotation, normalize(hitNormal));")
         appendLine("    return hit;")
         appendLine("}")
         appendLine()
@@ -281,13 +281,13 @@ private fun encodeBlockModelQuads(quads: List<GeometryQuad>): List<Byte> = build
             normalBytes[0].signedUNorm(),
             normalBytes[1].signedUNorm(),
             normalBytes[2].signedUNorm()
-        ).normalized()
+        )
         val axis = if (kotlin.math.abs(decodedNormal.z) < 0.999) {
             GeometryVertex(0.0, 0.0, 1.0)
         } else {
             GeometryVertex(0.0, 1.0, 0.0)
         }
-        val u = axis.cross(decodedNormal).normalized()
+        val u = axis.cross(decodedNormal)
         val v = decodedNormal.cross(u)
         var halfSizeU = 0.0
         var halfSizeV = 0.0
