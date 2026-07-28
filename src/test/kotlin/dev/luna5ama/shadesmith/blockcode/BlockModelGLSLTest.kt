@@ -1,11 +1,6 @@
 package dev.luna5ama.shadesmith.blockcode
 
 import dev.luna5ama.shadesmith.IOContext
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.double
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -26,75 +21,143 @@ import kotlin.test.assertTrue
 
 class BlockModelGLSLTest {
     @Test
-    fun `orders slab times by direction sign without changing float bits`() {
-        val shader = generateBlockModelGLSL(
-            BlockModelPalette(emptyMap(), emptyList(), emptyList(), emptyList()),
-            assets()
-        ).shader
-        assertTrue(shader.contains("float signedHalfSize = halfSize[axis] * sign(localDir[axis]);"))
-        assertTrue(shader.contains("float nearT = (-signedHalfSize - localOrigin[axis]) / localDir[axis];"))
-        assertTrue(shader.contains("float farT = (signedHalfSize - localOrigin[axis]) / localDir[axis];"))
-        assertFalse(shader.contains("if (nearT > farT)"))
-
-        val cases = listOf(
-            floatArrayOf(1.0f, 0.0f, 0.5f),
-            floatArrayOf(-1.0f, -0.0f, 0.5f),
-            floatArrayOf(Math.nextUp(1e-8f), Float.MIN_VALUE, java.lang.Float.MIN_NORMAL),
-            floatArrayOf(-Math.nextUp(1e-8f), -Float.MIN_VALUE, java.lang.Float.MIN_NORMAL),
-            floatArrayOf(Float.MAX_VALUE, Float.MAX_VALUE, java.lang.Float.MIN_NORMAL),
-            floatArrayOf(-Float.MAX_VALUE, -Float.MAX_VALUE, Float.MAX_VALUE)
+    fun `builds 64 pre-culled metadata rows and deduplicates filtered geometry`() {
+        val bits = listOf(1u, 2u, 4u, 8u, 16u, 32u)
+        val alwaysQuad = quad(
+            vertex(0.2, 0.2, 0.25),
+            vertex(0.8, 0.2, 0.25),
+            vertex(0.8, 0.8, 0.25),
+            vertex(0.2, 0.8, 0.25)
         )
-        for ((index, case) in cases.withIndex()) {
-            val (direction, origin, halfSize) = case
-            var oldNearT = (-halfSize - origin) / direction
-            var oldFarT = (halfSize - origin) / direction
-            if (oldNearT > oldFarT) {
-                val swapT = oldNearT
-                oldNearT = oldFarT
-                oldFarT = swapT
-            }
-
-            val signedHalfSize = halfSize * kotlin.math.sign(direction)
-            val newNearT = (-signedHalfSize - origin) / direction
-            val newFarT = (signedHalfSize - origin) / direction
-            assertEquals(oldNearT.toRawBits(), newNearT.toRawBits(), "nearT case $index")
-            assertEquals(oldFarT.toRawBits(), newFarT.toRawBits(), "farT case $index")
+        val mixedState = BlockState("mixed")
+        val alwaysState = BlockState("always")
+        val conditionalState = BlockState("conditional")
+        val emptyState = BlockState("empty")
+        val fullCubeState = BlockState("full")
+        val mixedQuads = listOf(alwaysQuad) + bits.mapIndexed { index, bit ->
+            val z = 0.3 + index * 0.1
+            quad(
+                vertex(0.2, 0.2, z),
+                vertex(0.8, 0.2, z),
+                vertex(0.8, 0.8, z),
+                vertex(0.2, 0.8, z),
+                bit
+            )
         }
+        val palette = buildBlockModelPalette(BlockModelsResult(
+            listOf(
+                model(mixedState, mixedQuads),
+                model(alwaysState, listOf(alwaysQuad)),
+                model(conditionalState, listOf(alwaysQuad.copy(cullFace = 1u))),
+                model(emptyState, emptyList()),
+                model(fullCubeState, cube(), isFullCube = true)
+            ),
+            emptyList()
+        ))
+
+        val mixedRows = palette.modelIdByState.getValue(mixedState)
+        assertEquals(64, mixedRows.size)
+        for (openMask in 0 until 64) {
+            val metadata = mixedRows[openMask]
+            val expectedCount = 1 + bits.count { bit -> openMask.toUInt() and bit != 0u }
+            assertEquals(expectedCount.toUInt(), metadata shr 24, "openMask=$openMask")
+            val rotation = metadata and BLOCK_MODEL_ROTATION_MASK
+            val quadOffset = (metadata shr BLOCK_MODEL_ROTATION_BITS) and 0x7FFFu
+            assertEquals(
+                rotation or (quadOffset shl BLOCK_MODEL_ROTATION_BITS) or (expectedCount.toUInt() shl 24),
+                metadata,
+                "rotation9 | quadOffset15<<9 | quadCount8<<24 for openMask=$openMask"
+            )
+        }
+        assertEquals(1u, mixedRows[0] shr 24)
+        assertEquals(7u, mixedRows[63] shr 24)
+
+        val alwaysRows = palette.modelIdByState.getValue(alwaysState)
+        val conditionalRows = palette.modelIdByState.getValue(conditionalState)
+        assertTrue(alwaysRows.all { metadata -> metadata == alwaysRows[0] })
+        for (openMask in 0 until 64) {
+            val expected = if (openMask and 1 == 0) 0u else alwaysRows[openMask]
+            assertEquals(expected, conditionalRows[openMask], "deduplicated row for openMask=$openMask")
+        }
+        assertTrue(palette.modelIdByState.getValue(emptyState).all { it == 0u })
+        assertTrue(palette.modelIdByState.getValue(fullCubeState).all { it == 0u })
     }
 
     @Test
-    fun `preserves strict swap normals when face times collapse`() {
+    fun `encodes conservative two-texel quads and emits array-free quad intersection glsl`() {
+        val state = BlockState("tilted")
+        val source = quad(
+            vertex(0.2, 0.2, 0.2),
+            vertex(0.8, 0.2, 0.4),
+            vertex(0.8, 0.8, 0.4),
+            vertex(0.2, 0.8, 0.2)
+        )
+        val palette = buildBlockModelPalette(BlockModelsResult(listOf(model(state, listOf(source))), emptyList()))
+        val generated = generateBlockModelGLSL(palette, assets())
+        val metadata = palette.modelIdByState.getValue(state)[0]
+        val quadOffset = ((metadata shr BLOCK_MODEL_ROTATION_BITS) and 0x7FFFu).toInt()
+        val bytes = generated.quadData.slice(quadOffset * 8 until quadOffset * 8 + 8)
+
+        assertEquals(8, generated.quadData.size)
+        assertEquals(8, bytes.size)
+        val encodedSource = palette.geometries.single().single()
+        val expectedOrigin = encodedSource.vertices.reduce { sum, vertex -> sum + vertex } * 0.25
+        val origin = vertex(
+            decodeUNorm(bytes[0]),
+            decodeUNorm(bytes[1]),
+            decodeUNorm(bytes[2])
+        )
+        assertTrue(abs(origin.x - expectedOrigin.x) <= 1.0 / 255.0)
+        assertTrue(abs(origin.y - expectedOrigin.y) <= 1.0 / 255.0)
+        assertTrue(abs(origin.z - expectedOrigin.z) <= 1.0 / 255.0)
+        val sourceNormalComponents = listOf(encodedSource.normal.x, encodedSource.normal.y, encodedSource.normal.z)
+        val encodedNormalComponents = bytes.slice(3..5).map { it.toUByte().toInt() }
+        val exactZeroComponents = sourceNormalComponents.indices.filter { sourceNormalComponents[it] == 0.0 }
+        assertTrue(exactZeroComponents.isNotEmpty())
+        exactZeroComponents.forEach { index ->
+            assertEquals(126, encodedNormalComponents[index], "exact zero normal component $index")
+        }
+        val normal = vertex(
+            decodeSignedUNorm(bytes[3]),
+            decodeSignedUNorm(bytes[4]),
+            decodeSignedUNorm(bytes[5])
+        ).normalized()
+        assertTrue(normal.dot(encodedSource.normal) >= 1.0 - 3.0 / 126.0)
+        val axis = if (abs(normal.z) < 0.999) vertex(0.0, 0.0, 1.0) else vertex(0.0, 1.0, 0.0)
+        val u = axis.cross(normal).normalized()
+        val v = normal.cross(u)
+        val halfSizeU = decodeUNorm(bytes[6]) + 1e-6
+        val halfSizeV = decodeUNorm(bytes[7]) + 1e-6
+        for (vertex in encodedSource.vertices) {
+            val relative = vertex - origin
+            assertTrue(abs(relative.dot(u)) <= halfSizeU, "encoded U half size excludes $vertex")
+            assertTrue(abs(relative.dot(v)) <= halfSizeV, "encoded V half size excludes $vertex")
+        }
+
+        val shader = generated.shader
+        assertEquals(2, Regex("texelFetch\\(usam_blockModelQuads").findAll(shader).count())
+        assertTrue(shader.contains("vec2 halfSize"))
+        assertTrue(shader.contains("dot(normal, rayDir)"))
+        assertTrue(shader.contains("cross(axis, normal)"))
+        assertTrue(shader.contains("uint quadOffset = (modelData >> 9u) & 0x7FFFu;"))
+        assertTrue(shader.contains("uint quadCount = modelData >> 24u;"))
+        assertFalse(shader.contains("aabb", ignoreCase = true))
+        assertFalse(Regex("\\b(?:const\\s+)?vec[234]\\s+\\w+\\s*\\[").containsMatchIn(shader))
+    }
+
+    @Test
+    fun `orients quad normals against the ray`() {
         val shader = generateBlockModelGLSL(
             BlockModelPalette(emptyMap(), emptyList(), emptyList(), emptyList()),
             assets()
         ).shader
-        val encodesCollapsedNegativeAxis = shader.contains(
-            "nearT == farT && localDir[axis] < 0.0 ? -axis - 1 : axis"
-        )
-        val cases = listOf(
-            "collapsed negative" to floatArrayOf(1e-6f, 1023.5f, -0.5f),
-            "collapsed positive" to floatArrayOf(1e-6f, -1023.5f, 0.5f),
-            "ordinary positive" to floatArrayOf(0.5f, -2.0f, 1.0f),
-            "ordinary negative" to floatArrayOf(0.5f, 2.0f, -1.0f)
-        )
-
-        for ((label, case) in cases) {
-            val (halfSize, origin, direction) = case
-            val oldNearT = (-halfSize - origin) / direction
-            val oldFarT = (halfSize - origin) / direction
-            val oldNormal = if (oldNearT > oldFarT) 1.0f else -1.0f
-            val signedHalfSize = halfSize * kotlin.math.sign(direction)
-            val nearT = (-signedHalfSize - origin) / direction
-            val farT = (signedHalfSize - origin) / direction
-            val encodedAxis = if (encodesCollapsedNegativeAxis && nearT == farT && direction < 0.0f) -1 else 0
-            val generatedNormal = if (encodedAxis < 0) -1.0f else -kotlin.math.sign(direction)
-            assertEquals(oldNormal, generatedNormal, "$label: old=$oldNormal, new=$generatedNormal")
-        }
-        for (expected in listOf(
-            "int encodedAxis = nearT == farT && localDir[axis] < 0.0 ? -axis - 1 : axis;",
-            "bool collapsedNegative = normalAxis < 0;",
-            "normalAxis = max(normalAxis, -normalAxis - 1);"
-        )) assertTrue(shader.contains(expected), "Missing collapsed-normal state: $expected")
+        assertTrue(shader.contains("hitNormal = denominator < 0.0 ? normal : -normal;"))
+        assertEquals(vertex(0.0, 0.0, 1.0), assertNotNull(intersectQuad(
+            vertex(0.5, 0.5, 1.0), vertex(0.0, 0.0, -1.0), cube().last()
+        )).second)
+        assertEquals(vertex(0.0, 0.0, -1.0), assertNotNull(intersectQuad(
+            vertex(0.5, 0.5, -1.0), vertex(0.0, 0.0, 1.0), cube()[4]
+        )).second)
     }
 
     @Test
@@ -148,60 +211,46 @@ class BlockModelGLSLTest {
             val shader = input.resolve("techniques/voxel/BlockModels.glsl").readText()
             val packedLut = input.resolve("textures/pbr_lut_0.bin").readBytes()
             val modelLut = input.resolve("textures/pbr_lut_1.bin").readBytes()
-            val modelData = listOf(bottomId, topId, rotatedId).map { decode(modelLut, it) }
-            assertTrue(shader.contains("texelFetch(usam_blockModelAABBs"))
-            assertTrue(shader.contains("uint aabbCount = modelData >> 24u;"))
-            assertTrue(shader.contains("for (uint i = 0u; i < aabbCount; ++i)"))
+            val maxMaterialId = blockProperties.lineSequence().mapNotNull { line ->
+                line.substringBefore(" = ").removePrefix("block.").toIntOrNull()
+            }.max()
+            assertEquals((maxMaterialId + 1) * 64 * 4, modelLut.size)
+            val rows = listOf(bottomId, topId, rotatedId).map { materialId ->
+                listOf(
+                    decodeModelMetadata(modelLut, materialId, 0),
+                    decodeModelMetadata(modelLut, materialId, 63)
+                )
+            }
+            assertEquals(listOf(1u, 1u, 2u), rows.map { it[0] shr 24 })
+            assertEquals(rows.map { it[0] }, rows.map { it[1] }, "unculled quads survive masks 0 and 63")
+            assertEquals(0u, decodeModelMetadata(modelLut, stoneId, 0))
+            assertEquals(0u, decodeModelMetadata(modelLut, stoneId, 63))
+
+            assertTrue(shader.contains("texelFetch(usam_blockModelQuads"))
+            assertTrue(shader.contains("uint quadCount = modelData >> 24u;"))
+            assertTrue(shader.contains("for (uint i = 0u; i < quadCount; ++i)"))
             assertFalse(shader.contains("switch"))
             assertFalse(shader.contains("modelID"))
+            assertFalse(shader.contains("aabb", ignoreCase = true))
             assertFalse(Regex("\\b(?:const\\s+)?vec[234]\\s+\\w+\\s*\\[").containsMatchIn(shader))
-            assertEquals(listOf(1u, 1u, 2u), modelData.map { it shr 24 })
 
-            val trackedAABBs = input.resolve("textures/block_model_aabbs.bin")
-            val packagedAABBs = output.resolve("textures/block_model_aabbs.bin")
-            assertTrue(Files.exists(trackedAABBs), "Missing tracked block-model AABB texture")
-            assertTrue(Files.exists(packagedAABBs), "Missing packaged block-model AABB texture")
-            val aabbBytes = trackedAABBs.readBytes()
-            assertTrue(aabbBytes.contentEquals(packagedAABBs.readBytes()))
-            val expectedAABBCount = modelData.maxOf { ((it shr 9) and 0x7FFFu) + (it shr 24) }.toInt()
-            assertEquals(expectedAABBCount * 12, aabbBytes.size)
-
-            val rotatedData = modelData.last()
-            val rotatedAABB = aabbBytes.copyOfRange(
-                (((rotatedData shr 9) and 0x7FFFu) * 12u).toInt(),
-                (((rotatedData shr 9) and 0x7FFFu) * 12u + 12u).toInt()
-            )
-            val originStep = 1.0 / 255.0
-            val quaternionStep = 1.0 / 126.0
-            val decodedQuaternion = DoubleArray(4) { rotatedAABB[it].toUByte().toDouble() / 126.0 - 1.0 }
-            val expectedQuaternion = canonicalQuaternion(rotatedData and BLOCK_MODEL_ROTATION_MASK)
-                .times(axisQuaternion('z', -90.0))
-                .times(axisQuaternion('y', -90.0))
-                .times(axisQuaternion('x', -90.0))
-                .times(axisQuaternion('y', 45.0))
-                .normalized()
-            assertTrue(kotlin.math.abs(decodedQuaternion.zip(expectedQuaternion.values).sumOf { it.first * it.second }) >=
-                1.0 - quaternionStep * 4.0)
-            val decodedOrigin = DoubleArray(3) { rotatedAABB[4 + it].toUByte().toDouble() / 255.0 }
-            val decodedSize = DoubleArray(3) {
-                rotatedAABB[8 + it].toUByte().toDouble() / 255.0 * kotlin.math.sqrt(2.0)
-            }
-            val expectedOrigin = rotateBlockModelTestVector(doubleArrayOf(0.625, 0.5, 0.375), rotatedData and BLOCK_MODEL_ROTATION_MASK, true)
-            assertTrue(decodedOrigin.zip(expectedOrigin.asList()).all {
-                kotlin.math.abs(it.first - it.second) <= originStep
-            })
+            val trackedQuads = input.resolve("textures/block_model_quads.bin")
+            val packagedQuads = output.resolve("textures/block_model_quads.bin")
+            assertTrue(Files.exists(trackedQuads), "Missing tracked block-model quad texture")
+            assertTrue(Files.exists(packagedQuads), "Missing packaged block-model quad texture")
+            val quadBytes = trackedQuads.readBytes()
+            assertTrue(quadBytes.contentEquals(packagedQuads.readBytes()))
+            val expectedQuadCount = (0..maxMaterialId).maxOf { materialId ->
+                (0 until 64).maxOf { openMask ->
+                    val metadata = decodeModelMetadata(modelLut, materialId, openMask)
+                    ((metadata shr 9) and 0x7FFFu) + (metadata shr 24)
+                }
+            }.toInt()
+            assertEquals(expectedQuadCount * 8, quadBytes.size)
             assertEquals(1u, (decode(packedLut, stoneId) shr 28) and 1u)
-            assertEquals(0u, decode(modelLut, stoneId))
-
-            val aabbInfo = Json.parseToJsonElement(temporary.resolve("block_model_aabbs.json").readText()).jsonObject
-            val rotatedInfo = aabbInfo.getValue(futureRotated).jsonArray
-            assertEquals(2, rotatedInfo.size)
-            val firstOrigin = rotatedInfo[0].jsonObject.getValue("origin").jsonObject
-            val secondRotation = rotatedInfo[1].jsonObject.getValue("rotation").jsonObject
-            assertEquals(0.625, firstOrigin.getValue("x").jsonPrimitive.double)
-            assertEquals(0.0, secondRotation.getValue("x").jsonPrimitive.double)
-            assertEquals(-90.0, secondRotation.getValue("y").jsonPrimitive.double)
-            assertTrue("$futureSlab:type=bottom" in aabbInfo)
+            Files.walk(temporary).use { paths ->
+                assertFalse(paths.anyMatch { it.fileName.toString().contains("aabb", ignoreCase = true) })
+            }
         } finally {
             temporary.toFile().deleteRecursively()
         }
@@ -231,19 +280,8 @@ class BlockModelGLSLTest {
             assets()
         ).shader
         assertTrue(shader.contains("if (!(t >= 0.0 && t <= hitT)) return false;"))
-        assertTrue(shader.contains("float t = startsInside ? exitT : entryT;"))
-        for (expected in listOf(
-            "int entryAxis = 0;",
-            "int exitAxis = 0;",
-            "entryAxis = encodedAxis;",
-            "exitAxis = encodedAxis;",
-            "localNormal[normalAxis] = collapsedNegative ? -1.0 : -sign(localDir[normalAxis]);"
-        )) assertTrue(shader.contains(expected), "Missing slab state: $expected")
-        for (oldState in listOf("entryNormal", "exitNormal", "nearSign", "farSign")) {
-            assertFalse(shader.contains(oldState), "Found old slab state: $oldState")
-        }
-        assertFalse(shader.contains("tMin"))
-        assertFalse(shader.contains("tMax"))
+        assertTrue(shader.contains("float t = dot(normal, origin - rayOrigin) / denominator;"))
+        assertTrue(shader.contains("if (any(greaterThan(projected, halfSize))) return false;"))
     }
 
     @Test
@@ -274,9 +312,9 @@ class BlockModelGLSLTest {
             buildBlockModelPalette(BlockModelsResult(listOf(model), emptyList())),
             assets()
         ).shader
-        assertTrue(shader.contains("abs(localDir[axis]) <= 1e-8"))
-        assertTrue(shader.contains("* 0.5 + 1e-6;"))
-        assertTrue(shader.contains("abs(localOrigin[axis]) > halfSize[axis]"))
+        assertTrue(shader.contains("abs(denominator) <= 1e-8"))
+        assertTrue(shader.contains("vec2 halfSize = normalYZHalfSize.zw + 1e-6;"))
+        assertTrue(shader.contains("if (any(greaterThan(projected, halfSize))) return false;"))
     }
 
     @Test
@@ -308,9 +346,11 @@ class BlockModelGLSLTest {
         // Then
         assertEquals(first, second)
         assertEquals(palette.modelIdByState.getValue(shape.model.state), palette.modelIdByState.getValue(shapeAlias.model.state))
-        val modelData = equivalent.map { palette.modelIdByState.getValue(it.model.state) }
+        val modelRows = equivalent.map { palette.modelIdByState.getValue(it.model.state) }
+        assertTrue(modelRows.all { rows -> rows.all { it == rows[0] } })
+        val modelData = modelRows.map { it[0] }
         assertEquals(1, modelData.map { (it shr BLOCK_MODEL_ROTATION_BITS) and 0x7FFFu }.distinct().size)
-        assertTrue(modelData.all { it shr 24 == 1u })
+        assertTrue(modelData.all { it shr 24 == shape.model.quads.size.toUInt() })
         assertEquals(4, modelData.distinct().size)
         equivalent.zip(modelData).forEach { (model, data) ->
             assertEquals(
@@ -319,15 +359,15 @@ class BlockModelGLSLTest {
             )
         }
         assertEquals(2, palette.geometries.size)
-        assertTrue(first.shader.contains("uint aabbOffset = (modelData >> 9u) & 0x7FFFu;"))
-        assertTrue(first.shader.contains("uint aabbCount = modelData >> 24u;"))
+        assertTrue(first.shader.contains("uint quadOffset = (modelData >> 9u) & 0x7FFFu;"))
+        assertTrue(first.shader.contains("uint quadCount = modelData >> 24u;"))
         assertTrue(first.shader.contains("_voxel_unrotateBlockModelVector"))
         val modelFunction = first.shader.substringAfter("bool voxel_intersectBlockModel(")
         assertEquals(1, Regex("(?m)^    bool hit = false;$").findAll(modelFunction).count())
         assertEquals(1, Regex("_voxel_unrotateBlockModelVector").findAll(modelFunction).count())
         assertEquals(1, modelFunction.lineSequence().count { it.trimStart().startsWith("return ") })
         assertFalse(modelFunction.contains("modelID"))
-        assertEquals(24, first.aabbData.size)
+        assertEquals(palette.quads.size * 8, first.quadData.size)
         assertFalse(first.shader.contains("switch"))
         assertFalse(first.shader.contains("0.499999"))
         assertTrue(palette.geometries.flatten().any { quad ->
@@ -349,7 +389,8 @@ class BlockModelGLSLTest {
         val generated = BlockModelGLSLOutput(
             shader = "generated shader\n",
             unsupportedDiagnostics = "{\"unsupported\":[]}\n",
-            counts = GeometryCounts(1, 1, 1)
+            counts = GeometryCounts(1, 1, 1),
+            quadData = listOf(1, 2, 3, 4, 5, 6, 7, 8).map(Int::toByte)
         )
 
         try {
@@ -360,9 +401,13 @@ class BlockModelGLSLTest {
             val tracked = input.resolve("techniques/voxel/BlockModels.glsl")
             val packaged = output.resolve("techniques/voxel/BlockModels.glsl")
             assertTrue(tracked.readBytes().contentEquals(packaged.readBytes()))
-            assertTrue(input.resolve("textures/block_model_aabbs.bin").readBytes().contentEquals(
-                output.resolve("textures/block_model_aabbs.bin").readBytes()
+            assertTrue(input.resolve("textures/block_model_quads.bin").readBytes().contentEquals(
+                output.resolve("textures/block_model_quads.bin").readBytes()
             ))
+            assertEquals(
+                listOf("block_model_quads.bin"),
+                Files.list(input.resolve("textures")).use { files -> files.map { it.fileName.toString() }.sorted().toList() }
+            )
             assertEquals(generated.unsupportedDiagnostics, output.resolve("techniques/voxel/BlockModels.unsupported.json").readText())
         } finally {
             temporary.toFile().deleteRecursively()
@@ -370,159 +415,30 @@ class BlockModelGLSLTest {
     }
 
     @Test
-    fun `uses BigDecimal conservative aabb bytes and rejects oversized model lists`() {
-        val aabb = GeometryAABB(
-            GeometryQuaternion(0.0, 0.0, 0.0, 1.0),
-            vertex(0.5, 0.5, 0.5),
-            vertex(0.3, 0.3, 0.3)
+    fun `uses BigDecimal UNORM rounding and rejects more than 255 quads per row`() {
+        val square = quad(
+            vertex(0.2, 0.2, 0.5),
+            vertex(0.8, 0.2, 0.5),
+            vertex(0.8, 0.8, 0.5),
+            vertex(0.2, 0.8, 0.5)
         )
-        val model = ExpandedGeometryState(
-            BlockState("quantized"),
-            BlockProperty(blockID = "quantized"),
-            cube(),
-            listOf(aabb)
-        )
+        val palette = buildBlockModelPalette(BlockModelsResult(
+            listOf(model(BlockState("quantized"), listOf(square))),
+            emptyList()
+        ))
+        val bytes = generateBlockModelGLSL(palette, assets()).quadData
+        assertEquals(listOf(128, 128, 128), bytes.take(3).map { it.toUByte().toInt() })
+        val normalBytes = bytes.slice(3..5).map { it.toUByte().toInt() }
+        assertEquals(2, normalBytes.count { it == 126 })
+        assertTrue(normalBytes.any { it == 0 || it == 252 })
 
-        val bytes = generateBlockModelGLSL(
-            BlockModelPalette(emptyMap(), emptyList(), listOf(aabb), emptyList()),
-            assets()
-        ).aabbData
-
-        assertEquals(listOf(126, 126, 126, 252), bytes.slice(0..3).map { it.toUByte().toInt() })
-        assertEquals(listOf(128, 128, 128), bytes.slice(4..6).map { it.toUByte().toInt() })
-        assertTrue(bytes.slice(8..10).all { it.toUByte().toInt() >= 54 })
-        val rescaledSize = 1.2727922061357853
-        val rescaled = generateBlockModelGLSL(
-            BlockModelPalette(emptyMap(), emptyList(), listOf(
-                aabb.copy(size = vertex(rescaledSize, rescaledSize, rescaledSize))
-            ), emptyList()),
-            assets()
-        )
-        val decodedSize = rescaled.aabbData[8].toUByte().toDouble() / 255.0 * kotlin.math.sqrt(2.0)
-        assertTrue(decodedSize >= rescaledSize)
-        assertTrue(decodedSize - rescaledSize < kotlin.math.sqrt(2.0) / 255.0 * 8.0)
-        assertTrue(rescaled.shader.contains("* 1.4142135623730951 * 0.5 + 1e-6;"))
+        val tooMany = List(256) { index ->
+            val z = (index + 1.0) / 257.0
+            quad(vertex(0.2, 0.2, z), vertex(0.8, 0.2, z), vertex(0.8, 0.8, z), vertex(0.2, 0.8, z))
+        }
         assertFailsWith<IllegalArgumentException> {
-            buildBlockModelPalette(BlockModelsResult(listOf(model.copy(aabbs = List(256) { aabb })), emptyList()))
+            buildBlockModelPalette(BlockModelsResult(listOf(model(BlockState("oversized"), tooMany)), emptyList()))
         }
-    }
-
-    @Test
-    fun `encodes axis aligned thin aabbs without quaternion tilt`() {
-        val output = generateBlockModelGLSL(
-            BlockModelPalette(
-                emptyMap(),
-                emptyList(),
-                listOf(GeometryAABB(
-                    GeometryQuaternion(0.0, 0.0, 0.0, 1.0),
-                    vertex(0.5, 0.09375, 0.5),
-                    vertex(1.0, 0.1875, 1.0)
-                )),
-                emptyList()
-            ),
-            assets()
-        )
-
-        assertEquals(listOf(126, 126, 126, 252), output.aabbData.take(4).map { it.toUByte().toInt() })
-        assertEquals(8, output.aabbData[7].toUByte().toInt())
-        val decodedThickness = output.aabbData[9].toUByte().toDouble() / 255.0 * kotlin.math.sqrt(2.0)
-        assertTrue(decodedThickness < 0.19, "Thin AABB expanded to $decodedThickness")
-        assertTrue(output.shader.contains("* (255.0 / 126.0) - 1.0"))
-    }
-
-    @Test
-    fun `encodes half component rotations without thin aabb inflation`() {
-        val output = generateBlockModelGLSL(
-            BlockModelPalette(
-                emptyMap(),
-                emptyList(),
-                listOf(GeometryAABB(
-                    GeometryQuaternion(-0.5, -0.5, -0.5, 0.5),
-                    vertex(0.03125, 0.5, 0.5),
-                    vertex(0.875, 0.0625, 0.875)
-                )),
-                emptyList()
-            ),
-            assets()
-        )
-
-        assertEquals(listOf(63, 63, 63, 189), output.aabbData.take(4).map { it.toUByte().toInt() })
-        val discreteRotation = output.aabbData[7].toUByte().toUInt()
-        assertEquals(2u, discreteRotation)
-        val decodedThickness = output.aabbData.slice(8..10).minOf { byte ->
-            byte.toUByte().toDouble() / 255.0 * kotlin.math.sqrt(2.0)
-        }
-        assertTrue(decodedThickness < 0.07, "Thin AABB expanded to $decodedThickness")
-        assertTrue(output.shader.contains("uint discreteRotation = uint(originData.w * 255.0 + 0.5);"))
-    }
-
-    @Test
-    fun `encoded aabbs conservatively contain their source corners`() {
-        val halfAngle = Math.toRadians(22.5) * 0.5
-        val aabbs = listOf(
-            GeometryAABB(
-                GeometryQuaternion(0.0, 0.0, 0.0, 1.0),
-                vertex(0.5, 0.25, 0.5),
-                vertex(1.0, 0.5, 1.0)
-            ),
-            GeometryAABB(
-                GeometryQuaternion(0.0, kotlin.math.sin(halfAngle), 0.0, kotlin.math.cos(halfAngle)),
-                vertex(0.46875, 0.5, 0.53125),
-                vertex(0.0625, 1.0, 0.5)
-            )
-        )
-        val generated = generateBlockModelGLSL(
-            BlockModelPalette(emptyMap(), emptyList(), aabbs, emptyList()),
-            assets()
-        )
-
-        assertEquals(8, generated.aabbData[7].toUByte().toInt())
-        assertEquals(255, generated.aabbData[19].toUByte().toInt())
-
-        aabbs.forEachIndexed { index, source ->
-            val offset = index * 12
-            val decodedQuaternion = GeometryQuaternion(
-                decodeSignedUNorm(generated.aabbData[offset]),
-                decodeSignedUNorm(generated.aabbData[offset + 1]),
-                decodeSignedUNorm(generated.aabbData[offset + 2]),
-                decodeSignedUNorm(generated.aabbData[offset + 3])
-            ).normalized()
-            val decodedOrigin = vertex(
-                decodeUNorm(generated.aabbData[offset + 4]),
-                decodeUNorm(generated.aabbData[offset + 5]),
-                decodeUNorm(generated.aabbData[offset + 6])
-            )
-            val decodedHalfSize = vertex(
-                decodeSizeUNorm(generated.aabbData[offset + 8]) * 0.5 + 1e-6,
-                decodeSizeUNorm(generated.aabbData[offset + 9]) * 0.5 + 1e-6,
-                decodeSizeUNorm(generated.aabbData[offset + 10]) * 0.5 + 1e-6
-            )
-            val inverseQuaternion = GeometryQuaternion(
-                -decodedQuaternion.x,
-                -decodedQuaternion.y,
-                -decodedQuaternion.z,
-                decodedQuaternion.w
-            )
-
-            for (x in listOf(-0.5, 0.5)) {
-                for (y in listOf(-0.5, 0.5)) {
-                    for (z in listOf(-0.5, 0.5)) {
-                        val sourceCorner = source.origin + rotate(
-                            source.quaternion,
-                            vertex(source.size.x * x, source.size.y * y, source.size.z * z)
-                        )
-                        val decodedCorner = rotate(inverseQuaternion, sourceCorner - decodedOrigin)
-                        assertTrue(
-                            abs(decodedCorner.x) <= decodedHalfSize.x &&
-                                abs(decodedCorner.y) <= decodedHalfSize.y &&
-                                abs(decodedCorner.z) <= decodedHalfSize.z,
-                            "encoded AABB $index excludes source corner $sourceCorner at decoded $decodedCorner"
-                        )
-                    }
-                }
-            }
-        }
-        assertTrue(generated.shader.contains("* 0.5 + 1e-6;"))
     }
 
     @Test
@@ -577,6 +493,8 @@ class BlockModelGLSLTest {
         assertTrue(decode(palette.getValue(slabId)[1]) > 0u)
         assertEquals(0u, decode(palette.getValue(weightedId)[1]))
         assertEquals(0u, decode(palette.getValue(grassId)[1]))
+        assertEquals(modelPalette.modelIdByState.getValue(bottom.state), first.modelMetadataByMaterialId.getValue(slabId))
+        assertTrue(first.modelMetadataByMaterialId.getValue(weightedId).all { it == 0u })
     }
 
     @Test
@@ -606,22 +524,10 @@ class BlockModelGLSLTest {
             ExpandedGeometryState(
                 BlockState(blockID),
                 BlockProperty(blockID = blockID, isFullCube = isFullCube),
-                quads,
-                listOf(aabb(quads))
+                quads
             ),
             materialId
         )
-
-    private fun aabb(quads: List<GeometryQuad>): GeometryAABB {
-        val vertices = quads.flatMap(GeometryQuad::vertices)
-        val minimum = vertex(vertices.minOf(GeometryVertex::x), vertices.minOf(GeometryVertex::y), vertices.minOf(GeometryVertex::z))
-        val maximum = vertex(vertices.maxOf(GeometryVertex::x), vertices.maxOf(GeometryVertex::y), vertices.maxOf(GeometryVertex::z))
-        return GeometryAABB(
-            GeometryQuaternion(0.0, 0.0, 0.0, 1.0),
-            vertex((minimum.x + maximum.x) * 0.5, (minimum.y + maximum.y) * 0.5, (minimum.z + maximum.z) * 0.5),
-            vertex(maximum.x - minimum.x, maximum.y - minimum.y, maximum.z - minimum.z)
-        )
-    }
 
     private fun assets(clientJar: Path = Path.of("client.jar")) = MinecraftAssets(
         versionId = "test-release",
@@ -644,6 +550,10 @@ class BlockModelGLSLTest {
         .wrap(data, materialId * Int.SIZE_BYTES, Int.SIZE_BYTES)
         .order(ByteOrder.nativeOrder()).int.toUInt()
 
+    private fun decodeModelMetadata(data: ByteArray, materialId: Int, openMask: Int): UInt = ByteBuffer
+        .wrap(data, 4 * (materialId * 64 + openMask), 4)
+        .order(ByteOrder.LITTLE_ENDIAN).int.toUInt()
+
     private fun cube() = box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
 
     private fun box(x0: Double, y0: Double, z0: Double, x1: Double, y1: Double, z1: Double) = listOf(
@@ -655,9 +565,21 @@ class BlockModelGLSLTest {
         quad(vertex(x0, y0, z1), vertex(x1, y0, z1), vertex(x1, y1, z1), vertex(x0, y1, z1))
     )
 
-    private fun quad(a: GeometryVertex, b: GeometryVertex, c: GeometryVertex, d: GeometryVertex): GeometryQuad {
+    private fun model(
+        state: BlockState,
+        quads: List<GeometryQuad>,
+        isFullCube: Boolean = false
+    ) = ExpandedGeometryState(state, BlockProperty(blockID = state.blockID, isFullCube = isFullCube), quads)
+
+    private fun quad(
+        a: GeometryVertex,
+        b: GeometryVertex,
+        c: GeometryVertex,
+        d: GeometryVertex,
+        cullFace: UInt? = null
+    ): GeometryQuad {
         val normal = (b - a).cross(c - a).normalized()
-        return GeometryQuad(listOf(a, b, c, d), normal)
+        return GeometryQuad(listOf(a, b, c, d), normal, cullFace)
     }
 
     private fun intersectQuad(origin: GeometryVertex, direction: GeometryVertex, quad: GeometryQuad): Pair<Double, GeometryVertex>? {
@@ -681,73 +603,6 @@ class BlockModelGLSLTest {
     private fun decodeUNorm(value: Byte) = value.toUByte().toDouble() / 255.0
 
     private fun decodeSignedUNorm(value: Byte) = value.toUByte().toDouble() / 126.0 - 1.0
-
-    private fun decodeSizeUNorm(value: Byte) = decodeUNorm(value) * kotlin.math.sqrt(2.0)
-
-    private fun rotate(quaternion: GeometryQuaternion, value: GeometryVertex): GeometryVertex {
-        val rotated = quaternion * GeometryQuaternion(value.x, value.y, value.z, 0.0) *
-            GeometryQuaternion(-quaternion.x, -quaternion.y, -quaternion.z, quaternion.w)
-        return vertex(rotated.x, rotated.y, rotated.z)
-    }
-
-    private data class TestQuaternion(val x: Double, val y: Double, val z: Double, val w: Double) {
-        val values get() = listOf(x, y, z, w)
-
-        fun times(other: TestQuaternion) = TestQuaternion(
-            w * other.x + x * other.w + y * other.z - z * other.y,
-            w * other.y - x * other.z + y * other.w + z * other.x,
-            w * other.z + x * other.y - y * other.x + z * other.w,
-            w * other.w - x * other.x - y * other.y - z * other.z
-        )
-
-        fun normalized(): TestQuaternion {
-            val length = kotlin.math.sqrt(values.sumOf { it * it })
-            return TestQuaternion(x / length, y / length, z / length, w / length)
-        }
-    }
-
-    private fun axisQuaternion(axis: Char, degrees: Double): TestQuaternion {
-        val radians = Math.toRadians(degrees) * 0.5
-        val sine = kotlin.math.sin(radians)
-        val cosine = kotlin.math.cos(radians)
-        return when (axis) {
-            'x' -> TestQuaternion(sine, 0.0, 0.0, cosine)
-            'y' -> TestQuaternion(0.0, sine, 0.0, cosine)
-            else -> TestQuaternion(0.0, 0.0, sine, cosine)
-        }
-    }
-
-    private fun canonicalQuaternion(rotation: UInt): TestQuaternion {
-        val x = rotateBlockModelTestVector(doubleArrayOf(1.0, 0.0, 0.0), rotation, false)
-        val y = rotateBlockModelTestVector(doubleArrayOf(0.0, 1.0, 0.0), rotation, false)
-        val z = rotateBlockModelTestVector(doubleArrayOf(0.0, 0.0, 1.0), rotation, false)
-        val trace = x[0] + y[1] + z[2]
-        if (trace > 0.0) {
-            val scale = kotlin.math.sqrt(trace + 1.0) * 2.0
-            return TestQuaternion((y[2] - z[1]) / scale, (z[0] - x[2]) / scale, (x[1] - y[0]) / scale, scale / 4.0)
-        }
-        if (x[0] > y[1] && x[0] > z[2]) {
-            val scale = kotlin.math.sqrt(1.0 + x[0] - y[1] - z[2]) * 2.0
-            return TestQuaternion(scale / 4.0, (x[1] + y[0]) / scale, (z[0] + x[2]) / scale, (y[2] - z[1]) / scale)
-        }
-        if (y[1] > z[2]) {
-            val scale = kotlin.math.sqrt(1.0 + y[1] - x[0] - z[2]) * 2.0
-            return TestQuaternion((x[1] + y[0]) / scale, scale / 4.0, (y[2] + z[1]) / scale, (z[0] - x[2]) / scale)
-        }
-        val scale = kotlin.math.sqrt(1.0 + z[2] - x[0] - y[1]) * 2.0
-        return TestQuaternion((z[0] + x[2]) / scale, (y[2] + z[1]) / scale, scale / 4.0, (x[1] - y[0]) / scale)
-    }
-
-    private fun rotateBlockModelTestVector(value: DoubleArray, rotation: UInt, aroundCenter: Boolean): DoubleArray {
-        val input = if (aroundCenter) DoubleArray(3) { value[it] - 0.5 } else value
-        val result = DoubleArray(3) { outputAxis ->
-            val transform = rotation shr (outputAxis * 3)
-            val component = input[(transform and 3u).toInt()]
-            if (transform and 4u == 0u) component else -component
-        }
-        if (aroundCenter) for (axis in result.indices) result[axis] += 0.5
-        return result
-    }
 
     private fun vertex(x: Double, y: Double, z: Double) = GeometryVertex(x, y, z)
     private operator fun GeometryVertex.plus(other: GeometryVertex) = vertex(x + other.x, y + other.y, z + other.z)

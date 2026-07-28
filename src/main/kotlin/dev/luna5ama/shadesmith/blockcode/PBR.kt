@@ -2,26 +2,17 @@ package dev.luna5ama.shadesmith.blockcode
 
 import dev.luna5ama.shadesmith.IOContext
 import dev.luna5ama.shadesmith.TextureFormat
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.put
-import java.math.BigDecimal
-import java.math.RoundingMode
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.file.Path
 import java.util.zip.ZipFile
 import kotlin.io.path.bufferedWriter
 import kotlin.io.path.createDirectories
 import kotlin.io.path.outputStream
-import kotlin.math.asin
-import kotlin.math.atan2
-
-private val readableJson = Json { prettyPrint = true }
 
 context(ioContext: IOContext)
 fun generateHardcodedPBR() = generateHardcodedPBR(acquireLatestMinecraftAssets())
@@ -55,12 +46,15 @@ internal fun generateHardcodedPBR(assets: MinecraftAssets) {
     println("Writing block.properties...")
     writeBlockProperties(blockPropertiesPath, generation.blockStateToMaterialId)
     println("Writing LUT files...")
-    writeLUTFiles(texturesPath, generation.palette, generation.defaultPBRData)
+    writeLUTFiles(
+        texturesPath,
+        generation.palette.map { (data, materialId) -> data.take(1) to materialId },
+        generation.defaultPBRData.take(1)
+    )
+    writeBlockModelLUT(texturesPath.resolve("pbr_lut_1.bin"), generation.modelMetadataByMaterialId)
 
     val blockModelGLSL = generateBlockModelGLSL(modelPalette, assets)
     writeBlockModelOutputs(blockModelGLSL)
-    val reportPath = (ioContext.outputPath.parent ?: ioContext.outputPath).resolve("block_model_aabbs.json")
-    ioContext.writeOutput(reportPath, blockModelAABBInfo(models))
     println(
         "Generated block models: ${blockModelGLSL.counts.states} states, " +
             "${blockModelGLSL.counts.geometries} geometries, ${blockModelGLSL.counts.quads} quads"
@@ -88,6 +82,7 @@ internal data class PBRGeneration(
     val blockStateToMaterialId: Map<BlockState, Int>,
     val palette: List<Pair<List<LUTData>, Int>>,
     val defaultPBRData: List<LUTData>,
+    val modelMetadataByMaterialId: Map<Int, List<UInt>>,
     val layout: PBRLayout
 )
 
@@ -97,7 +92,7 @@ internal fun preparePBRGeneration(
     modelPalette: BlockModelPalette
 ): PBRGeneration {
     val expandedProperties = expandBlockProperties(properties, models)
-    val assembler = PBRAssembler(defaultPBRFields(modelPalette.modelIdByState))
+    val assembler = PBRAssembler(defaultPBRFields(modelPalette.modelIdByState.mapValues { (_, rows) -> rows[63] }))
     val blockStateToPBRData = linkedMapOf<BlockState, List<LUTData>>()
     for ((state, property) in expandedProperties.entries.sortedWith(compareBy({ it.key.blockID }, { selectorKey(it.key.states) }))) {
         for ((providedState, data) in assembler.provide(state, property)) {
@@ -127,10 +122,20 @@ internal fun preparePBRGeneration(
             "Material ID $materialId is assigned to block states with different PBR data"
         }
     }
+    val emptyModelMetadata = List(64) { 0u }
+    val modelMetadataByMaterialId = sortedMapOf<Int, List<UInt>>()
+    for ((state, materialId) in blockStateToMaterialId) {
+        val metadata = modelPalette.modelIdByState[state] ?: emptyModelMetadata
+        val previous = modelMetadataByMaterialId.putIfAbsent(materialId, metadata)
+        require(previous == null || previous == metadata) {
+            "Material ID $materialId is assigned to block states with different model geometry"
+        }
+    }
     return PBRGeneration(
         blockStateToMaterialId = blockStateToMaterialId,
         palette = materialIdToPBRData.map { (materialId, data) -> data to materialId },
         defaultPBRData = assembler.defaultData,
+        modelMetadataByMaterialId = modelMetadataByMaterialId,
         layout = assembler.layout
     )
 }
@@ -206,24 +211,6 @@ private fun writeBlockProperties(path: Path, blockStateToMaterialId: Map<BlockSt
     }
 }
 
-internal fun blockModelAABBInfo(models: BlockModelsResult): String {
-    val root = buildJsonObject {
-        for (model in models.supported) {
-            put(blockStateKey(model.state), buildJsonArray {
-                for (aabb in model.aabbs) {
-                    val rotation = aabb.quaternion.toEulerDegrees()
-                    add(buildJsonObject {
-                        put("origin", vectorJson(aabb.origin.x, aabb.origin.y, aabb.origin.z))
-                        put("size", vectorJson(aabb.size.x, aabb.size.y, aabb.size.z))
-                        put("rotation", vectorJson(rotation.x, rotation.y, rotation.z))
-                    })
-                }
-            })
-        }
-    }
-    return readableJson.encodeToString(root) + "\n"
-}
-
 private fun blockStateKey(state: BlockState) = buildString {
     append(state.blockID)
     if (state.states.isNotEmpty()) {
@@ -231,31 +218,6 @@ private fun blockStateKey(state: BlockState) = buildString {
         append(state.states.entries.joinToString(":") { "${it.key}=${it.value}" })
     }
 }
-
-private fun GeometryQuaternion.toEulerDegrees(): GeometryVertex {
-    val sinY = (2.0 * (w * y - z * x)).coerceIn(-1.0, 1.0)
-    val yAngle = asin(sinY)
-    val xAngle: Double
-    val zAngle: Double
-    if (kotlin.math.abs(sinY) >= 1.0 - 1e-10) {
-        xAngle = 0.0
-        zAngle = atan2(-2.0 * (x * y - w * z), 1.0 - 2.0 * (x * x + z * z))
-    } else {
-        xAngle = atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
-        zAngle = atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-    }
-    return GeometryVertex(Math.toDegrees(xAngle), Math.toDegrees(yAngle), Math.toDegrees(zAngle))
-}
-
-private fun vectorJson(x: Double, y: Double, z: Double): JsonObject = buildJsonObject {
-    put("x", x.readableNumber())
-    put("y", y.readableNumber())
-    put("z", z.readableNumber())
-}
-
-private fun Double.readableNumber(): BigDecimal = BigDecimal.valueOf(this)
-    .setScale(6, RoundingMode.HALF_UP)
-    .stripTrailingZeros()
 
 private fun writeLUTFiles(
     texturesPath: Path,
@@ -326,4 +288,16 @@ private fun writeLUTFiles(
 
         println("Wrote LUT $lutIndex: format=$lutFormat, size=${maxMaterialId + 1} entries, ${textureData.size} bytes")
     }
+}
+
+private fun writeBlockModelLUT(path: Path, metadataByMaterialId: Map<Int, List<UInt>>) {
+    val maxMaterialId = metadataByMaterialId.keys.maxOrNull() ?: 0
+    val buffer = ByteBuffer.allocate((maxMaterialId + 1) * 64 * Int.SIZE_BYTES).order(ByteOrder.LITTLE_ENDIAN)
+    for ((materialId, rows) in metadataByMaterialId) {
+        require(rows.size == 64) { "Block model metadata must contain 64 cull-mask rows" }
+        buffer.position(materialId * 64 * Int.SIZE_BYTES)
+        rows.forEach { buffer.putInt(it.toInt()) }
+    }
+    path.outputStream().use { it.write(buffer.array()) }
+    println("Wrote LUT 1: format=R32UI, size=${maxMaterialId + 1}x64 entries, ${buffer.capacity()} bytes")
 }

@@ -67,20 +67,6 @@ class BlockModelsTest {
     }
 
     @Test
-    fun `trapdoor alpha holes remain open in generated aabbs`() = withJar(
-        mapOf(
-            blockstate("oak_trapdoor") to singleVariant("oak_trapdoor_bottom"),
-            model("oak_trapdoor_bottom") to elementModel(0, 0, 0, 16, 3, 16)
-        )
-    ) { jar ->
-        val aabbs = BlockModels.load(jar, properties("oak_trapdoor")).supported.single().aabbs
-
-        assertEquals(6, aabbs.size)
-        assertFalse(aabbs.any { it.contains(GeometryVertex(0.25, 0.09375, 0.25)) })
-        assertTrue(aabbs.any { it.contains(GeometryVertex(0.0625, 0.09375, 0.0625)) })
-    }
-
-    @Test
     fun `multipart evaluates nested conjunction disjunction alternatives and unconditional parts`() = withJar(
         mapOf(
             blockstate("multipart") to """{"multipart":[
@@ -390,10 +376,6 @@ class BlockModelsTest {
     }
 
     private fun GeometryVertex.length() = kotlin.math.sqrt(dot(this))
-    private fun GeometryAABB.contains(point: GeometryVertex) =
-        kotlin.math.abs(point.x - origin.x) <= size.x * 0.5 &&
-            kotlin.math.abs(point.y - origin.y) <= size.y * 0.5 &&
-            kotlin.math.abs(point.z - origin.z) <= size.z * 0.5
     private operator fun GeometryVertex.minus(other: GeometryVertex) =
         GeometryVertex(x - other.x, y - other.y, z - other.z)
     private fun GeometryVertex.dot(other: GeometryVertex) = x * other.x + y * other.y + z * other.z
