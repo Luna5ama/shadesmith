@@ -148,6 +148,49 @@ class BlockModelsTest {
     }
 
     @Test
+    fun `face cullface is preserved through element rotation`() = withJar(
+        mapOf(
+            blockstate("culled") to singleVariant("culled"),
+            model("culled") to """{"elements":[{
+              "from":[0,0,0],"to":[16,16,16],
+              "rotation":{"origin":[8,8,8],"axis":"y","angle":90},
+              "faces":{"north":{"cullface":"east"}}}]}"""
+        )
+    ) { jar ->
+        val quad = BlockModels.load(jar, properties("culled")).supported.single().quads.single()
+
+        assertEquals(1u, quad.cullFace)
+    }
+
+    @Test
+    fun `blockstate rotation maps cullface to face bit order`() = withJar(
+        mapOf(
+            blockstate("culled_rotated") to
+                """{"variants":{"":{"model":"minecraft:block/culled_rotated","x":90,"y":90,"z":90}}}""",
+            model("culled_rotated") to """{"elements":[{
+              "from":[0,0,0],"to":[16,16,16],"faces":{
+                "east":{"cullface":"east"},"west":{"cullface":"west"},
+                "up":{"cullface":"up"},"down":{"cullface":"down"},
+                "south":{"cullface":"south"},"north":{"cullface":"north"}}}]}"""
+        )
+    ) { jar ->
+        val cullFaces = BlockModels.load(jar, properties("culled_rotated"))
+            .supported.single().quads.associate { it.normal to it.cullFace }
+
+        assertEquals(
+            mapOf(
+                GeometryVertex(1.0, 0.0, 0.0) to 1u,
+                GeometryVertex(-1.0, 0.0, 0.0) to 2u,
+                GeometryVertex(0.0, 1.0, 0.0) to 4u,
+                GeometryVertex(0.0, -1.0, 0.0) to 8u,
+                GeometryVertex(0.0, 0.0, 1.0) to 16u,
+                GeometryVertex(0.0, 0.0, -1.0) to 32u
+            ),
+            cullFaces
+        )
+    }
+
+    @Test
     fun `blockstate x rotation negates the Mojang JSON angle`() = withJar(
         mapOf(
             blockstate("state_x") to """{"variants":{"":{"model":"minecraft:block/state_x","x":90}}}""",

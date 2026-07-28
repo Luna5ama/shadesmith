@@ -78,7 +78,10 @@ internal fun rotateBlockModelGeometry(quads: List<GeometryQuad>, rotation: UInt)
         val first = vertices.indices.minBy { vertices[it] }
         GeometryQuad(
             List(vertices.size) { vertices[(first + it) % vertices.size] },
-            rotateBlockModelVector(quad.normal, rotation)
+            rotateBlockModelVector(quad.normal, rotation),
+            quad.cullFace?.let { cullFace ->
+                cullFaceBit(rotateBlockModelVector(cullFaceDirection(cullFace), rotation))
+            }
         )
     }.distinct().sorted()
 

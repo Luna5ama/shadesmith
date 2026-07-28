@@ -18,16 +18,33 @@ internal data class GeometryVertex(val x: Double, val y: Double, val z: Double) 
         compareValuesBy(this, other, GeometryVertex::x, GeometryVertex::y, GeometryVertex::z)
 }
 
+private val cullFaceDirections = mapOf(
+    1u to GeometryVertex(1.0, 0.0, 0.0),
+    2u to GeometryVertex(-1.0, 0.0, 0.0),
+    4u to GeometryVertex(0.0, 1.0, 0.0),
+    8u to GeometryVertex(0.0, -1.0, 0.0),
+    16u to GeometryVertex(0.0, 0.0, 1.0),
+    32u to GeometryVertex(0.0, 0.0, -1.0)
+)
+
+internal fun cullFaceDirection(cullFace: UInt) = cullFaceDirections.getValue(cullFace)
+
+internal fun cullFaceBit(direction: GeometryVertex) = cullFaceDirections.entries
+    .firstOrNull { it.value == direction }?.key
+    ?: throw UnsupportedModel("Cullface does not align to a block face: $direction")
+
 internal data class GeometryQuad(
     val vertices: List<GeometryVertex>,
-    val normal: GeometryVertex
+    val normal: GeometryVertex,
+    val cullFace: UInt? = null
 ) : Comparable<GeometryQuad> {
     override fun compareTo(other: GeometryQuad): Int {
         for (index in vertices.indices) {
             val comparison = vertices[index].compareTo(other.vertices[index])
             if (comparison != 0) return comparison
         }
-        return normal.compareTo(other.normal)
+        return normal.compareTo(other.normal).takeIf { it != 0 }
+            ?: compareValues(cullFace, other.cullFace)
     }
 }
 
@@ -277,13 +294,13 @@ internal object BlockModels {
 
     private fun elementQuads(element: ModelElement, application: ModelApplication): List<GeometryQuad> {
         val corners = faceVertices(element.from, element.to)
-        return element.faces.mapNotNull { face ->
+        return element.faces.mapNotNull { (face, cullFace) ->
             val vertices = corners[face] ?: throw IllegalArgumentException("Unknown model face: $face")
             val transformed = vertices.map { vertex ->
                 val elementVertex = element.rotation?.let { rotateElement(vertex, it) } ?: vertex
                 rotateState(elementVertex, application)
             }
-            normalizeQuad(transformed)
+            normalizeQuad(transformed, cullFace?.let { rotateState(it, application) })
         }
     }
 
@@ -410,6 +427,14 @@ internal object BlockModels {
         return offset + center
     }
 
+    private fun rotateState(cullFace: UInt, application: ModelApplication): UInt {
+        var direction = cullFaceDirection(cullFace)
+        direction = rotate(direction, 'x', -application.x)
+        direction = rotate(direction, 'y', -application.y)
+        direction = rotate(direction, 'z', -application.z)
+        return cullFaceBit(quantize(direction))
+    }
+
     private fun rotate(vertex: GeometryVertex, axis: Char, degrees: Double): GeometryVertex {
         if (degrees == 0.0) return vertex
         val radians = Math.toRadians(degrees)
@@ -436,7 +461,7 @@ internal object BlockModels {
         return normalized
     }
 
-    private fun normalizeQuad(vertices: List<GeometryVertex>): GeometryQuad? {
+    private fun normalizeQuad(vertices: List<GeometryVertex>, cullFace: UInt?): GeometryQuad? {
         require(vertices.size == 4)
         val quantized = vertices.map(::quantize)
         require(quantized.all(GeometryVertex::isFinite)) { "Non-finite model geometry" }
@@ -449,7 +474,7 @@ internal object BlockModels {
         }
         val first = quantized.indices.minBy { quantized[it] }
         val ordered = List(4) { quantized[(first + it) % 4] }
-        return GeometryQuad(ordered, unitNormal)
+        return GeometryQuad(ordered, unitNormal, cullFace)
     }
 
     private fun cartesian(domains: Map<String, Set<String>>): List<Map<String, String>> {

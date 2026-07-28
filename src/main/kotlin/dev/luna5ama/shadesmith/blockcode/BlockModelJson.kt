@@ -25,7 +25,7 @@ internal data class ModelElement(
     val from: GeometryVertex,
     val to: GeometryVertex,
     val rotation: ElementRotation?,
-    val faces: List<String>
+    val faces: Map<String, UInt?>
 )
 
 internal sealed interface ElementRotation {
@@ -201,7 +201,11 @@ private fun conditionChildren(element: JsonElement) = when (element) {
 
 private fun parseElement(element: JsonElement): ModelElement {
     val objectJson = element.jsonObject
-    val faces = objectJson["faces"]?.jsonObject?.keys?.sorted()
+    val faces = objectJson["faces"]?.jsonObject?.mapValues { (_, face) ->
+        face.jsonObject["cullface"]?.jsonPrimitive?.contentOrNull?.let { cullFace ->
+            cullFaceBits[cullFace] ?: throw IllegalArgumentException("Invalid cullface: $cullFace")
+        }
+    }?.toSortedMap()
         ?: throw IllegalArgumentException("Model element is missing explicit faces: $objectJson")
     val rotation = objectJson["rotation"]?.jsonObject?.let(::parseElementRotation)
     return ModelElement(objectJson.vertex("from"), objectJson.vertex("to"), rotation, faces)
@@ -237,3 +241,12 @@ private fun JsonObject.vertex(name: String): GeometryVertex {
 private fun JsonObject.number(name: String, default: Double) = this[name]?.jsonPrimitive?.double ?: default
 
 internal class UnsupportedModel(message: String) : RuntimeException(message)
+
+private val cullFaceBits = mapOf(
+    "east" to 1u,
+    "west" to 2u,
+    "up" to 4u,
+    "down" to 8u,
+    "south" to 16u,
+    "north" to 32u
+)
