@@ -21,6 +21,7 @@ internal data class BlockModelGLSLOutput(
 internal const val BLOCK_MODEL_ROTATION_BITS = 9
 internal const val BLOCK_MODEL_ROTATION_MASK = 0x1FFu
 internal const val BLOCK_MODEL_QUAD_TEXTURE_WIDTH = 32768
+private const val BLOCK_MODEL_QUADS_PER_TEXTURE_ROW = BLOCK_MODEL_QUAD_TEXTURE_WIDTH / 2
 private const val BLOCK_MODEL_QUAD_TEXTURE_ROW_BYTES = BLOCK_MODEL_QUAD_TEXTURE_WIDTH * 4
 
 internal data class BlockModelPalette(
@@ -47,6 +48,10 @@ internal fun buildBlockModelPalette(models: BlockModelsResult): BlockModelPalett
             if (filtered.isEmpty()) return@List 0u
             val canonical = canonicalBlockModel(filtered)
             val metadata = geometryMetadata.getOrPut(canonical.quads) {
+                val rowOffset = quads.size % BLOCK_MODEL_QUADS_PER_TEXTURE_ROW
+                if (rowOffset + canonical.quads.size > BLOCK_MODEL_QUADS_PER_TEXTURE_ROW) {
+                    repeat(BLOCK_MODEL_QUADS_PER_TEXTURE_ROW - rowOffset) { quads += canonical.quads.first() }
+                }
                 val offset = quads.size
                 require(offset <= 65535) { "Block model quad offset exceeds packed UInt32 capacity" }
                 require(canonical.quads.size <= 127) { "Block model quad count exceeds packed UInt32 capacity" }
@@ -194,9 +199,8 @@ internal fun generateBlockModelGLSL(
         appendLine("}")
         appendLine()
         appendLine("bool _voxel_intersectBlockModelQuad(")
-        appendLine("    vec3 rayOrigin, vec3 rayDir, uint quadIndex, inout float hitT, inout vec3 hitNormal")
+        appendLine("    vec3 rayOrigin, vec3 rayDir, ivec2 texelCoord, inout float hitT, inout vec3 hitNormal")
         appendLine(") {")
-        appendLine("    ivec2 texelCoord = ivec2(int((quadIndex << 1u) & 0x7FFFu), int(quadIndex >> 14u));")
         appendLine("    vec4 originNormalX = texelFetch(usam_blockModelQuads, texelCoord, 0);")
         appendLine("    vec4 normalYZHalfSize = texelFetch(usam_blockModelQuads, texelCoord + ivec2(1, 0), 0);")
         appendLine("    vec3 origin = originNormalX.xyz;")
@@ -222,15 +226,17 @@ internal fun generateBlockModelGLSL(
         appendLine("    out float hitT, out vec3 hitNormal")
         appendLine(") {")
         appendLine("    uint rotation = modelData & 0x1FFu;")
-        appendLine("    uint quadOffset = (modelData >> 9u) & 0xFFFFu;")
         appendLine("    uint quadCount = modelData >> 25u;")
+        appendLine("    ivec2 texelCoord = ivec2(int((modelData >> 8u) & 0x7FFEu), int((modelData >> 23u) & 3u));")
         appendLine("    rayOrigin = _voxel_rotateBlockModelVector(rotation, rayOrigin - vec3(0.5)) + vec3(0.5);")
         appendLine("    rayDir = _voxel_rotateBlockModelVector(rotation, rayDir);")
         appendLine("    hitT = uintBitsToFloat(0x7F800000u);")
         appendLine("    hitNormal = vec3(0.0);")
         appendLine("    bool hit = false;")
-        appendLine("    for (uint i = 0u; i < quadCount; ++i) {")
-        appendLine("        hit = _voxel_intersectBlockModelQuad(rayOrigin, rayDir, quadOffset + i, hitT, hitNormal) || hit;")
+        appendLine("    while (quadCount != 0u) {")
+        appendLine("        hit = _voxel_intersectBlockModelQuad(rayOrigin, rayDir, texelCoord, hitT, hitNormal) || hit;")
+        appendLine("        texelCoord.x += 2;")
+        appendLine("        --quadCount;")
         appendLine("    }")
         appendLine("    if (hit) hitNormal = _voxel_unrotateBlockModelVector(rotation, normalize(hitNormal));")
         appendLine("    return hit;")

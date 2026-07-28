@@ -137,14 +137,19 @@ class BlockModelGLSLTest {
 
         val shader = generated.shader
         assertEquals(2, Regex("texelFetch\\(usam_blockModelQuads").findAll(shader).count())
-        assertTrue(shader.contains("ivec2 texelCoord = ivec2(int((quadIndex << 1u) & 0x7FFFu), int(quadIndex >> 14u));"))
+        assertTrue(shader.contains("ivec2 texelCoord = ivec2(int((modelData >> 8u) & 0x7FFEu), int((modelData >> 23u) & 3u));"))
+        assertTrue(shader.contains("texelCoord.x += 2;"))
         assertTrue(shader.contains("texelCoord + ivec2(1, 0)"))
         assertTrue(shader.contains("vec2 halfSize"))
         assertTrue(shader.contains("dot(normal, rayDir)"))
         assertTrue(shader.contains("cross(axis, normal)"))
         assertTrue(shader.contains("uint rotation = modelData & 0x1FFu;"))
-        assertTrue(shader.contains("uint quadOffset = (modelData >> 9u) & 0xFFFFu;"))
         assertTrue(shader.contains("uint quadCount = modelData >> 25u;"))
+        assertTrue(shader.contains("while (quadCount != 0u)"))
+        assertTrue(shader.contains("--quadCount;"))
+        val intersection = shader.substringAfter("bool _voxel_intersectBlockModelQuad(")
+            .substringBefore("bool voxel_intersectBlockModel(")
+        assertFalse(intersection.contains("quadIndex"))
         assertFalse(shader.contains("aabb", ignoreCase = true))
         assertFalse(Regex("\\b(?:const\\s+)?vec[234]\\s+\\w+\\s*\\[").containsMatchIn(shader))
     }
@@ -232,7 +237,7 @@ class BlockModelGLSLTest {
 
             assertTrue(shader.contains("texelFetch(usam_blockModelQuads"))
             assertTrue(shader.contains("uint quadCount = modelData >> 25u;"))
-            assertTrue(shader.contains("for (uint i = 0u; i < quadCount; ++i)"))
+            assertTrue(shader.contains("while (quadCount != 0u)"))
             assertFalse(shader.contains("switch"))
             assertFalse(shader.contains("modelID"))
             assertFalse(shader.contains("aabb", ignoreCase = true))
@@ -364,7 +369,7 @@ class BlockModelGLSLTest {
             )
         }
         assertEquals(2, palette.geometries.size)
-        assertTrue(first.shader.contains("uint quadOffset = (modelData >> 9u) & 0xFFFFu;"))
+        assertTrue(first.shader.contains("ivec2 texelCoord = ivec2(int((modelData >> 8u) & 0x7FFEu), int((modelData >> 23u) & 3u));"))
         assertTrue(first.shader.contains("uint quadCount = modelData >> 25u;"))
         assertTrue(first.shader.contains("_voxel_unrotateBlockModelVector"))
         val modelFunction = first.shader.substringAfter("bool voxel_intersectBlockModel(")
