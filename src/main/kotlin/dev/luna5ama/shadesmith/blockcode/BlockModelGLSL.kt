@@ -20,6 +20,8 @@ internal data class BlockModelGLSLOutput(
 
 internal const val BLOCK_MODEL_ROTATION_BITS = 9
 internal const val BLOCK_MODEL_ROTATION_MASK = 0x1FFu
+internal const val BLOCK_MODEL_AXIS_ALIGNED_BIT = 0x80000000u
+internal const val BLOCK_MODEL_QUAD_COUNT_MASK = 0x3Fu
 internal const val BLOCK_MODEL_QUAD_TEXTURE_WIDTH = 32768
 private const val BLOCK_MODEL_QUADS_PER_TEXTURE_ROW = BLOCK_MODEL_QUAD_TEXTURE_WIDTH / 2
 private const val BLOCK_MODEL_QUAD_TEXTURE_ROW_BYTES = BLOCK_MODEL_QUAD_TEXTURE_WIDTH * 4
@@ -28,7 +30,8 @@ internal data class BlockModelPalette(
     val modelIdByState: Map<BlockState, List<UInt>>,
     val geometries: List<List<GeometryQuad>>,
     val quads: List<GeometryQuad>,
-    val unsupported: List<UnsupportedGeometry>
+    val unsupported: List<UnsupportedGeometry>,
+    val compactAxisAlignedQuads: List<Boolean>
 )
 
 private data class CanonicalBlockModel(
@@ -39,6 +42,7 @@ private data class CanonicalBlockModel(
 internal fun buildBlockModelPalette(models: BlockModelsResult): BlockModelPalette {
     val geometryMetadata = linkedMapOf<List<GeometryQuad>, UInt>()
     val quads = mutableListOf<GeometryQuad>()
+    val compactAxisAlignedQuads = mutableListOf<Boolean>()
     val modelIdByState = linkedMapOf<BlockState, List<UInt>>()
     for (model in models.supported) {
         val rows = if (model.property.isFullCube || model.quads.isEmpty()) List(64) { 0u } else List(64) { mask ->
@@ -48,15 +52,24 @@ internal fun buildBlockModelPalette(models: BlockModelsResult): BlockModelPalett
             if (filtered.isEmpty()) return@List 0u
             val canonical = canonicalBlockModel(filtered)
             val metadata = geometryMetadata.getOrPut(canonical.quads) {
+                val axisAligned = canonical.quads.all { it.axisAlignedAxis() != null }
                 val rowOffset = quads.size % BLOCK_MODEL_QUADS_PER_TEXTURE_ROW
                 if (rowOffset + canonical.quads.size > BLOCK_MODEL_QUADS_PER_TEXTURE_ROW) {
-                    repeat(BLOCK_MODEL_QUADS_PER_TEXTURE_ROW - rowOffset) { quads += canonical.quads.first() }
+                    repeat(BLOCK_MODEL_QUADS_PER_TEXTURE_ROW - rowOffset) {
+                        quads += canonical.quads.first()
+                        compactAxisAlignedQuads += axisAligned
+                    }
                 }
                 val offset = quads.size
                 require(offset <= 65535) { "Block model quad offset exceeds packed UInt32 capacity" }
-                require(canonical.quads.size <= 127) { "Block model quad count exceeds packed UInt32 capacity" }
+                require(canonical.quads.size <= BLOCK_MODEL_QUAD_COUNT_MASK.toInt()) {
+                    "Block model quad count exceeds packed UInt32 capacity"
+                }
                 quads += canonical.quads
-                (canonical.quads.size.toUInt() shl 25) or (offset.toUInt() shl BLOCK_MODEL_ROTATION_BITS)
+                repeat(canonical.quads.size) { compactAxisAlignedQuads += axisAligned }
+                (canonical.quads.size.toUInt() shl 25) or
+                    (offset.toUInt() shl BLOCK_MODEL_ROTATION_BITS) or
+                    if (axisAligned) BLOCK_MODEL_AXIS_ALIGNED_BIT else 0u
             }
             metadata or canonical.rotation
         }
@@ -65,7 +78,16 @@ internal fun buildBlockModelPalette(models: BlockModelsResult): BlockModelPalett
             "Block state has conflicting model geometry: " + model.state
         }
     }
-    return BlockModelPalette(modelIdByState, geometryMetadata.keys.toList(), quads, models.unsupported)
+    return BlockModelPalette(
+        modelIdByState, geometryMetadata.keys.toList(), quads, models.unsupported, compactAxisAlignedQuads
+    )
+}
+
+private fun GeometryQuad.axisAlignedAxis(): Int? = when {
+    normal.y == 0.0 && normal.z == 0.0 -> 0
+    normal.x == 0.0 && normal.z == 0.0 -> 1
+    normal.x == 0.0 && normal.y == 0.0 -> 2
+    else -> null
 }
 
 private fun canonicalBlockModel(quads: List<GeometryQuad>): CanonicalBlockModel =
@@ -199,15 +221,28 @@ internal fun generateBlockModelGLSL(
         appendLine("}")
         appendLine()
         appendLine("bool _voxel_intersectBlockModelQuad(")
-        appendLine("    vec3 rayOrigin, vec3 rayDir, ivec2 texelCoord, inout float hitT, inout vec3 hitNormal")
+        appendLine("    bool axisAligned, vec3 rayOrigin, vec3 rayDir, ivec2 texelCoord,")
+        appendLine("    inout float hitT, inout vec3 hitNormal")
         appendLine(") {")
         appendLine("    vec4 originNormalX = texelFetch(usam_blockModelQuads, texelCoord, 0);")
         appendLine("    vec4 normalYZHalfSize = texelFetch(usam_blockModelQuads, texelCoord + ivec2(1, 0), 0);")
         appendLine("    vec3 origin = originNormalX.xyz;")
-        appendLine("    vec3 normal = vec3(originNormalX.w, normalYZHalfSize.xy) * (255.0 / 126.0) - 1.0;")
         appendLine("    vec2 halfSize = normalYZHalfSize.zw + 1e-6;")
+        appendLine("    if (axisAligned) {")
+        appendLine("        int axis = int(originNormalX.w * 255.0 + 0.5) - 253;")
+        appendLine("        float denominator = rayDir[axis];")
+        appendLine("        float t = (origin[axis] - rayOrigin[axis]) / denominator;")
+        appendLine("        if (!(t >= 0.0 && t <= hitT)) return false;")
+        appendLine("        vec3 offset = abs(rayOrigin + rayDir * t - origin);")
+        appendLine("        vec2 projected = axis == 0 ? offset.yz : axis == 1 ? offset.xz : offset.xy;")
+        appendLine("        if (any(greaterThan(projected, halfSize))) return false;")
+        appendLine("        hitT = t;")
+        appendLine("        hitNormal = vec3(0.0);")
+        appendLine("        hitNormal[axis] = denominator < 0.0 ? 1.0 : -1.0;")
+        appendLine("        return true;")
+        appendLine("    }")
+        appendLine("    vec3 normal = vec3(originNormalX.w, normalYZHalfSize.xy) * (255.0 / 126.0) - 1.0;")
         appendLine("    float denominator = dot(normal, rayDir);")
-        appendLine("    if (abs(denominator) <= 1e-8) return false;")
         appendLine("    float t = dot(normal, origin - rayOrigin) / denominator;")
         appendLine("    if (!(t >= 0.0 && t <= hitT)) return false;")
         appendLine("    vec3 axis = abs(normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);")
@@ -226,7 +261,8 @@ internal fun generateBlockModelGLSL(
         appendLine("    out float hitT, out vec3 hitNormal")
         appendLine(") {")
         appendLine("    uint rotation = modelData & 0x1FFu;")
-        appendLine("    uint quadCount = modelData >> 25u;")
+        appendLine("    uint quadCount = (modelData >> 25u) & 0x3Fu;")
+        appendLine("    bool axisAligned = (modelData & 0x80000000u) != 0u;")
         appendLine("    ivec2 texelCoord = ivec2(int((modelData >> 8u) & 0x7FFEu), int((modelData >> 23u) & 3u));")
         appendLine("    rayOrigin = _voxel_rotateBlockModelVector(rotation, rayOrigin - vec3(0.5)) + vec3(0.5);")
         appendLine("    rayDir = _voxel_rotateBlockModelVector(rotation, rayDir);")
@@ -234,7 +270,7 @@ internal fun generateBlockModelGLSL(
         appendLine("    hitNormal = vec3(0.0);")
         appendLine("    bool hit = false;")
         appendLine("    while (quadCount != 0u) {")
-        appendLine("        hit = _voxel_intersectBlockModelQuad(rayOrigin, rayDir, texelCoord, hitT, hitNormal) || hit;")
+        appendLine("        hit = _voxel_intersectBlockModelQuad(axisAligned, rayOrigin, rayDir, texelCoord, hitT, hitNormal) || hit;")
         appendLine("        texelCoord.x += 2;")
         appendLine("        --quadCount;")
         appendLine("    }")
@@ -266,35 +302,43 @@ internal fun generateBlockModelGLSL(
             }
         })
     }.toString() + "\n"
-    return BlockModelGLSLOutput(shader, diagnostics, counts, encodeBlockModelQuads(palette.quads))
+    return BlockModelGLSLOutput(
+        shader, diagnostics, counts, encodeBlockModelQuads(palette.quads, palette.compactAxisAlignedQuads)
+    )
 }
 
-private fun encodeBlockModelQuads(quads: List<GeometryQuad>): List<Byte> = buildList(quads.size * 8) {
-    for (quad in quads) {
+private fun encodeBlockModelQuads(
+    quads: List<GeometryQuad>, compactAxisAlignedQuads: List<Boolean>
+): List<Byte> = buildList(quads.size * 8) {
+    require(quads.size == compactAxisAlignedQuads.size)
+    for ((index, quad) in quads.withIndex()) {
         val origin = GeometryVertex(
             quad.vertices.sumOf(GeometryVertex::x) / quad.vertices.size,
             quad.vertices.sumOf(GeometryVertex::y) / quad.vertices.size,
             quad.vertices.sumOf(GeometryVertex::z) / quad.vertices.size
         )
         val originBytes = listOf(origin.x.uNormByte(), origin.y.uNormByte(), origin.z.uNormByte())
-        val normalBytes = listOf(
-            quad.normal.x.signedUNormByte(),
-            quad.normal.y.signedUNormByte(),
-            quad.normal.z.signedUNormByte()
+        val compactAxis = if (compactAxisAlignedQuads[index]) requireNotNull(quad.axisAlignedAxis()) else null
+        val normalBytes = compactAxis?.let { listOf((253 + it).toByte(), 0, 0) } ?: listOf(
+            quad.normal.x.signedUNormByte(), quad.normal.y.signedUNormByte(), quad.normal.z.signedUNormByte()
         )
         val decodedOrigin = GeometryVertex(originBytes[0].uNorm(), originBytes[1].uNorm(), originBytes[2].uNorm())
-        val decodedNormal = GeometryVertex(
-            normalBytes[0].signedUNorm(),
-            normalBytes[1].signedUNorm(),
-            normalBytes[2].signedUNorm()
-        )
-        val axis = if (kotlin.math.abs(decodedNormal.z) < 0.999) {
-            GeometryVertex(0.0, 0.0, 1.0)
+        val (u, v) = if (compactAxis != null) when (compactAxis) {
+            0 -> GeometryVertex(0.0, 1.0, 0.0) to GeometryVertex(0.0, 0.0, 1.0)
+            1 -> GeometryVertex(1.0, 0.0, 0.0) to GeometryVertex(0.0, 0.0, 1.0)
+            else -> GeometryVertex(1.0, 0.0, 0.0) to GeometryVertex(0.0, 1.0, 0.0)
         } else {
-            GeometryVertex(0.0, 1.0, 0.0)
+            val decodedNormal = GeometryVertex(
+                normalBytes[0].signedUNorm(), normalBytes[1].signedUNorm(), normalBytes[2].signedUNorm()
+            )
+            val axis = if (kotlin.math.abs(decodedNormal.z) < 0.999) {
+                GeometryVertex(0.0, 0.0, 1.0)
+            } else {
+                GeometryVertex(0.0, 1.0, 0.0)
+            }
+            val u = axis.cross(decodedNormal)
+            u to decodedNormal.cross(u)
         }
-        val u = axis.cross(decodedNormal)
-        val v = decodedNormal.cross(u)
         var halfSizeU = 0.0
         var halfSizeV = 0.0
         for (vertex in quad.vertices) {
