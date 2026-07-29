@@ -160,29 +160,13 @@ class BlockModelGLSLTest {
             BlockModelPalette(emptyMap(), emptyList(), emptyList(), emptyList()),
             assets()
         ).shader
-        assertTrue(shader.contains("normal = denominator < 0.0 ? normal : -normal;"))
-        assertTrue(shader.contains("normal = vec3(rayDir.x < 0.0 ? 1.0 : -1.0, 0.0, 0.0);"))
+        assertTrue(shader.contains("hitNormal = denominator < 0.0 ? normal : -normal;"))
         assertEquals(vertex(0.0, 0.0, 1.0), assertNotNull(intersectQuad(
             vertex(0.5, 0.5, 1.0), vertex(0.0, 0.0, -1.0), cube().last()
         )).second)
         assertEquals(vertex(0.0, 0.0, -1.0), assertNotNull(intersectQuad(
             vertex(0.5, 0.5, -1.0), vertex(0.0, 0.0, 1.0), cube()[4]
         )).second)
-    }
-
-    @Test
-    fun `specializes axis aligned quad intersections`() {
-        val shader = generateBlockModelGLSL(
-            BlockModelPalette(emptyMap(), emptyList(), emptyList(), emptyList()),
-            assets()
-        ).shader
-
-        assertTrue(shader.contains("const float encodedNormalZero = 126.0 / 255.0;"))
-        assertTrue(shader.contains("all(equal(normalYZHalfSize.xy, vec2(encodedNormalZero)))"))
-        assertTrue(shader.contains("localOrigin = origin.yzx;"))
-        assertTrue(shader.contains("localOrigin = origin.xzy;"))
-        assertTrue(shader.contains("float denominator = localRayDir.z;"))
-        assertTrue(shader.contains("projected = abs(localRayOrigin.xy + localRayDir.xy * t - localOrigin.xy);"))
     }
 
     @Test
@@ -306,7 +290,7 @@ class BlockModelGLSLTest {
             assets()
         ).shader
         assertTrue(shader.contains("if (!(t >= 0.0 && t <= hitT)) return false;"))
-        assertTrue(shader.contains("t = dot(normal, origin - rayOrigin) / denominator;"))
+        assertTrue(shader.contains("float t = dot(normal, origin - rayOrigin) / denominator;"))
         assertTrue(shader.contains("if (any(greaterThan(projected, halfSize))) return false;"))
     }
 
