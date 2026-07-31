@@ -15,9 +15,11 @@ object PBRAssemblerImpl : PBRAssembler {
         val emissive = Emissive.provide()
         val ior = IOR.provide()
         val roughness = Roughness.provide()
+        val metalIndex = MetalIndex.provide()
+        val dielectric = Dielectric.provide()
         val smallFoliage = SmallFoliageFlag.provide()
         val emissiveMultiplier = EmissiveMultiplier.provide()
-        val allStates = listOf(sss, emissive, ior, roughness, smallFoliage, emissiveMultiplier)
+        val allStates = listOf(sss, emissive, ior, roughness, metalIndex, dielectric, smallFoliage, emissiveMultiplier)
             .flatMap { it.keys }
         fun <P : PBRValue<*, *>> getData(provider: PBRProvider<P>, map: Map<BlockState, P>, state: BlockState): P {
             return map[state] ?: map[baseState] ?: provider.defaultValue
@@ -27,6 +29,8 @@ object PBRAssemblerImpl : PBRAssembler {
             val emissiveValue = getData(Emissive, emissive, state)
             val iorValue = getData(IOR, ior, state)
             val roughnessValue = getData(Roughness, roughness, state)
+            val metalIndexValue = getData(MetalIndex, metalIndex, state)
+            val dielectricValue = getData(Dielectric, dielectric, state)
             val smallFoliageValue = getData(SmallFoliageFlag, smallFoliage, state)
             val emissiveMultiplierValue = getData(EmissiveMultiplier, emissiveMultiplier, state)
             yield(state to buildList {
@@ -41,6 +45,14 @@ object PBRAssemblerImpl : PBRAssembler {
                         int32Bits = int32Bits or ((smallFoliageValue.rawData.toInt() and 0x1) shl 20)
                         int32Bits = int32Bits or ((roughnessValue.rawData.toInt() and 0xFF) shl 24)
                         putInt(int32Bits)
+                    }
+                ))
+                add(LUTData(
+                    TextureFormat.R8UI,
+                    buildByteData(1) {
+                        val bits = (metalIndexValue.rawData.toInt() and 0xF) or
+                            ((dielectricValue.rawData.toInt() and 0xF) shl 4)
+                        put(bits.toByte())
                     }
                 ))
             })

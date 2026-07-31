@@ -1,5 +1,7 @@
 package dev.luna5ama.shadesmith.blockcode
 
+import kotlin.math.roundToInt
+
 sealed interface PBRValue<T, R> {
     val value: T
     val rawData: R
@@ -20,7 +22,7 @@ sealed interface PBRValue<T, R> {
     data class UInt8(override val value: UByte) : Identity<UByte>
     data class Unorm4(override val value: Float) : PBRValue<Float, UByte> {
         override val rawData: UByte
-            get() = (value * 15.0f).toInt().coerceIn(0, 15).toUByte()
+            get() = (value * 15.0f).roundToInt().coerceIn(0, 15).toUByte()
     }
 
     data class Unorm8(override val value: Float) : PBRValue<Float, UByte> {
