@@ -48,10 +48,10 @@ internal fun generateHardcodedPBR(assets: MinecraftAssets) {
     println("Writing LUT files...")
     writeLUTFiles(
         texturesPath,
-        generation.palette.map { (data, materialId) -> data.take(1) to materialId },
-        generation.defaultPBRData.take(1)
+        generation.palette.map { (data, materialId) -> data.take(2) to materialId },
+        generation.defaultPBRData.take(2)
     )
-    writeBlockModelLUT(texturesPath.resolve("pbr_lut_1.bin"), generation.modelMetadataByMaterialId)
+    writeBlockModelLUT(texturesPath.resolve("pbr_lut_2.bin"), generation.modelMetadataByMaterialId)
 
     val blockModelGLSL = generateBlockModelGLSL(modelPalette, assets)
     writeBlockModelOutputs(blockModelGLSL)
@@ -299,5 +299,5 @@ private fun writeBlockModelLUT(path: Path, metadataByMaterialId: Map<Int, List<U
         rows.forEach { buffer.putInt(it.toInt()) }
     }
     path.outputStream().use { it.write(buffer.array()) }
-    println("Wrote LUT 1: format=R32UI, size=${maxMaterialId + 1}x64 entries, ${buffer.capacity()} bytes")
+    println("Wrote LUT 2: format=R32UI, size=${maxMaterialId + 1}x64 entries, ${buffer.capacity()} bytes")
 }

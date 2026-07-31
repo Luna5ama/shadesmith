@@ -21,6 +21,8 @@ fun defaultPBRFields(blockModelIds: Map<BlockState, UInt> = emptyMap()): List<PB
     pbrField("emissive", Emissive),
     pbrField("ior", IOR),
     pbrField("roughness", Roughness),
+    pbrField("metalIndex", MetalIndex),
+    pbrField("dielectric", Dielectric),
     pbrField("emissiveMultiplier", EmissiveMultiplier),
     pbrField("fullCube", FullCubeFlag),
     pbrField("smallFoliage", SmallFoliageFlag),

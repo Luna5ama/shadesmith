@@ -221,7 +221,8 @@ class BlockModelGLSLTest {
 
             val shader = input.resolve("techniques/voxel/BlockModels.glsl").readText()
             val packedLut = input.resolve("textures/pbr_lut_0.bin").readBytes()
-            val modelLut = input.resolve("textures/pbr_lut_1.bin").readBytes()
+            val flagsLut = input.resolve("textures/pbr_lut_1.bin").readBytes()
+            val modelLut = input.resolve("textures/pbr_lut_2.bin").readBytes()
             val maxMaterialId = blockProperties.lineSequence().mapNotNull { line ->
                 line.substringBefore(" = ").removePrefix("block.").toIntOrNull()
             }.max()
@@ -259,7 +260,7 @@ class BlockModelGLSLTest {
             }.toInt()
             assertEquals(paddedQuadTextureByteCount(expectedQuadCount), quadBytes.size)
             assertTrue(quadBytes.drop(expectedQuadCount * 8).all { it == 0.toByte() })
-            assertEquals(1u, (decode(packedLut, stoneId) shr 28) and 1u)
+            assertEquals(1u, (decode(flagsLut, stoneId) shr 4) and 1u)
             Files.walk(temporary).use { paths ->
                 assertFalse(paths.anyMatch { it.fileName.toString().contains("aabb", ignoreCase = true) })
             }
@@ -502,9 +503,9 @@ class BlockModelGLSLTest {
         val slabId = first.blockStateToMaterialId.getValue(bottom.state)
         val weightedId = first.blockStateToMaterialId.getValue(BlockState("weighted", mapOf("kind" to "a")))
         val grassId = first.blockStateToMaterialId.getValue(BlockState("grass"))
-        assertTrue(decode(palette.getValue(slabId)[1]) > 0u)
-        assertEquals(0u, decode(palette.getValue(weightedId)[1]))
-        assertEquals(0u, decode(palette.getValue(grassId)[1]))
+        assertTrue(decode(palette.getValue(slabId).last()) > 0u)
+        assertEquals(0u, decode(palette.getValue(weightedId).last()))
+        assertEquals(0u, decode(palette.getValue(grassId).last()))
         assertEquals(modelPalette.modelIdByState.getValue(bottom.state), first.modelMetadataByMaterialId.getValue(slabId))
         assertTrue(first.modelMetadataByMaterialId.getValue(weightedId).all { it == 0u })
     }
