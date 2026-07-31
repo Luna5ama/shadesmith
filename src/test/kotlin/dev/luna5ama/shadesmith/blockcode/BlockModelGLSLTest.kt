@@ -59,7 +59,8 @@ class BlockModelGLSLTest {
 
             val shader = input.resolve("techniques/voxel/BlockModels.glsl").readText()
             val packedLut = input.resolve("textures/pbr_lut_0.bin").readBytes()
-            val modelLut = input.resolve("textures/pbr_lut_1.bin").readBytes()
+            val flagsLut = input.resolve("textures/pbr_lut_1.bin").readBytes()
+            val modelLut = input.resolve("textures/pbr_lut_2.bin").readBytes()
             val bottomModelId = decode(modelLut, bottomId) shr BLOCK_MODEL_ROTATION_BITS
             val topModelId = decode(modelLut, topId) shr BLOCK_MODEL_ROTATION_BITS
             assertTrue(bottomModelId > 0u)
@@ -70,7 +71,7 @@ class BlockModelGLSLTest {
             )
             assertTrue(bottomModelId == topModelId || shader.contains("} else {"))
             assertFalse(shader.contains("switch"))
-            assertEquals(1u, (decode(packedLut, stoneId) shr 28) and 1u)
+            assertEquals(1u, (decode(flagsLut, stoneId) shr 4) and 1u)
             assertEquals(0u, decode(modelLut, stoneId))
         } finally {
             temporary.toFile().deleteRecursively()
@@ -272,9 +273,9 @@ class BlockModelGLSLTest {
         val slabId = first.blockStateToMaterialId.getValue(bottom.state)
         val weightedId = first.blockStateToMaterialId.getValue(BlockState("weighted", mapOf("kind" to "a")))
         val grassId = first.blockStateToMaterialId.getValue(BlockState("grass"))
-        assertTrue(decode(palette.getValue(slabId)[1]) > 0u)
-        assertEquals(0u, decode(palette.getValue(weightedId)[1]))
-        assertEquals(0u, decode(palette.getValue(grassId)[1]))
+        assertTrue(decode(palette.getValue(slabId).last()) > 0u)
+        assertEquals(0u, decode(palette.getValue(weightedId).last()))
+        assertEquals(0u, decode(palette.getValue(grassId).last()))
     }
 
     @Test
