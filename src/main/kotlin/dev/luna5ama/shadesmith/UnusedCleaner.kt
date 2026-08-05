@@ -9,6 +9,9 @@ private val TOKEN_DELIMITER_REGEX = """\s+|(?=[{}()\[\];,.\-!])|(?<=[{}()\[\];,.
 private val FUNCTION_HEADER_REGEX =
     """^\s*($IDENTIFIER_REGEX_STR)\s+($IDENTIFIER_REGEX_STR)\s*(\([\s\w_,]*?\))\s*\{""".toRegex(RegexOption.MULTILINE)
 
+private val PREPROCESSOR_CONDITIONAL_REGEX =
+    """^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b.*$""".toRegex(RegexOption.MULTILINE)
+
 private val UNIFORM_REGEX =
     """^\s*uniform\s+($IDENTIFIER_REGEX_STR)\s+($IDENTIFIER_REGEX_STR)\s*;.*$""".toRegex(RegexOption.MULTILINE)
 
@@ -29,15 +32,55 @@ fun cleanUnused(file: ShaderFile): ShaderFile {
         val funcInfo = FUNCTION_HEADER_REGEX.findAll(newCode).map {
             val (_, funcName) = it.destructured
             val endIndex = run {
-                (it.range.last + 1..newCode.lastIndex + 1).fold(1) { acc, index ->
-                    if (acc == 0) return@run index
-                    val c = newCode[index]
-                    when (c) {
-                        '{' -> acc + 1
-                        '}' -> acc - 1
-                        else -> acc
+                data class ConditionalFrame(
+                    val branchStartDepths: Set<Int>,
+                    val branchEndDepths: MutableSet<Int>
+                )
+
+                val conditionalStack = ArrayDeque<ConditionalFrame>()
+                var depths = mutableSetOf(1)
+                var index = it.range.last + 1
+                val directives = PREPROCESSOR_CONDITIONAL_REGEX.findAll(newCode, index).iterator()
+
+                while (index < newCode.length) {
+                    val directive = if (directives.hasNext()) directives.next() else null
+                    val boundary = directive?.range?.first ?: newCode.length
+
+                    while (index < boundary) {
+                        when (newCode[index++]) {
+                            '{' -> depths = depths.mapTo(mutableSetOf()) { it + 1 }
+                            '}' -> depths = depths.mapTo(mutableSetOf()) { it - 1 }
+                        }
+                        if (depths.size == 1 && depths.contains(0)) return@run index
                     }
+
+                    if (directive == null) break
+
+                    when (directive.groupValues[1]) {
+                        "if", "ifdef", "ifndef" -> conditionalStack.addLast(
+                            ConditionalFrame(depths.toSet(), mutableSetOf())
+                        )
+
+                        "elif", "else" -> {
+                            val frame = conditionalStack.lastOrNull()
+                                ?: error("Unexpected #${directive.groupValues[1]} in function $funcName")
+                            frame.branchEndDepths.addAll(depths)
+                            depths = frame.branchStartDepths.toMutableSet()
+                        }
+
+                        "endif" -> {
+                            val frame = conditionalStack.removeLastOrNull()
+                                ?: error("Unexpected #endif in function $funcName")
+                            frame.branchEndDepths.addAll(depths)
+                            depths = frame.branchEndDepths.toMutableSet()
+                        }
+                    }
+
+                    index = directive.range.last + 1
+                    if (depths.size == 1 && depths.contains(0)) return@run index
                 }
+
+                error("Unbalanced function body for $funcName")
             }
             tokenCountWithoutFuncNameInHeader[funcName] = tokenCountWithoutFuncNameInHeader[funcName]!! - 1
             FuncInfo(
