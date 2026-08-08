@@ -21,9 +21,11 @@ fun defaultPBRFields(): List<PBRField> = listOf(
     pbrField("emissive", Emissive),
     pbrField("ior", IOR),
     pbrField("roughness", Roughness),
-    pbrField("smallFoliage", SmallFoliageFlag),
-    pbrField("fullCube", FullCubeFlag),
+    pbrField("metalIndex", MetalIndex),
+    pbrField("dielectric", Dielectric),
     pbrField("emissiveMultiplier", EmissiveMultiplier),
+    pbrField("fullCube", FullCubeFlag),
+    pbrField("smallFoliage", SmallFoliageFlag),
 )
 
 @Serializable
