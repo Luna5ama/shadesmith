@@ -165,6 +165,12 @@ internal object BlockModels {
                 values += listOf("false", "true")
             } else if (values == setOf("low", "tall")) {
                 values += "none"
+            } else if (property == "leaves" && values == setOf("large", "small")) {
+                values += "none"
+            } else if (property == "level" && values == (1..8).map(Int::toString).toSet()) {
+                values += "0"
+            } else if (property == "flower_amount" && values == setOf("2", "3", "4")) {
+                values += "1"
             } else {
                 require(values.size > 1) {
                     "Multipart property '$property' has an unknown non-Boolean domain: $values"

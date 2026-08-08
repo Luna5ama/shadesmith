@@ -133,6 +133,44 @@ class BlockModelsTest {
     }
 
     @Test
+    fun `multipart includes implicit bamboo composter and flower defaults`() = withJar(
+        buildMap {
+            put(blockstate("bamboo"), """{"multipart":[
+              {"apply":{"model":"minecraft:block/base"}},
+              {"when":{"leaves":"small"},"apply":{"model":"minecraft:block/small"}},
+              {"when":{"leaves":"large"},"apply":{"model":"minecraft:block/large"}}
+            ]}""")
+            put(blockstate("composter"), """{"multipart":[
+              {"apply":{"model":"minecraft:block/base"}},
+              ${(1..8).joinToString(",") { level ->
+                    """{"when":{"level":"$level"},"apply":{"model":"minecraft:block/level$level"}}"""
+                }}
+            ]}""")
+            put(blockstate("flowers"), """{"multipart":[
+              {"apply":{"model":"minecraft:block/base"}},
+              {"when":{"flower_amount":"2|3|4"},"apply":{"model":"minecraft:block/amount2"}},
+              {"when":{"flower_amount":"3|4"},"apply":{"model":"minecraft:block/amount3"}},
+              {"when":{"flower_amount":"4"},"apply":{"model":"minecraft:block/amount4"}}
+            ]}""")
+            put(model("base"), elementModel(0, 0, 0, 2, 2, 2))
+            put(model("small"), elementModel(2, 0, 0, 4, 2, 2))
+            put(model("large"), elementModel(4, 0, 0, 6, 2, 2))
+            (1..8).forEach { level -> put(model("level$level"), elementModel(0, level, 0, 2, level + 1, 2)) }
+            put(model("amount2"), elementModel(2, 2, 0, 4, 4, 2))
+            put(model("amount3"), elementModel(4, 4, 0, 6, 6, 2))
+            put(model("amount4"), elementModel(6, 6, 0, 8, 8, 2))
+        }
+    ) { jar ->
+        val states = BlockModels.load(jar, properties("bamboo", "composter", "flowers")).supported
+            .groupBy { it.state.blockID }
+            .mapValues { (_, values) -> values.map { it.state.states } }
+
+        assertEquals(setOf("large", "none", "small"), states.getValue("bamboo").map { it.getValue("leaves") }.toSet())
+        assertEquals((0..8).map(Int::toString).toSet(), states.getValue("composter").map { it.getValue("level") }.toSet())
+        assertEquals((1..4).map(Int::toString).toSet(), states.getValue("flowers").map { it.getValue("flower_amount") }.toSet())
+    }
+
+    @Test
     fun `parent elements inherit replace and report cycle or missing parent`() = withJar(
         mapOf(
             blockstate("inherit") to singleVariant("child"),
