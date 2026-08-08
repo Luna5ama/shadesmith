@@ -113,6 +113,26 @@ class BlockModelsTest {
     }
 
     @Test
+    fun `wall multipart includes implicit none connections`() = withJar(
+        mapOf(
+            blockstate("wall") to """{"multipart":[
+              {"when":{"up":"true"},"apply":{"model":"minecraft:block/post"}},
+              {"when":{"north":"low"},"apply":{"model":"minecraft:block/low"}},
+              {"when":{"north":"tall"},"apply":{"model":"minecraft:block/tall"}}
+            ]}""",
+            model("post") to elementModel(6, 0, 6, 10, 16, 10),
+            model("low") to elementModel(7, 6, 0, 9, 15, 6),
+            model("tall") to elementModel(7, 0, 0, 9, 16, 6)
+        )
+    ) { jar ->
+        val states = BlockModels.load(jar, properties("wall")).supported.map { it.state.states }
+
+        assertEquals(setOf("low", "none", "tall"), states.map { it.getValue("north") }.toSet())
+        assertEquals(setOf("false", "true"), states.map { it.getValue("up") }.toSet())
+        assertTrue(states.any { it["north"] == "none" && it["up"] == "true" })
+    }
+
+    @Test
     fun `parent elements inherit replace and report cycle or missing parent`() = withJar(
         mapOf(
             blockstate("inherit") to singleVariant("child"),

@@ -163,6 +163,8 @@ internal object BlockModels {
         for ((property, values) in domains) {
             if (values.all { it == "true" || it == "false" }) {
                 values += listOf("false", "true")
+            } else if (values == setOf("low", "tall")) {
+                values += "none"
             } else {
                 require(values.size > 1) {
                     "Multipart property '$property' has an unknown non-Boolean domain: $values"
