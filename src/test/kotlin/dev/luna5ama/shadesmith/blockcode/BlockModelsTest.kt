@@ -234,24 +234,28 @@ class BlockModelsTest {
     }
 
     @Test
-    fun `weighted alternatives collapse identical geometry and reject differing geometry`() = withJar(
+    fun `weighted alternatives select the highest weight and break ties by JSON order`() = withJar(
         mapOf(
             blockstate("same") to """{"variants":{" ":[{"model":"minecraft:block/a","weight":1},{"model":"minecraft:block/a_alias","weight":4}]}}""",
             blockstate("different") to """{"variants":{" ":[{"model":"minecraft:block/a"},{"model":"minecraft:block/b"}]}}""",
+            blockstate("highest") to """{"variants":{" ":[{"model":"minecraft:block/a","weight":2},{"model":"minecraft:block/b","weight":5}]}}""",
             model("a") to elementModel(0, 0, 0, 8, 16, 16),
             model("a_alias") to """{"parent":"minecraft:block/a"}""",
             model("b") to elementModel(8, 0, 0, 16, 16, 16)
         )
     ) { jar ->
-        val result = BlockModels.load(jar, properties("same", "different"))
+        val result = BlockModels.load(jar, properties("same", "different", "highest"))
 
-        assertEquals(listOf("same"), result.supported.map { it.state.blockID })
-        assertEquals(listOf("different"), result.unsupported.map { it.blockID })
-        assertTrue(result.unsupported.single().reason.contains("weighted", ignoreCase = true))
+        assertEquals(setOf("same", "different", "highest"), result.supported.map { it.state.blockID }.toSet())
+        assertTrue(result.unsupported.isEmpty())
+        val byBlock = result.supported.associateBy { it.state.blockID }
+        assertTrue(byBlock.getValue("same").quads.flatMap { it.vertices }.all { it.x <= 0.5 })
+        assertTrue(byBlock.getValue("different").quads.flatMap { it.vertices }.all { it.x <= 0.5 })
+        assertTrue(byBlock.getValue("highest").quads.flatMap { it.vertices }.all { it.x >= 0.5 })
     }
 
     @Test
-    fun `model geometry extending outside block bounds is unsupported`() = withJar(
+    fun `model geometry extending outside block bounds is cropped`() = withJar(
         mapOf(
             blockstate("protruding") to singleVariant("protruding"),
             blockstate("weighted_protruding") to """{"variants":{"":[
@@ -262,14 +266,12 @@ class BlockModelsTest {
     ) { jar ->
         val result = BlockModels.load(jar, properties("protruding", "weighted_protruding"))
 
-        assertEquals(
-            listOf(
-                UnsupportedGeometry("protruding", emptyMap(), "Model geometry extends outside block bounds"),
-                UnsupportedGeometry("weighted_protruding", emptyMap(), "Model geometry extends outside block bounds")
-            ),
-            result.unsupported
-        )
-        assertTrue(result.supported.isEmpty())
+        assertEquals(setOf("protruding", "weighted_protruding"), result.supported.map { it.state.blockID }.toSet())
+        assertTrue(result.unsupported.isEmpty())
+        assertTrue(result.supported.flatMap { it.quads }.flatMap { it.vertices }.all { vertex ->
+            vertex.x in 0.0..1.0 && vertex.y in 0.0..1.0 && vertex.z in 0.0..1.0
+        })
+        assertTrue(result.supported.flatMap { it.quads }.flatMap { it.vertices }.all { it.x == 0.0 })
     }
 
     @Test
@@ -288,7 +290,7 @@ class BlockModelsTest {
     }
 
     @Test
-    fun `multipart rejects the entire state when one part extends outside block bounds`() = withJar(
+    fun `multipart crops parts extending outside block bounds`() = withJar(
         mapOf(
             blockstate("multipart_bounds") to """{"multipart":[
               {"apply":{"model":"minecraft:block/base"}},
@@ -299,11 +301,11 @@ class BlockModelsTest {
     ) { jar ->
         val result = BlockModels.load(jar, properties("multipart_bounds"))
 
-        assertEquals(
-            listOf(UnsupportedGeometry("multipart_bounds", emptyMap(), "Model geometry extends outside block bounds")),
-            result.unsupported
-        )
-        assertTrue(result.supported.isEmpty())
+        assertTrue(result.unsupported.isEmpty())
+        assertEquals(listOf("multipart_bounds"), result.supported.map { it.state.blockID })
+        assertTrue(result.supported.single().quads.flatMap { it.vertices }.all { vertex ->
+            vertex.x in 0.0..1.0 && vertex.y in 0.0..1.0 && vertex.z in 0.0..1.0
+        })
     }
 
     @Test

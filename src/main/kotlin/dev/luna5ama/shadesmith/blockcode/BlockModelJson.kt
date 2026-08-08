@@ -18,7 +18,8 @@ internal data class ModelApplication(
     val model: String,
     val x: Double = 0.0,
     val y: Double = 0.0,
-    val z: Double = 0.0
+    val z: Double = 0.0,
+    val weight: Double = 1.0
 )
 
 internal data class ModelElement(
@@ -144,7 +145,8 @@ internal fun parseApplications(element: JsonElement): List<ModelApplication> {
                 ?: throw IllegalArgumentException("Model application is missing model: $objectJson"),
             x = objectJson.number("x", 0.0),
             y = objectJson.number("y", 0.0),
-            z = objectJson.number("z", 0.0)
+            z = objectJson.number("z", 0.0),
+            weight = objectJson.number("weight", 1.0)
         )
     }
 }

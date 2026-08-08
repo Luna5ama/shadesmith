@@ -190,17 +190,15 @@ internal object BlockModels {
         resources: BlockModelResources
     ): GeometryResolution {
         return try {
-            val alternatives = applications.map { application ->
-                val elements = resources.modelElements(application.model)
-                if (elements.isEmpty()) throw UnsupportedModel("Empty or special model: ${application.model}")
-                ModelGeometry(normalizeQuads(elements.flatMap { elementQuads(it, application) }))
+            var application = applications.first()
+            for (candidate in applications.drop(1)) {
+                if (candidate.weight > application.weight) application = candidate
             }
-            val distinct = alternatives.distinctBy(ModelGeometry::quads)
-            if (distinct.size != 1) {
-                GeometryResolution.Unsupported("Weighted alternatives have different geometry")
-            } else {
-                GeometryResolution.Supported(distinct.single())
-            }
+            val elements = resources.modelElements(application.model)
+            if (elements.isEmpty()) throw UnsupportedModel("Empty or special model: ${application.model}")
+            val quads = normalizeQuads(elements.flatMap { elementQuads(it, application) })
+            if (quads.isEmpty()) GeometryResolution.Unsupported("Model geometry is outside block bounds")
+            else GeometryResolution.Supported(ModelGeometry(quads))
         } catch (exception: UnsupportedModel) {
             GeometryResolution.Unsupported(exception.message ?: "Unsupported model")
         }
@@ -272,13 +270,14 @@ internal object BlockModels {
 
     private fun rawElementQuads(element: ModelElement, application: ModelApplication): List<GeometryQuad> {
         val corners = faceVertices(element.from, element.to)
-        return element.faces.mapNotNull { (face, cullFace) ->
+        return element.faces.flatMap { (face, cullFace) ->
             val vertices = corners[face] ?: throw IllegalArgumentException("Unknown model face: $face")
             val transformed = vertices.map { vertex ->
                 val elementVertex = element.rotation?.let { rotateElement(vertex, it) } ?: vertex
                 rotateState(elementVertex, application)
             }
-            normalizeQuad(transformed, cullFace?.let { rotateState(it, application) })
+            val transformedCullFace = cullFace?.let { rotateState(it, application) }
+            cropQuad(transformed).mapNotNull { normalizeQuad(it, transformedCullFace) }
         }
     }
 
@@ -312,6 +311,25 @@ internal object BlockModels {
                 )
             }
         }
+    }
+
+    private fun cropQuad(vertices: List<GeometryVertex>): List<List<GeometryVertex>> {
+        if (vertices.all { it.isInBlockBounds() }) return listOf(vertices)
+        val cropped = vertices.map { vertex ->
+            v(vertex.x.coerceIn(0.0, 1.0), vertex.y.coerceIn(0.0, 1.0), vertex.z.coerceIn(0.0, 1.0))
+        }
+        val normal = (cropped[1] - cropped[0]).cross(cropped[2] - cropped[0])
+        val planar = normal.length() <= epsilon ||
+            abs((cropped[3] - cropped[0]).dot(normal / normal.length())) <= epsilon * 2.0
+        if (planar) return listOf(cropped)
+        return listOf(
+            listOf(cropped[0], cropped[1], cropped[2], cropped[2]),
+            listOf(cropped[0], cropped[2], cropped[3], cropped[3])
+        )
+    }
+
+    private fun GeometryVertex.isInBlockBounds(): Boolean {
+        return x in 0.0..1.0 && y in 0.0..1.0 && z in 0.0..1.0
     }
 
     private fun faceVertices(from: GeometryVertex, to: GeometryVertex): Map<String, List<GeometryVertex>> {
@@ -381,15 +399,11 @@ internal object BlockModels {
 
     private fun normalizeQuads(quads: List<GeometryQuad>): List<GeometryQuad> {
         val normalized = quads.distinct().sorted()
-        if (normalized.any { quad ->
-                quad.vertices.any { vertex ->
-                    vertex.x < -epsilon || vertex.x > 1.0 + epsilon ||
-                        vertex.y < -epsilon || vertex.y > 1.0 + epsilon ||
-                        vertex.z < -epsilon || vertex.z > 1.0 + epsilon
-                }
-            }) {
-            throw UnsupportedModel("Model geometry extends outside block bounds")
-        }
+        require(normalized.all { quad ->
+            quad.vertices.all { vertex ->
+                vertex.x in 0.0..1.0 && vertex.y in 0.0..1.0 && vertex.z in 0.0..1.0
+            }
+        }) { "Clipped model geometry extends outside block bounds" }
         return normalized
     }
 
