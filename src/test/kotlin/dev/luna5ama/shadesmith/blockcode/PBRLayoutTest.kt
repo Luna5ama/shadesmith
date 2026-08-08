@@ -34,7 +34,7 @@ class PBRLayoutTest {
         val row = rows.single { it.first == BlockState(BlockNames.EndRod) }.second
         assertEquals(1, row.size)
         assertEquals("R32UI", row.single().format.name)
-        assertEquals(0x38B47F90u, decodePackedUInt(row.single()))
+        assertEquals(0x38E47F90u, decodePackedUInt(row.single()))
     }
 
     @Test
