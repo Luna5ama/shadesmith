@@ -146,6 +146,8 @@ class BlockModelGLSLTest {
         assertTrue(shader.contains("dot(normal, rayDir)"))
         assertTrue(shader.contains("cross(axis, normal)"))
         assertTrue(shader.contains("uint rotation = modelData & 0x1FFu;"))
+        assertTrue(shader.contains("_voxel_rotateBlockModelRay(rotation, rayOrigin, rayDir);"))
+        assertFalse(shader.contains("_voxel_rotateBlockModelComponent"))
         assertTrue(shader.contains("uint quadCount = (modelData >> 25u) & 0x3Fu;"))
         assertEquals(2, Regex("while \\(quadCount != 0u\\)").findAll(shader).count())
         assertTrue(shader.contains("--quadCount;"))
