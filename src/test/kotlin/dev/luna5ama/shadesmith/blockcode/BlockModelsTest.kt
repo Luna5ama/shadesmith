@@ -275,6 +275,23 @@ class BlockModelsTest {
     }
 
     @Test
+    fun `cropping preserves a valid triangle when the first three vertices collapse`() = withJar(
+        mapOf(
+            blockstate("cropped_triangle") to singleVariant("cropped_triangle"),
+            model("cropped_triangle") to """{"elements":[{
+              "from":[-16,0,0],"to":[8,16,16],
+              "rotation":{"x":0,"y":0,"z":45,"origin":[0,0,0]},
+              "faces":{"north":{}}}]}"""
+        )
+    ) { jar ->
+        val result = BlockModels.load(jar, properties("cropped_triangle"))
+
+        assertTrue(result.unsupported.isEmpty())
+        assertEquals(1, result.supported.single().quads.size)
+        assertEquals(3, result.supported.single().quads.single().vertices.distinct().size)
+    }
+
+    @Test
     fun `block bounds include exact edges and epsilon noise`() = withJar(
         mapOf(
             blockstate("boundary") to singleVariant("boundary"),

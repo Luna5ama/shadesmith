@@ -318,9 +318,14 @@ internal object BlockModels {
         val cropped = vertices.map { vertex ->
             v(vertex.x.coerceIn(0.0, 1.0), vertex.y.coerceIn(0.0, 1.0), vertex.z.coerceIn(0.0, 1.0))
         }
-        val normal = (cropped[1] - cropped[0]).cross(cropped[2] - cropped[0])
-        val planar = normal.length() <= epsilon ||
-            abs((cropped[3] - cropped[0]).dot(normal / normal.length())) <= epsilon * 2.0
+        val firstNormal = (cropped[1] - cropped[0]).cross(cropped[2] - cropped[0])
+        val secondNormal = (cropped[2] - cropped[0]).cross(cropped[3] - cropped[0])
+        val firstValid = firstNormal.length() > epsilon
+        val secondValid = secondNormal.length() > epsilon
+        if (!firstValid && !secondValid) return emptyList()
+        if (!firstValid) return listOf(listOf(cropped[0], cropped[2], cropped[3], cropped[3]))
+        if (!secondValid) return listOf(listOf(cropped[0], cropped[1], cropped[2], cropped[2]))
+        val planar = abs((cropped[3] - cropped[0]).dot(firstNormal / firstNormal.length())) <= epsilon * 2.0
         if (planar) return listOf(cropped)
         return listOf(
             listOf(cropped[0], cropped[1], cropped[2], cropped[2]),
