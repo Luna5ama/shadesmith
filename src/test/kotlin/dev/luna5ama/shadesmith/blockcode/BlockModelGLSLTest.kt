@@ -138,7 +138,7 @@ class BlockModelGLSLTest {
         }
 
         val shader = generated.shader
-        assertEquals(2, Regex("texelFetch\\(usam_blockModelQuads").findAll(shader).count())
+        assertEquals(4, Regex("texelFetch\\(usam_blockModelQuads").findAll(shader).count())
         assertTrue(shader.contains("ivec2 texelCoord = ivec2(int((modelData >> 8u) & 0x7FFEu), int((modelData >> 23u) & 3u));"))
         assertTrue(shader.contains("texelCoord.x += 2;"))
         assertTrue(shader.contains("texelCoord + ivec2(1, 0)"))
@@ -147,8 +147,14 @@ class BlockModelGLSLTest {
         assertTrue(shader.contains("cross(axis, normal)"))
         assertTrue(shader.contains("uint rotation = modelData & 0x1FFu;"))
         assertTrue(shader.contains("uint quadCount = (modelData >> 25u) & 0x3Fu;"))
-        assertTrue(shader.contains("while (quadCount != 0u)"))
+        assertEquals(2, Regex("while \\(quadCount != 0u\\)").findAll(shader).count())
         assertTrue(shader.contains("--quadCount;"))
+        assertTrue(shader.contains("vec3 inverseRayDir = 1.0 / rayDir;"))
+        assertTrue(shader.contains("float t = (origin[axis] - rayOrigin[axis]) * inverseRayDir[axis];"))
+        assertTrue(shader.contains("_voxel_intersectBlockModelAxisAlignedQuad(rayOrigin, rayDir, inverseRayDir"))
+        val axisIntersection = shader.substringAfter("bool _voxel_intersectBlockModelAxisAlignedQuad(")
+            .substringBefore("bool _voxel_intersectBlockModelQuad(")
+        assertFalse(axisIntersection.contains("axisAligned"))
         val intersection = shader.substringAfter("bool _voxel_intersectBlockModelQuad(")
             .substringBefore("bool voxel_intersectBlockModel(")
         assertFalse(intersection.contains("quadIndex"))
@@ -163,6 +169,7 @@ class BlockModelGLSLTest {
             assets()
         ).shader
         assertTrue(shader.contains("hitNormal = denominator < 0.0 ? normal : -normal;"))
+        assertTrue(shader.contains("hitNormal[axis] = inverseRayDir[axis] < 0.0 ? 1.0 : -1.0;"))
         assertEquals(vertex(0.0, 0.0, 1.0), assertNotNull(intersectQuad(
             vertex(0.5, 0.5, 1.0), vertex(0.0, 0.0, -1.0), cube().last()
         )).second)
