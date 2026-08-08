@@ -153,7 +153,9 @@ private fun expandBlockProperties(
         unsupportedByBlock[blockID]?.forEach { unsupported ->
             for ((state, property) in blockProperties) {
                 val selector = mergeSelectors(state.states, unsupported.selector) ?: continue
-                expanded += BlockState(blockID, selector) to property
+                // Model ID 0 has no precise intersection geometry. Keep visible unsupported
+                // states conservative instead of dropping them from the voxel tree.
+                expanded += BlockState(blockID, selector) to property.copy(isFullCube = true)
             }
         }
         val states = expanded.ifEmpty { blockProperties.map { it.key to it.value } }

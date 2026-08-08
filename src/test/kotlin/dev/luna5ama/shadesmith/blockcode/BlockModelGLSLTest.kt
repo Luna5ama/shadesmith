@@ -508,6 +508,8 @@ class BlockModelGLSLTest {
         assertEquals(0u, decode(palette.getValue(grassId).last()))
         assertEquals(modelPalette.modelIdByState.getValue(bottom.state), first.modelMetadataByMaterialId.getValue(slabId))
         assertTrue(first.modelMetadataByMaterialId.getValue(weightedId).all { it == 0u })
+        assertEquals(1u, decode(palette.getValue(weightedId)[1]) shr 4 and 1u)
+        assertEquals(1u, decode(palette.getValue(grassId)[1]) shr 4 and 1u)
     }
 
     @Test
