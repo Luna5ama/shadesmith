@@ -202,9 +202,10 @@ class BlockModelID(private val modelIds: Map<BlockState, UInt>) : PBRProvider<PB
     override val defaultValue: PBRValue.UInt32 = PBRValue.UInt32(0u)
 
     override fun BlockScope.provide(): Sequence<Pair<BlockState, PBRValue.UInt32>> = sequence {
-        yield(baseState to PBRValue.UInt32(modelIds[baseState] ?: 0u))
+        val value = PBRValue.UInt32(modelIds[baseState] ?: 0u)
+        yield(baseState to value)
         if (nameEquals(BlockNames.ShortGrass)) {
-            yield(BlockState("grass") to defaultValue)
+            yield(BlockState("grass") to value)
         }
     }
 }

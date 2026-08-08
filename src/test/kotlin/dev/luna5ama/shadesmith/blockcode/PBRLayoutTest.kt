@@ -4,7 +4,6 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 class PBRLayoutTest {
     private val fields = defaultPBRFields()
@@ -74,13 +73,14 @@ class PBRLayoutTest {
 
     @Test
     fun `assembler emits alias states from provider output`() {
-        val rows = assembler.provide(
-            BlockState(BlockNames.ShortGrass),
+        val state = BlockState(BlockNames.ShortGrass)
+        val rows = PBRAssembler(defaultPBRFields(mapOf(state to 37u))).provide(
+            state,
             BlockProperty(blockID = BlockNames.ShortGrass)
         ).toList()
 
-        assertTrue(rows.any { it.first == BlockState("grass") })
-        assertTrue(rows.any { it.first == BlockState(BlockNames.ShortGrass) })
+        assertEquals(37u, decodePackedUInt(rows.single { it.first == BlockState("grass") }.second.last()))
+        assertEquals(37u, decodePackedUInt(rows.single { it.first == state }.second.last()))
     }
 
     @Test
