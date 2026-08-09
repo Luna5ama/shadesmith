@@ -303,7 +303,9 @@ class BlockModelGLSLTest {
         ).shader
         assertTrue(shader.contains("if (!(t >= 0.0 && t <= hitT)) return false;"))
         assertTrue(shader.contains("float t = dot(normal, origin - rayOrigin) / denominator;"))
-        assertTrue(shader.contains("if (projected.x > halfSize.x || projected.y > halfSize.y) return false;"))
+        assertTrue(shader.contains("float projectedU = abs(dot(offset, u));"))
+        assertTrue(shader.contains("if (projectedU > halfSize.x) return false;"))
+        assertTrue(shader.contains("if (abs(dot(offset, v)) > halfSize.y) return false;"))
     }
 
     @Test
@@ -336,7 +338,9 @@ class BlockModelGLSLTest {
         ).shader
         assertFalse(shader.contains("abs(denominator) <= 1e-8"))
         assertTrue(shader.contains("vec2 halfSize = normalYZHalfSize.zw + 1e-6;"))
-        assertTrue(shader.contains("if (projected.x > halfSize.x || projected.y > halfSize.y) return false;"))
+        assertTrue(shader.contains("float projectedU = abs(dot(offset, u));"))
+        assertTrue(shader.contains("if (projectedU > halfSize.x) return false;"))
+        assertTrue(shader.contains("if (abs(dot(offset, v)) > halfSize.y) return false;"))
     }
 
     @Test
