@@ -152,7 +152,7 @@ class BlockModelGLSLTest {
         assertEquals(2, Regex("while \\(quadCount != 0u\\)").findAll(shader).count())
         assertTrue(shader.contains("--quadCount;"))
         assertTrue(shader.contains("vec3 inverseRayDir = 1.0 / rayDir;"))
-        assertTrue(shader.contains("float t = (origin[axis] - rayOrigin[axis]) * inverseRayDir[axis];"))
+        assertTrue(shader.contains("t = (origin.x - rayOrigin.x) * inverseRayDir.x;"))
         assertTrue(shader.contains("_voxel_intersectBlockModelAxisAlignedQuad(rayOrigin, rayDir, inverseRayDir"))
         val axisIntersection = shader.substringAfter("bool _voxel_intersectBlockModelAxisAlignedQuad(")
             .substringBefore("bool _voxel_intersectBlockModelQuad(")
@@ -171,7 +171,7 @@ class BlockModelGLSLTest {
             assets()
         ).shader
         assertTrue(shader.contains("hitNormal = denominator < 0.0 ? normal : -normal;"))
-        assertTrue(shader.contains("hitNormal[axis] = inverseRayDir[axis] < 0.0 ? 1.0 : -1.0;"))
+        assertTrue(shader.contains("normal.x = inverseRayDir.x < 0.0 ? 1.0 : -1.0;"))
         assertEquals(vertex(0.0, 0.0, 1.0), assertNotNull(intersectQuad(
             vertex(0.5, 0.5, 1.0), vertex(0.0, 0.0, -1.0), cube().last()
         )).second)
