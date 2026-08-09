@@ -388,6 +388,8 @@ class BlockModelGLSLTest {
         assertTrue(first.shader.contains("_voxel_unrotateBlockModelVector"))
         val modelFunction = first.shader.substringAfter("bool voxel_intersectBlockModel(")
         assertEquals(1, Regex("(?m)^    bool hit = false;$").findAll(modelFunction).count())
+        assertTrue(modelFunction.contains("hit = hitT != uintBitsToFloat(0x7F800000u);"))
+        assertEquals(1, Regex("\\|\\| hit").findAll(modelFunction).count())
         assertEquals(1, Regex("_voxel_unrotateBlockModelVector").findAll(modelFunction).count())
         assertEquals(1, modelFunction.lineSequence().count { it.trimStart().startsWith("return ") })
         assertFalse(modelFunction.contains("modelID"))
