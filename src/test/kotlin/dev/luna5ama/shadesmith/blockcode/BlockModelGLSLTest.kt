@@ -580,7 +580,7 @@ class BlockModelGLSLTest {
         val intersection = generated.shader.substringAfter("bool _voxel_intersectBlockModelQuad(")
             .substringBefore("bool voxel_intersectBlockModel(")
         assertFalse(intersection.contains("normalize"))
-        assertTrue(generated.shader.contains("normalize(hitNormal)"))
+        assertTrue(generated.shader.contains("if (!axisAligned) hitNormal = normalize(hitNormal);"))
     }
 
     private data class FixtureState(val model: ExpandedGeometryState, val materialId: Int)
