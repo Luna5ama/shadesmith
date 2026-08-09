@@ -170,7 +170,8 @@ class BlockModelGLSLTest {
             BlockModelPalette(emptyMap(), emptyList(), emptyList(), emptyList(), emptyList()),
             assets()
         ).shader
-        assertTrue(shader.contains("hitNormal = denominator < 0.0 ? normal : -normal;"))
+        assertTrue(shader.contains("hitNormal = normal;"))
+        assertTrue(shader.contains("if (dot(hitNormal, rayDir) > 0.0) hitNormal = -hitNormal;"))
         assertTrue(shader.contains("normal.x = inverseRayDir.x < 0.0 ? 1.0 : -1.0;"))
         assertEquals(vertex(0.0, 0.0, 1.0), assertNotNull(intersectQuad(
             vertex(0.5, 0.5, 1.0), vertex(0.0, 0.0, -1.0), cube().last()
@@ -584,7 +585,8 @@ class BlockModelGLSLTest {
         val intersection = generated.shader.substringAfter("bool _voxel_intersectBlockModelQuad(")
             .substringBefore("bool voxel_intersectBlockModel(")
         assertFalse(intersection.contains("normalize"))
-        assertTrue(generated.shader.contains("if (!axisAligned) hitNormal = normalize(hitNormal);"))
+        assertTrue(generated.shader.contains("hitNormal = normal;"))
+        assertTrue(Regex("""if \(!axisAligned\) \{\s*hitNormal = normalize\(hitNormal\);\s*if \(dot\(hitNormal, rayDir\) > 0\.0\) hitNormal = -hitNormal;\s*\}""").containsMatchIn(generated.shader))
     }
 
     private data class FixtureState(val model: ExpandedGeometryState, val materialId: Int)
