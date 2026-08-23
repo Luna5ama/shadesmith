@@ -25,7 +25,6 @@ internal data class ShaderBlockSignature(val body: String, val instance: String)
 
 internal data class ShaderAbiContract(
     val entries: Map<ShaderAbiKey, ShaderAbiEntry>,
-    val builtIns: Set<String>,
     val workGroupSize: Triple<Int, Int, Int>?,
     val stageLayouts: Set<String>,
 )
@@ -42,6 +41,7 @@ internal data class OpenGlShaderPatch(
     val compilerSource: String,
     val originalVersion: String,
     val generatedLayouts: List<GeneratedShaderLayout>,
+    val restorableTypeDeclarations: Map<String, String>,
     val restorableDeclarations: Map<ShaderAbiKey, String>,
     val restoredDirectives: List<String>,
     val restoredIrisContracts: List<String>,
@@ -72,7 +72,6 @@ internal class OpenGlShaderPatcher {
         protectedSource: ProtectedPreprocessorSource,
         stage: ShaderStage,
         preferredLayouts: List<GeneratedShaderLayout> = emptyList(),
-        alwaysRestorableResources: Set<String> = emptySet(),
     ): OpenGlShaderPatch {
         val source = normalizeLineEndings(protectedSource.compilerSource())
         val versionDirectives = protectedSource.directives.filter {
@@ -122,10 +121,16 @@ internal class OpenGlShaderPatcher {
             compilerSource = normalizeOutput(compilerSource),
             originalVersion = originalVersion,
             generatedLayouts = generatedLayouts,
+            restorableTypeDeclarations = collectRestorableTypeDeclarations(
+                source,
+                protectedSource.sourceName,
+                stage,
+            ),
             restorableDeclarations = collectRestorableDeclarations(
                 source,
                 originalDeclarations,
-                alwaysRestorableResources,
+                protectedSource.sourceName,
+                stage,
             ),
             restoredDirectives = collectRestoredDirectives(protectedSource),
             restoredIrisContracts = collectIrisSourceContracts(
@@ -153,7 +158,7 @@ internal class OpenGlShaderPatcher {
             }
             restored = removeGeneratedLayout(restored, declaration, generated, patch)
         }
-        restored = restoreMissingDeclarations(restored, patch)
+        restored = restoreDeclarations(restored, patch)
         restored = restoreMissingQualifiers(restored, patch)
         restored = restoreSourceContracts(restored, patch)
         validateContract(restored, patch)
@@ -219,14 +224,6 @@ internal class OpenGlShaderPatcher {
             }
         }
 
-        if (!actual.builtIns.containsAll(expected.builtIns)) {
-            fail(
-                patch.sourceName,
-                patch.stage,
-                null,
-                "built-ins disappeared after round-trip: ${(expected.builtIns - actual.builtIns).sorted()}",
-            )
-        }
         if (actual.workGroupSize != expected.workGroupSize) {
             fail(
                 patch.sourceName,
@@ -414,23 +411,38 @@ internal class OpenGlShaderPatcher {
         return result
     }
 
-    private fun restoreMissingDeclarations(source: String, patch: OpenGlShaderPatch): String {
-        val actualKeys = parseDeclarations(source).mapTo(mutableSetOf()) { it.key }
-        val missing = patch.originalContract.entries.keys.filterNot { it in actualKeys }
-        val declarations = missing.mapNotNull { patch.restorableDeclarations[it] }
-        if (declarations.isEmpty()) return source
+    private fun restoreDeclarations(source: String, patch: OpenGlShaderPatch): String {
+        val actual = parseDeclarations(source).associateBy { it.key }
+        val replacements = patch.restorableDeclarations.mapNotNull { (key, original) ->
+            actual[key]?.takeIf { it.key.kind !in BLOCK_KINDS }?.let { declaration ->
+                declarationSourceRange(source, declaration, patch.sourceName, patch.stage) to original
+            }
+        }
+        var result = source
+        replacements.sortedByDescending { it.first.first }.forEach { (range, original) ->
+            result = result.replaceRange(range, original)
+        }
 
-        val version = VERSION_REGEX.find(source)
+        val existingTypes = parseTypeDeclarationNames(result)
+        val typeDeclarations = patch.restorableTypeDeclarations.filterKeys { it !in existingTypes }.values
+        val declarations = patch.restorableDeclarations.filterKeys { it !in actual }.values
+        if (typeDeclarations.isEmpty() && declarations.isEmpty()) return result
+
+        val version = VERSION_REGEX.find(result)
             ?: fail(patch.sourceName, patch.stage, null, "spirv-cross output has no #version directive")
         val insertionOffset = version.range.last + 1
         val insertion = buildString {
             append('\n')
+            typeDeclarations.forEach {
+                append(it)
+                if (!it.endsWith('\n')) append('\n')
+            }
             declarations.forEach {
                 append(it)
                 if (!it.endsWith('\n')) append('\n')
             }
         }
-        return source.substring(0, insertionOffset) + insertion + source.substring(insertionOffset)
+        return result.substring(0, insertionOffset) + insertion + result.substring(insertionOffset)
     }
 
     private fun restoreMissingQualifiers(source: String, patch: OpenGlShaderPatch): String {
@@ -516,17 +528,38 @@ internal class OpenGlShaderPatcher {
     private fun collectRestorableDeclarations(
         source: String,
         declarations: List<ParsedDeclaration>,
-        alwaysRestorableResources: Set<String>,
+        sourceName: String,
+        stage: ShaderStage,
     ): Map<ShaderAbiKey, String> {
+        return declarations.associate { declaration ->
+            declaration.key to source.substring(declarationSourceRange(source, declaration, sourceName, stage))
+        }
+    }
+
+    private fun collectRestorableTypeDeclarations(
+        source: String,
+        sourceName: String,
+        stage: ShaderStage,
+    ): Map<String, String> {
         val lexicalMap = buildLexicalMap(source)
-        return declarations.filter { declaration ->
-            declaration.key.kind !in BLOCK_KINDS && (
-                declaration.key.name in alwaysRestorableResources ||
-                    Regex("\\b${Regex.escape(declaration.key.name)}\\b").findAll(source).none { reference ->
-                        reference.range.first !in declaration.range && lexicalMap.code[reference.range.first]
-                    }
-            )
-        }.associate { declaration -> declaration.key to source.substring(declaration.range) }
+        val declarations = STRUCT_DECLARATION_REGEX.findAll(source)
+            .filter { lexicalMap.isTopLevelCode(it.range.first) }
+            .map { match ->
+                val range = bracedDeclarationRange(source, match.range.first, "struct ${match.groupValues[1]}", sourceName, stage)
+                match.groupValues[1] to source.substring(range)
+            }
+            .toList()
+        if (declarations.map { it.first }.toSet().size != declarations.size) {
+            fail(sourceName, stage, null, "duplicate top-level struct declarations are unsupported")
+        }
+        return declarations.toMap(linkedMapOf())
+    }
+
+    private fun parseTypeDeclarationNames(source: String): Set<String> {
+        val lexicalMap = buildLexicalMap(source)
+        return STRUCT_DECLARATION_REGEX.findAll(source)
+            .filter { lexicalMap.isTopLevelCode(it.range.first) }
+            .mapTo(linkedSetOf()) { it.groupValues[1] }
     }
 
     private fun patchIrisCompilerDeclarations(source: String, sourceName: String, stage: ShaderStage): String {
@@ -631,7 +664,6 @@ internal class OpenGlShaderPatcher {
 
         return ShaderAbiContract(
             entries = entries,
-            builtIns = BUILTIN_REGEX.findAll(code).mapTo(mutableSetOf()) { it.value },
             workGroupSize = workGroup,
             stageLayouts = stageLayouts,
         )
@@ -644,6 +676,32 @@ internal class OpenGlShaderPatcher {
         stage: ShaderStage,
     ): ShaderBlockSignature? {
         if (declaration.key.kind !in BLOCK_KINDS) return null
+        val range = blockDeclarationRange(source, declaration, sourceName, stage)
+        return ShaderBlockSignature(
+            body = canonicalizeIntegerArraySizes(
+                stripComments(source.substring(range.openBrace, range.closeBrace + 1))
+                    .replace(WHITESPACE_REGEX, ""),
+            ),
+            instance = stripComments(source.substring(range.closeBrace + 1, range.semicolon)).replace(WHITESPACE_REGEX, ""),
+        )
+    }
+
+    private fun declarationSourceRange(
+        source: String,
+        declaration: ParsedDeclaration,
+        sourceName: String,
+        stage: ShaderStage,
+    ): IntRange {
+        if (declaration.key.kind !in BLOCK_KINDS) return declaration.range
+        return declaration.range.first..blockDeclarationRange(source, declaration, sourceName, stage).semicolon
+    }
+
+    private fun blockDeclarationRange(
+        source: String,
+        declaration: ParsedDeclaration,
+        sourceName: String,
+        stage: ShaderStage,
+    ): BlockDeclarationRange {
         val lexicalMap = buildLexicalMap(source)
         val openBrace = source.indexOf('{', declaration.range.first)
         val closeBrace = (openBrace + 1 until source.length).firstOrNull { offset ->
@@ -662,10 +720,35 @@ internal class OpenGlShaderPatcher {
             sourceLine(source, declaration.range.first),
             "${declaration.key.kind}:${declaration.key.name} block has no terminating semicolon",
         )
-        return ShaderBlockSignature(
-            body = stripComments(source.substring(openBrace, closeBrace + 1)).replace(WHITESPACE_REGEX, ""),
-            instance = stripComments(source.substring(closeBrace + 1, semicolon)).replace(WHITESPACE_REGEX, ""),
+        return BlockDeclarationRange(openBrace, closeBrace, semicolon)
+    }
+
+    private fun bracedDeclarationRange(
+        source: String,
+        start: Int,
+        description: String,
+        sourceName: String,
+        stage: ShaderStage,
+    ): IntRange {
+        val lexicalMap = buildLexicalMap(source)
+        val openBrace = source.indexOf('{', start)
+        val closeBrace = (openBrace + 1 until source.length).firstOrNull { offset ->
+            source[offset] == '}' && lexicalMap.isCode(offset) && lexicalMap.depth[offset] == 1
+        } ?: fail(
+            sourceName,
+            stage,
+            sourceLine(source, start),
+            "unterminated $description declaration",
         )
+        val semicolon = (closeBrace + 1 until source.length).firstOrNull { offset ->
+            source[offset] == ';' && lexicalMap.isTopLevelCode(offset)
+        } ?: fail(
+            sourceName,
+            stage,
+            sourceLine(source, start),
+            "$description declaration has no terminating semicolon",
+        )
+        return start..semicolon
     }
 
     private fun blockSignatureCompatible(
@@ -1018,6 +1101,8 @@ internal class OpenGlShaderPatcher {
             get() = if (value == null) key else "$key = $value"
     }
 
+    private data class BlockDeclarationRange(val openBrace: Int, val closeBrace: Int, val semicolon: Int)
+
     private data class SourceInsertion(val offset: Int, val text: String)
     private data class IrisSourceContract(val range: IntRange, val text: String)
     private data class LexicalMap(val depth: IntArray, val code: BooleanArray) {
@@ -1034,13 +1119,15 @@ internal class OpenGlShaderPatcher {
             "(?m)^([\\t ]*)(?:(layout\\s*\\(([^)\\r\\n]*)\\)\\s*))?" +
                 "((?:$QUALIFIER\\s+)*)(uniform|in|out)\\s+((?:$QUALIFIER\\s+)*)" +
                 "([A-Za-z_][A-Za-z0-9_]*)\\s+([A-Za-z_][A-Za-z0-9_]*)" +
-                "(\\s*(?:\\[[^]\\r\\n]*])*)\\s*;"
+                "(\\s*(?:\\[[^]\\r\\n]*])*)[\\t ]*(?:=[\\t ]*([^;\\r\\n]+))?[\\t ]*;"
             ).toRegex()
         private val BLOCK_DECLARATION_REGEX = (
             "(?m)^([\\t ]*)(?:(layout\\s*\\(([^)\\r\\n]*)\\)\\s*))?" +
                 "((?:$QUALIFIER\\s+)*)(uniform|buffer)\\s+((?:$QUALIFIER\\s+)*)" +
                 "([A-Za-z_][A-Za-z0-9_]*)\\s*\\{"
             ).toRegex()
+        private val STRUCT_DECLARATION_REGEX =
+            "(?m)^[\\t ]*struct\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*\\{".toRegex()
         private val CUSTOM_INTERFACE_BLOCK_REGEX = (
             "(?m)^[\\t ]*(?:layout\\s*\\([^)\\r\\n]*\\)\\s*)?(?:(?:$QUALIFIER)\\s+)*" +
                 "(?:in|out)\\s+[A-Za-z_][A-Za-z0-9_]*\\s*\\{"
@@ -1097,7 +1184,6 @@ internal class OpenGlShaderPatcher {
         private val STAGE_LAYOUT_REGEX =
             """(?m)^\s*layout\s*\(([^)]*)\)\s*(in|out)\s*;""".toRegex()
         private val MAIN_REGEX = """\bvoid\s+main\s*\(""".toRegex()
-        private val BUILTIN_REGEX = """\bgl_[A-Za-z_][A-Za-z0-9_]*\b""".toRegex()
         private val MATRIX_TYPE_REGEX = """(?:d?mat|f16mat)([234])(?:x[234])?""".toRegex()
         private val ARRAY_SIZE_REGEX = """\[\s*(\d+)\s*]""".toRegex()
         private val SIZED_ARRAY_SUFFIX = """\[\d+]""".toRegex()
@@ -1113,3 +1199,93 @@ internal class OpenGlShaderPatcher {
         private val BLOCK_KINDS = setOf(ShaderAbiKind.UNIFORM_BLOCK, ShaderAbiKind.STORAGE_BLOCK)
     }
 }
+
+private fun canonicalizeIntegerArraySizes(source: String): String {
+    return INTEGER_ARRAY_SIZE.replace(source) { match ->
+        val value = IntegerConstantExpressionParser(match.groupValues[1]).parse() ?: return@replace match.value
+        "[$value]"
+    }
+}
+
+private class IntegerConstantExpressionParser(private val source: String) {
+    private var cursor = 0
+
+    fun parse(): Long? {
+        return try {
+            val value = parseExpression()
+            skipWhitespace()
+            value.takeIf { cursor == source.length }
+        } catch (_: ArithmeticException) {
+            null
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+
+    private fun parseExpression(): Long {
+        var value = parseTerm()
+        while (true) {
+            value = when {
+                consume('+') -> Math.addExact(value, parseTerm())
+                consume('-') -> Math.subtractExact(value, parseTerm())
+                else -> return value
+            }
+        }
+    }
+
+    private fun parseTerm(): Long {
+        var value = parseUnary()
+        while (true) {
+            value = when {
+                consume('*') -> Math.multiplyExact(value, parseUnary())
+                consume('/') -> value / parseUnary()
+                consume('%') -> value % parseUnary()
+                else -> return value
+            }
+        }
+    }
+
+    private fun parseUnary(): Long {
+        return when {
+            consume('+') -> parseUnary()
+            consume('-') -> Math.negateExact(parseUnary())
+            else -> parsePrimary()
+        }
+    }
+
+    private fun parsePrimary(): Long {
+        if (consume('(')) {
+            val value = parseExpression()
+            require(consume(')'))
+            return value
+        }
+        skipWhitespace()
+        val start = cursor
+        val radix = if (source.startsWith("0x", cursor, ignoreCase = true)) {
+            cursor += 2
+            16
+        } else {
+            10
+        }
+        val digitsStart = cursor
+        while (cursor < source.length && source[cursor].digitToIntOrNull(radix) != null) cursor++
+        require(cursor > digitsStart)
+        val digits = source.substring(digitsStart, cursor)
+        while (cursor < source.length && source[cursor] in "uUlL") cursor++
+        require(cursor > start)
+        return digits.toLong(radix)
+    }
+
+    private fun consume(expected: Char): Boolean {
+        skipWhitespace()
+        if (source.getOrNull(cursor) != expected) return false
+        cursor++
+        return true
+    }
+
+    private fun skipWhitespace() {
+        while (source.getOrNull(cursor)?.isWhitespace() == true) cursor++
+    }
+}
+
+private val INTEGER_ARRAY_SIZE = """\[([^]]+)]""".toRegex()

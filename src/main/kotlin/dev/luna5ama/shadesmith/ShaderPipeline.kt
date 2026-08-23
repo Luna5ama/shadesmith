@@ -23,7 +23,7 @@ internal class ShaderPipeline(
     fun optimize(inputFiles: List<ShaderFile>): List<OptimizedShaderFile> {
         return inputFiles.map { file ->
             val sourceName = file.path.toString().replace('\\', '/')
-            val stage = ShaderStage.fromPath(file.path)
+            val stage = ShaderStage.fromEntryPoint(file.path, file.code)
             val protection = PreprocessorProtection.protect(file.code, sourceName)
             val variants = if (protection.compilerBlockers.isEmpty()) {
                 emptyList()

@@ -25,7 +25,8 @@ For every discovered stage, Shadesmith performs these steps before replacing any
 1. expand `#include` directives while retaining Iris settings and macro contracts;
 2. materialize every protected conditional branch needed for conservative setting coverage;
 3. patch only the compiler copy for OpenGL SPIR-V compatibility;
-4. compile with `glslang --target-env opengl`;
+4. compile with `glslang --target-env opengl --target-env spirv1.3`, retaining OpenGL semantics while supporting
+   subgroup operations;
 5. run `spirv-opt` with `--eliminate-dead-branches`, `--merge-return`,
    `--inline-entry-points-exhaustive`, `--scalar-replacement=0`, `--ssa-rewrite`,
    `--simplify-instructions`, `--eliminate-dead-inserts`, `--eliminate-dead-functions`,
@@ -41,6 +42,14 @@ remain source-visible, the include-expanded source is emitted with those directi
 come from every optimized materialized variant. Logical Textile accesses use temporary, per-texture resource markers in
 the compiler copies so dead functions and dead branches disappear before lifetime analysis; those markers are never
 written to the emitted shader.
+
+Standard stage suffixes determine the compiler stage. A root `.glsl` Voxy hook declaring `voxy_emitFragment` is handled
+as a fragment-stage integration entry; other suffixless entry contracts fail instead of guessing. Clang-only branch
+materialization normalizes token paste before an opening delimiter, while the source-visible macro body remains exact.
+Only `SETTING_` conditionals are varied; host integration guards keep the current source macro environment, and an
+enumerated option domain does not create an impossible fallthrough variant. Original stage, uniform, resource-block,
+and dependent struct declarations are restored, including legal uniform initializers, when SPIR-V optimization removes
+them with dead code. Workgroup and stage layouts remain strict ABI checks while constant built-in references may fold.
 
 ## Diagnostics
 

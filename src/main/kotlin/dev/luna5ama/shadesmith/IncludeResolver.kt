@@ -108,7 +108,7 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
     return inputFiles.parallelStream()
         .map { resolve(prepareForPreprocessor(it), mutableSetOf()) }
         .map { file ->
-            val stage = ShaderStage.fromPath(file.path)
+            val stage = ShaderStage.fromEntryPoint(file.path, file.code)
             val proc = try {
                 ProcessBuilder()
                     .command("clang", "-C", "-E", "-P", "-Wno-microsoft-include", "-")
@@ -125,11 +125,11 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
                 it.write(file.code.encodeToByteArray())
             }
 
-            file to proc
+            Triple(file, stage, proc)
         }
         .toList()
         .parallelStream()
-        .map { (file, proc) ->
+        .map { (file, stage, proc) ->
             val newCode = proc.inputStream.bufferedReader().use {
                 it.readText()
             }
@@ -138,13 +138,13 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
             } catch (e: InterruptedException) {
                 Thread.currentThread().interrupt()
                 throw IllegalStateException(
-                    "${file.path} [${ShaderStage.fromPath(file.path).glslangName}] " +
+                    "${file.path} [${stage.glslangName}] " +
                         "was interrupted during clang include expansion",
                     e,
                 )
             }
             check(exitCode == 0) {
-                "${file.path} [${ShaderStage.fromPath(file.path).glslangName}] " +
+                "${file.path} [${stage.glslangName}] " +
                     "failed during clang include expansion with exit code $exitCode"
             }
 

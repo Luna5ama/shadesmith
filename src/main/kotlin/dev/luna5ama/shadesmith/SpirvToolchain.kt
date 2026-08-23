@@ -29,6 +29,16 @@ internal enum class ShaderStage(val glslangName: String) {
                 else -> throw IllegalArgumentException("Cannot infer shader stage from ${path.name}")
             }
         }
+
+        fun fromEntryPoint(path: Path, source: String): ShaderStage {
+            return if (path.extension.equals("glsl", ignoreCase = true) && VOXY_FRAGMENT_HOOK.containsMatchIn(source)) {
+                FRAGMENT
+            } else {
+                fromPath(path)
+            }
+        }
+
+        private val VOXY_FRAGMENT_HOOK = """\bvoid\s+voxy_emitFragment\s*\(""".toRegex()
     }
 }
 
@@ -148,6 +158,8 @@ internal class SpirvToolchain(
                 executables.glslang,
                 "--target-env",
                 "opengl",
+                "--target-env",
+                "spirv1.3",
                 "-S",
                 stage.glslangName,
                 "-o",

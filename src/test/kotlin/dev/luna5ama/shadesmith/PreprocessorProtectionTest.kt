@@ -130,6 +130,24 @@ class PreprocessorProtectionTest {
     }
 
     @Test
+    fun evaluatesGeneratedCompilerConditionalsOnlyOnTheExplicitValidationPath() {
+        val source = """
+            #version 460
+            #if defined(GL_KHR_shader_subgroup_basic)
+            #extension GL_KHR_shader_subgroup_basic : require
+            #else
+            #error subgroup support is required
+            #endif
+            void main() {}
+        """.trimIndent()
+
+        assertTrue(PreprocessorProtection.protect(source, "generated.glsl").compilerBlockers.isNotEmpty())
+        val generated = PreprocessorProtection.protectGeneratedCompilerSource(source, "generated.glsl")
+        assertTrue(generated.compilerBlockers.isEmpty())
+        assertTrue(generated.directives.all { it.disposition == PreprocessorDisposition.EVALUATED })
+    }
+
+    @Test
     fun allowsConstSpecializationNestedInsideAPStyleIncludeGuard() {
         val source = """
             #ifndef INCLUDE_Texture_glsl

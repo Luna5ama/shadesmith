@@ -134,6 +134,21 @@ internal object PreprocessorProtection {
     private const val CONST_MARKER = "/*const*/"
 
     fun protect(source: String, sourceName: String = "<shader>"): ProtectedPreprocessorSource {
+        return protect(source, sourceName, evaluateCompilerDirectives = false)
+    }
+
+    fun protectGeneratedCompilerSource(
+        source: String,
+        sourceName: String = "<shader>",
+    ): ProtectedPreprocessorSource {
+        return protect(source, sourceName, evaluateCompilerDirectives = true)
+    }
+
+    private fun protect(
+        source: String,
+        sourceName: String,
+        evaluateCompilerDirectives: Boolean,
+    ): ProtectedPreprocessorSource {
         require(sourceName.isNotBlank()) { "Preprocessor source name cannot be blank" }
 
         val lines = lexPhysicalLines(source)
@@ -186,7 +201,10 @@ internal object PreprocessorProtection {
             val exactText = directiveLines.joinToString("") { it.fullText }
             val parsed = parseDirective(exactText, directiveStart, sourceName, line.number)
             val inConstRegion = constRegion != null
-            val disposition = if (inConstRegion && parsed.kind != PreprocessorDirectiveKind.DISABLED_DEFINE) {
+            val disposition = if (
+                (inConstRegion || evaluateCompilerDirectives) &&
+                parsed.kind != PreprocessorDirectiveKind.DISABLED_DEFINE
+            ) {
                 PreprocessorDisposition.EVALUATED
             } else {
                 PreprocessorDisposition.RESTORED

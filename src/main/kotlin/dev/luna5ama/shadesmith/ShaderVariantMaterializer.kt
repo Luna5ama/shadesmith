@@ -70,8 +70,8 @@ internal class ShaderVariantMaterializer(
         targets.forEach { target ->
             val forcedBranches = if (target == null) emptyMap() else structure.pathTo(target)
             val forcedSource = forceBranches(probe.source, probeProtection.directives, structure, forcedBranches)
-            val coverage = forcedBranches.mapTo(linkedSetOf()) { (conditionalId, branchIndex) ->
-                PreprocessorBranchSelection(conditionalId, branchIndex)
+            val coverage = forcedBranches.mapNotNullTo(linkedSetOf()) { (conditionalId, branchIndex) ->
+                PreprocessorBranchSelection(conditionalId, branchIndex).takeIf { it in requiredBranches }
             }
             val name = target?.let { "branch-${it.conditionalId}-${it.branchIndex}" } ?: "default"
             val existing = specifications[forcedSource]
@@ -114,7 +114,7 @@ internal class ShaderVariantMaterializer(
         val stdoutPath = artifactDirectory.resolve("clang.stdout.log")
         val stderrPath = artifactDirectory.resolve("clang.stderr.log")
         inputPath.writeText(source)
-        val clangSource = protectGlslDirectives(source)
+        val clangSource = protectGlslDirectives(normalizePunctuationTokenPaste(source))
         clangInputPath.writeText(clangSource.source)
         Files.deleteIfExists(outputPath)
         Files.writeString(stdoutPath, "")
@@ -215,6 +215,10 @@ internal class ShaderVariantMaterializer(
 
     private fun restoreGlslDirectives(source: String, namespace: String): String {
         return source.replace("//$namespace", "")
+    }
+
+    private fun normalizePunctuationTokenPaste(source: String): String {
+        return TOKEN_PASTE_BEFORE_OPENING_DELIMITER.replace(source, "")
     }
 
     private fun failure(
@@ -320,6 +324,7 @@ internal class ShaderVariantMaterializer(
         private val LINE_ENDING = "\\r\\n|\\n|\\r".toRegex()
         private val PROTECTED_GLSL_DIRECTIVE =
             "(?m)^([ \\t]*)(#(?:version|extension|pragma|line)\\b)".toRegex()
+        private val TOKEN_PASTE_BEFORE_OPENING_DELIMITER = """##(?=[ \t]*[({\[])""".toRegex()
         private val CONDITIONAL_TEST_DIRECTIVES = PREPROCESSOR_CONDITIONAL_OPENERS + PreprocessorDirectiveKind.ELIF
     }
 }
@@ -338,13 +343,70 @@ internal fun requiredPreprocessorBranches(
                     it.kind == PreprocessorDirectiveKind.ELIF ||
                     it.kind == PreprocessorDirectiveKind.ELSE
             }
+            if (branchDirectives.none { PreprocessorFeature.SETTING in it.features }) return@forEach
             branchDirectives.indices.forEach { branchIndex ->
                 add(PreprocessorBranchSelection(conditionalId, branchIndex))
             }
-            if (branchDirectives.none { it.kind == PreprocessorDirectiveKind.ELSE }) {
+            if (
+                branchDirectives.none { it.kind == PreprocessorDirectiveKind.ELSE } &&
+                !hasExhaustiveOptionDomain(branchDirectives, protection.directives)
+            ) {
                 add(PreprocessorBranchSelection(conditionalId, branchDirectives.size))
             }
         }
+    }
+}
+
+private fun hasExhaustiveOptionDomain(
+    branchDirectives: List<PreprocessorDirective>,
+    directives: List<PreprocessorDirective>,
+): Boolean {
+    if (branchDirectives.isEmpty() || branchDirectives.any { it.kind == PreprocessorDirectiveKind.ELSE }) return false
+
+    val domains = directives.asSequence()
+        .filter { it.kind == PreprocessorDirectiveKind.DEFINE && it.macroName != null }
+        .mapNotNull { directive ->
+            optionDomain(directive.macroBody.orEmpty())?.let { directive.macroName!! to it }
+        }
+        .groupBy({ it.first }, { it.second })
+        .mapValues { (_, values) -> values.distinct().singleOrNull() }
+        .filterValues { it != null }
+        .mapValues { (_, value) -> value!! }
+    val comparisons = branchDirectives.map { directive ->
+        optionEquality(directive.exactText, domains.keys) ?: return false
+    }
+    val macroName = comparisons.first().first
+    if (comparisons.any { it.first != macroName }) return false
+    val domain = domains[macroName] ?: return false
+    val coveredValues = comparisons.mapTo(hashSetOf()) { it.second }
+    return domain.isNotEmpty() && domain.all { it in coveredValues }
+}
+
+private fun optionDomain(macroBody: String): Set<String>? {
+    val values = OPTION_DOMAIN.find(macroBody)?.groupValues?.get(1)
+        ?.trim()
+        ?.split(WHITESPACE)
+        ?.filterTo(linkedSetOf()) { it.isNotEmpty() }
+    return values?.takeIf { it.isNotEmpty() }
+}
+
+private fun optionEquality(
+    directiveText: String,
+    optionMacros: Set<String>,
+): Pair<String, String>? {
+    val expression = CONDITIONAL_EXPRESSION.find(
+        directiveText
+            .replace("\\\r\n", "")
+            .replace("\\\n", "")
+            .replace("\\\r", ""),
+    )?.groupValues?.get(1)?.substringBefore("//")?.trim() ?: return null
+    val match = SIMPLE_EQUALITY.matchEntire(expression) ?: return null
+    val left = match.groupValues[1]
+    val right = match.groupValues[2]
+    return when {
+        left in optionMacros && right !in optionMacros -> left to right
+        right in optionMacros && left !in optionMacros -> right to left
+        else -> null
     }
 }
 
@@ -353,6 +415,11 @@ private val PREPROCESSOR_CONDITIONAL_OPENERS = setOf(
     PreprocessorDirectiveKind.IFDEF,
     PreprocessorDirectiveKind.IFNDEF,
 )
+private val OPTION_DOMAIN = """//\s*\[([^]\r\n]+)]""".toRegex()
+private val WHITESPACE = """\s+""".toRegex()
+private val CONDITIONAL_EXPRESSION = """(?s)^\s*#\s*(?:if|elif)\b(.*)$""".toRegex()
+private const val OPTION_TOKEN = """(?:[A-Za-z_][A-Za-z0-9_]*|[-+]?(?:0[xX][0-9A-Fa-f]+|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)[uUlLfF]?)"""
+private val SIMPLE_EQUALITY = """\s*\(*\s*($OPTION_TOKEN)\s*==\s*($OPTION_TOKEN)\s*\)*\s*""".toRegex()
 
 private fun String.asMaterializerDiagnosticArgument(): String {
     if (none { it.isWhitespace() || it == '"' }) return this

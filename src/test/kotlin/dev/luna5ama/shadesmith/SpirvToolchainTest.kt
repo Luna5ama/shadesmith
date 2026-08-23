@@ -31,6 +31,13 @@ class SpirvToolchainTest {
         assertFailsWith<IllegalArgumentException> {
             ShaderStage.fromPath(Path.of("voxy_opaque.glsl"))
         }
+        assertEquals(
+            ShaderStage.FRAGMENT,
+            ShaderStage.fromEntryPoint(
+                Path.of("custom_voxy_hook.glsl"),
+                "void voxy_emitFragment(VoxyFragmentParameters parameters) {}",
+            ),
+        )
     }
 
     @Test
@@ -49,6 +56,8 @@ class SpirvToolchainTest {
                 executable,
                 "--target-env",
                 "opengl",
+                "--target-env",
+                "spirv1.3",
                 "-S",
                 "comp",
                 "-o",

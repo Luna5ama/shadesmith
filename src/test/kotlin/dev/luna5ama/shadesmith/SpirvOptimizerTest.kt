@@ -56,6 +56,22 @@ class SpirvOptimizerTest {
     }
 
     @Test
+    fun compilesSubgroupOperationsWithOpenGlSemanticsAtSpirv13() = withWorkspace { workspace ->
+        val result = SpirvOptimizer(workspace).optimize(
+            SpirvOptimizationRequest("subgroup.csh", ShaderStage.COMPUTE, fixture("subgroup.csh")),
+        )
+        val variant = result.variants.single()
+
+        assertTrue(
+            variant.invocations.first().command.windowed(4).contains(
+                listOf("--target-env", "opengl", "--target-env", "spirv1.3"),
+            ),
+        )
+        assertContains(result.source, "#extension GL_KHR_shader_subgroup_arithmetic : require")
+        assertTrue(variant.validationSpirv.isRegularFile())
+    }
+
+    @Test
     fun removesRealDeadFunctionAndDeadBranchFromComputeSpirv() = withWorkspace { workspace ->
         val result = SpirvOptimizer(workspace).optimize(
             SpirvOptimizationRequest("dead-code.csh", ShaderStage.COMPUTE, fixture("dead-code.csh")),
@@ -65,12 +81,22 @@ class SpirvOptimizerTest {
         assertTrue(variant.optimizedSpirvSize < variant.originalSpirvSize)
         assertFalse(variant.source.contains("deadHelper"))
         assertFalse(variant.source.contains("if (false)"))
+        assertFalse(variant.source.contains("gl_WorkGroupSize"))
         assertContains(variant.source, "inputTexture")
         assertContains(variant.source, "unusedTexture")
         assertFalse(variant.artifactDirectory.resolve("decompiled.glsl").readText().contains("unusedTexture"))
+        assertContains(variant.source, "uniform float deadReferencedUniform = 1.0;")
+        assertFalse(variant.artifactDirectory.resolve("decompiled.glsl").readText().contains("deadReferencedUniform"))
+        assertContains(variant.source, "struct DeadRecord")
+        assertContains(variant.source, "readonly buffer DeadBuffer")
+        assertContains(variant.source, "DeadRecord deadValues[];")
+        assertFalse(variant.artifactDirectory.resolve("decompiled.glsl").readText().contains("DeadRecord"))
+        assertFalse(variant.artifactDirectory.resolve("decompiled.glsl").readText().contains("DeadBuffer"))
         assertContains(variant.source, "outputImage")
         assertContains(variant.source, "exposure")
         assertContains(variant.source, "readonly buffer DataBuffer")
+        assertContains(variant.source, "readonly buffer FoldedArrayBuffer")
+        assertContains(variant.source, "float foldedWeights[32];")
         assertContains(variant.source, "uniform Params")
         assertContains(variant.source, "float weights[];")
         assertContains(variant.source, "vec4 tint;")
@@ -251,11 +277,8 @@ class SpirvOptimizerTest {
             Regex("(?m)^layout\\([^\n]+colorTexture;\\n?"),
             "",
         )
-        val missingException = assertFailsWith<OpenGlShaderPatchException> {
-            patcher.restore(missingResource, patch)
-        }
-        assertContains(missingException.reason, "colorTexture")
-        assertContains(missingException.reason, "missing")
+        val restoredMissingResource = patcher.restore(missingResource, patch)
+        assertContains(restoredMissingResource, "uniform sampler2D colorTexture;")
 
         val samplerLayout = patch.generatedLayouts.single { it.key.name == "colorTexture" }
         val changedBinding = patch.compilerSource.replace(

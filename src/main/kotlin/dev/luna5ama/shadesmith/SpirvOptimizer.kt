@@ -170,7 +170,6 @@ internal class SpirvOptimizer(
             patcher.patch(
                 protection,
                 request.stage,
-                alwaysRestorableResources = variant.resourceMarkers.mapTo(linkedSetOf()) { it.identifier },
             )
         }
         val compilerPath = variantDirectory.resolve("compiler.glsl")
@@ -207,12 +206,11 @@ internal class SpirvOptimizer(
         restoredPath.writeText(restored)
 
         val validationPatch = phase(request, SpirvRoundTripPhase.VALIDATE, variantDirectory, variantSourceName) {
-            val restoredProtection = PreprocessorProtection.protect(restored, variantSourceName)
+            val restoredProtection = PreprocessorProtection.protectGeneratedCompilerSource(restored, variantSourceName)
             patcher.patch(
                 restoredProtection,
                 request.stage,
                 patch.generatedLayouts,
-                variant.resourceMarkers.mapTo(linkedSetOf()) { it.identifier },
             )
         }
         if (validationPatch.generatedLayouts.toSet() != patch.generatedLayouts.toSet()) {
