@@ -1,0 +1,7 @@
+{
+  "screen": {
+    "transient_a": "RGBA16F",
+    "transient_b": "RGBA16F",
+    "transient_branch": "RGBA16F"
+  }
+}

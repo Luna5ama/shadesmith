@@ -16,6 +16,8 @@ internal data class SpirvShaderVariant(
     val name: String,
     val source: String,
     val coveredBranches: Set<PreprocessorBranchSelection> = emptySet(),
+    val resourceMarkers: List<TextureResourceMarker> = emptyList(),
+    val conservativeAccess: TextureAccess = TextureAccess(),
 )
 
 internal data class SpirvOptimizationRequest(
@@ -33,6 +35,8 @@ internal enum class SpirvEmissionMode {
 internal data class SpirvVariantResult(
     val name: String,
     val source: String,
+    val semanticSource: String,
+    val textureAccess: TextureAccess,
     val artifactDirectory: Path,
     val originalSpirv: Path,
     val optimizedSpirv: Path,
@@ -129,7 +133,7 @@ internal class SpirvOptimizer(
             )
         }
 
-        val requiredBranches = requiredBranchCoverage(protection)
+        val requiredBranches = requiredPreprocessorBranches(protection)
         validateVariants(request, protection, requiredBranches, requestDirectory)
         val results = request.variants.map { variant ->
             optimizeVariant(request, variant, requestDirectory)
@@ -163,7 +167,11 @@ internal class SpirvOptimizer(
             PreprocessorProtection.protect(variant.source, variantSourceName)
         }
         val patch = phase(request, SpirvRoundTripPhase.PATCH_INPUT, variantDirectory, variantSourceName) {
-            patcher.patch(protection, request.stage)
+            patcher.patch(
+                protection,
+                request.stage,
+                alwaysRestorableResources = variant.resourceMarkers.mapTo(linkedSetOf()) { it.identifier },
+            )
         }
         val compilerPath = variantDirectory.resolve("compiler.glsl")
         compilerPath.writeText(patch.compilerSource)
@@ -191,15 +199,21 @@ internal class SpirvOptimizer(
             toolchain.execute(decompileInvocation)
         }
 
+        val semanticSource = decompiledPath.readText()
         val restored = phase(request, SpirvRoundTripPhase.RESTORE, variantDirectory, variantSourceName) {
-            patcher.restore(decompiledPath.readText(), patch)
+            patcher.restore(semanticSource, patch)
         }
         val restoredPath = variantDirectory.resolve("restored.glsl")
         restoredPath.writeText(restored)
 
         val validationPatch = phase(request, SpirvRoundTripPhase.VALIDATE, variantDirectory, variantSourceName) {
             val restoredProtection = PreprocessorProtection.protect(restored, variantSourceName)
-            patcher.patch(restoredProtection, request.stage, patch.generatedLayouts)
+            patcher.patch(
+                restoredProtection,
+                request.stage,
+                patch.generatedLayouts,
+                variant.resourceMarkers.mapTo(linkedSetOf()) { it.identifier },
+            )
         }
         if (validationPatch.generatedLayouts.toSet() != patch.generatedLayouts.toSet()) {
             fail(
@@ -221,6 +235,11 @@ internal class SpirvOptimizer(
         return SpirvVariantResult(
             name = variant.name,
             source = restored,
+            semanticSource = semanticSource,
+            textureAccess = TextureAccessAnalyzer.fromOptimizedSource(
+                semanticSource,
+                variant.resourceMarkers,
+            ) + variant.conservativeAccess,
             artifactDirectory = variantDirectory,
             originalSpirv = originalSpirv,
             optimizedSpirv = optimizedSpirv,
@@ -292,30 +311,6 @@ internal class SpirvOptimizer(
         }
     }
 
-    private fun requiredBranchCoverage(
-        protection: ProtectedPreprocessorSource,
-    ): Set<PreprocessorBranchSelection> {
-        val groups = protection.directives
-            .filter { it.disposition == PreprocessorDisposition.RESTORED && it.conditionalId != null }
-            .groupBy { it.conditionalId!! }
-        return buildSet {
-            groups.forEach { (conditionalId, directives) ->
-                if (directives.any { PreprocessorFeature.INCLUDE_GUARD in it.features }) return@forEach
-                val branchDirectives = directives.filter {
-                    it.kind in CONDITIONAL_OPENERS ||
-                        it.kind == PreprocessorDirectiveKind.ELIF ||
-                        it.kind == PreprocessorDirectiveKind.ELSE
-                }
-                branchDirectives.indices.forEach { branchIndex ->
-                    add(PreprocessorBranchSelection(conditionalId, branchIndex))
-                }
-                if (branchDirectives.none { it.kind == PreprocessorDirectiveKind.ELSE }) {
-                    add(PreprocessorBranchSelection(conditionalId, branchDirectives.size))
-                }
-            }
-        }
-    }
-
     private fun artifactDirectory(
         sourceName: String,
         stage: ShaderStage,
@@ -378,11 +373,6 @@ internal class SpirvOptimizer(
 
     companion object {
         private val INVALID_PATH_CHAR = """[^A-Za-z0-9._-]""".toRegex()
-        private val CONDITIONAL_OPENERS = setOf(
-            PreprocessorDirectiveKind.IF,
-            PreprocessorDirectiveKind.IFDEF,
-            PreprocessorDirectiveKind.IFNDEF,
-        )
         private val VARIANT_ARTIFACT_NAMES = listOf(
             "input.glsl",
             "compiler.glsl",

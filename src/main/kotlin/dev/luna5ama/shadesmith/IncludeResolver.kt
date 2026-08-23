@@ -1,5 +1,6 @@
 package dev.luna5ama.shadesmith
 
+import java.io.IOException
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.absolutePathString
@@ -107,10 +108,18 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
     return inputFiles.parallelStream()
         .map { resolve(prepareForPreprocessor(it), mutableSetOf()) }
         .map { file ->
-            val proc = ProcessBuilder()
-                .command("clang", "-C", "-E", "-P", "-Wno-microsoft-include", "-")
-                .redirectError(ProcessBuilder.Redirect.INHERIT)
-                .start()
+            val stage = ShaderStage.fromPath(file.path)
+            val proc = try {
+                ProcessBuilder()
+                    .command("clang", "-C", "-E", "-P", "-Wno-microsoft-include", "-")
+                    .redirectError(ProcessBuilder.Redirect.INHERIT)
+                    .start()
+            } catch (e: IOException) {
+                throw IllegalStateException(
+                    "${file.path} [${stage.glslangName}] failed to start clang include expansion",
+                    e,
+                )
+            }
 
             proc.outputStream.use {
                 it.write(file.code.encodeToByteArray())
@@ -123,6 +132,20 @@ fun resolveIncludes(inputFiles: List<ShaderFile>): List<ShaderFile> {
         .map { (file, proc) ->
             val newCode = proc.inputStream.bufferedReader().use {
                 it.readText()
+            }
+            val exitCode = try {
+                proc.waitFor()
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw IllegalStateException(
+                    "${file.path} [${ShaderStage.fromPath(file.path).glslangName}] " +
+                        "was interrupted during clang include expansion",
+                    e,
+                )
+            }
+            check(exitCode == 0) {
+                "${file.path} [${ShaderStage.fromPath(file.path).glslangName}] " +
+                    "failed during clang include expansion with exit code $exitCode"
             }
 
             file.copy(code = newCode.replace(protect, ""))

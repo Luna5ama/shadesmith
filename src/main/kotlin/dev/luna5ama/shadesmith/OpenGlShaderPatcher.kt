@@ -72,6 +72,7 @@ internal class OpenGlShaderPatcher {
         protectedSource: ProtectedPreprocessorSource,
         stage: ShaderStage,
         preferredLayouts: List<GeneratedShaderLayout> = emptyList(),
+        alwaysRestorableResources: Set<String> = emptySet(),
     ): OpenGlShaderPatch {
         val source = normalizeLineEndings(protectedSource.compilerSource())
         val versionDirectives = protectedSource.directives.filter {
@@ -121,7 +122,11 @@ internal class OpenGlShaderPatcher {
             compilerSource = normalizeOutput(compilerSource),
             originalVersion = originalVersion,
             generatedLayouts = generatedLayouts,
-            restorableDeclarations = collectRestorableDeclarations(source, originalDeclarations),
+            restorableDeclarations = collectRestorableDeclarations(
+                source,
+                originalDeclarations,
+                alwaysRestorableResources,
+            ),
             restoredDirectives = collectRestoredDirectives(protectedSource),
             restoredIrisContracts = collectIrisSourceContracts(
                 source,
@@ -511,13 +516,16 @@ internal class OpenGlShaderPatcher {
     private fun collectRestorableDeclarations(
         source: String,
         declarations: List<ParsedDeclaration>,
+        alwaysRestorableResources: Set<String>,
     ): Map<ShaderAbiKey, String> {
         val lexicalMap = buildLexicalMap(source)
         return declarations.filter { declaration ->
-            declaration.key.kind !in BLOCK_KINDS &&
-                Regex("\\b${Regex.escape(declaration.key.name)}\\b").findAll(source).none { reference ->
-                    reference.range.first !in declaration.range && lexicalMap.code[reference.range.first]
-                }
+            declaration.key.kind !in BLOCK_KINDS && (
+                declaration.key.name in alwaysRestorableResources ||
+                    Regex("\\b${Regex.escape(declaration.key.name)}\\b").findAll(source).none { reference ->
+                        reference.range.first !in declaration.range && lexicalMap.code[reference.range.first]
+                    }
+            )
         }.associate { declaration -> declaration.key to source.substring(declaration.range) }
     }
 

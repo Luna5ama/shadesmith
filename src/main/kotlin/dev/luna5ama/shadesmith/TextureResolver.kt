@@ -5,13 +5,6 @@ import java.util.*
 import kotlin.io.path.Path
 import kotlin.io.path.name
 
-private val REGEX_PREFIX = """^[^#\n\r]+((?:transient|history|persistent)_$IDENTIFIER_REGEX_STR)""".toRegex()
-private val ATOMIC_REGEX = """atomic(?:Add|Min|Max|And|Or|Xor|Exchange|CompSwap)""".toRegex()
-private val READ_REGEX =
-    """${REGEX_PREFIX.pattern}_(sample|gather|gatherTexel|fetch|load|${ATOMIC_REGEX.pattern})\(""".toRegex(RegexOption.MULTILINE)
-private val WRITE_REGEX =
-    """^${REGEX_PREFIX.pattern}_(store|${ATOMIC_REGEX.pattern})\(""".toRegex(RegexOption.MULTILINE)
-
 private data class TextureFormatInfo(
     val pixelFormat: String,
     val pixelType: String,
@@ -114,7 +107,10 @@ vec2 _textile_texelToGatherUV(vec2 texelPos, vec2 tileOffsetF, vec2 tileSizeF, v
 """.trim().trimIndent()
 
 context(ioContext: IOContext)
-fun resolveTextures(inputFiles: List<ShaderFile>) {
+internal fun resolveTextures(
+    inputFiles: List<OptimizedShaderFile>,
+    propertiesPath: java.nio.file.Path = Path("shadesmith.shaders.properties"),
+) {
     data class AccessInfo(val file: ShaderFile, val reads: Set<String>, val writes: Set<String>)
 
     val config = ioContext.config
@@ -132,24 +128,16 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
     }
 
     val accessInfos = inputFiles.parallelStream()
-        .filter { it.compositeStyle }
-        .map { file ->
-            val reads = READ_REGEX.findAll(file.code)
-                .map { it.groupValues[1] }
-                .toSet()
-
-            val writes = WRITE_REGEX.findAll(file.code)
-                .map { it.groupValues[1] }
-                .toSet()
-
-            AccessInfo(file, reads, writes)
+        .filter { it.file.compositeStyle }
+        .map { optimized ->
+            AccessInfo(optimized.file, optimized.textureAccess.reads, optimized.textureAccess.writes)
         }
         .toList()
         .groupingBy {
             val name = it.file.path.name.substringBefore('.')
             val matchResult = PASS_NAME_REGEX.matchEntire(name)!!
             val (type, num, letter) = matchResult.destructured
-            SortKey(PassPrefix.valueOf(type.uppercase()), num.toInt())
+            SortKey(PassPrefix.valueOf(type.uppercase()), num.ifEmpty { "0" }.toInt())
         }
         .reduce { _, acc, elem ->
             AccessInfo(
@@ -159,6 +147,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
             )
         }
         .toList()
+        .sortedBy { it.first }
 
 //    println("Accesses:")
 //    accessInfos.forEach {
@@ -797,8 +786,7 @@ fun resolveTextures(inputFiles: List<ShaderFile>) {
         }
     }
 
-    val shadesmithPropertiesPath = Path("shadesmith.shaders.properties")
-    ioContext.writeOutput(shadesmithPropertiesPath, shadesmithProperties)
+    ioContext.writeOutput(propertiesPath, shadesmithProperties)
 
     val textileCode = listOf(textileUniforms, textTileTemplate, textTileCode)
         .filter { it.isNotEmpty() }
