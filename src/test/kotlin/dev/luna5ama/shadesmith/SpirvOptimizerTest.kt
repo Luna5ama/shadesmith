@@ -1,0 +1,370 @@
+package dev.luna5ama.shadesmith
+
+import java.nio.file.Files
+import java.nio.file.Path
+import kotlin.io.path.exists
+import kotlin.io.path.fileSize
+import kotlin.io.path.isRegularFile
+import kotlin.io.path.listDirectoryEntries
+import kotlin.io.path.readBytes
+import kotlin.io.path.readText
+import kotlin.test.Test
+import kotlin.test.assertContains
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+class SpirvOptimizerTest {
+    @Test
+    fun roundTripsRepresentativeComputeVertexFragmentAndGeometryShaders() = withWorkspace { workspace ->
+        val fixtures = listOf(
+            "dead-code.csh" to ShaderStage.COMPUTE,
+            "basic.vsh" to ShaderStage.VERTEX,
+            "basic.fsh" to ShaderStage.FRAGMENT,
+            "basic.gsh" to ShaderStage.GEOMETRY,
+        )
+
+        fixtures.forEach { (name, stage) ->
+            val result = SpirvOptimizer(workspace.resolve(stage.glslangName)).optimize(
+                SpirvOptimizationRequest(name, stage, fixture(name)),
+            )
+            val variant = result.variants.single()
+
+            assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, name)
+            assertEquals(
+                listOf(SpirvTool.GLSLANG, SpirvTool.SPIRV_OPT, SpirvTool.SPIRV_CROSS, SpirvTool.GLSLANG),
+                variant.invocations.map { it.tool },
+                name,
+            )
+            assertEquals(SpirvToolchain.OPTIMIZER_PASSES, variant.invocations[1].command.drop(1).dropLast(3), name)
+            assertContains(
+                variant.invocations[0].command.joinToString(" "),
+                "--target-env opengl",
+                message = name,
+            )
+            val crossCommand = variant.invocations[2].command
+            assertTrue(crossCommand.windowed(3).contains(listOf("--no-es", "--version", "460")), name)
+            assertTrue("--glsl-force-flattened-io-blocks" in crossCommand, name)
+            assertTrue("--combined-samplers-inherit-bindings" in crossCommand, name)
+            assertTrue("--remove-unused-variables" in crossCommand, name)
+            assertTrue(variant.validationSpirv.isRegularFile(), name)
+            assertTrue(variant.validationSpirv.fileSize() > 0, name)
+            assertContains(variant.source, "#version 460 compatibility", message = name)
+            assertContains(variant.source, "void main()", message = name)
+        }
+    }
+
+    @Test
+    fun removesRealDeadFunctionAndDeadBranchFromComputeSpirv() = withWorkspace { workspace ->
+        val result = SpirvOptimizer(workspace).optimize(
+            SpirvOptimizationRequest("dead-code.csh", ShaderStage.COMPUTE, fixture("dead-code.csh")),
+        )
+        val variant = result.variants.single()
+
+        assertTrue(variant.optimizedSpirvSize < variant.originalSpirvSize)
+        assertFalse(variant.source.contains("deadHelper"))
+        assertFalse(variant.source.contains("if (false)"))
+        assertContains(variant.source, "inputTexture")
+        assertContains(variant.source, "unusedTexture")
+        assertFalse(variant.artifactDirectory.resolve("decompiled.glsl").readText().contains("unusedTexture"))
+        assertContains(variant.source, "outputImage")
+        assertContains(variant.source, "exposure")
+        assertContains(variant.source, "readonly buffer DataBuffer")
+        assertContains(variant.source, "uniform Params")
+        assertContains(variant.source, "float weights[];")
+        assertContains(variant.source, "vec4 tint;")
+        assertContains(variant.source, "layout(local_size_x = 8, local_size_y = 4, local_size_z = 1) in;")
+        assertContains(
+            variant.source,
+            "const ivec3 workGroups = ivec3(32, 18, 1); // Iris dispatch contract",
+        )
+        assertContains(variant.source, "#extension GL_ARB_shader_image_load_store : require")
+        assertContains(variant.source, "#pragma optimize(on)")
+        assertContains(variant.source, "//#define FIXTURE_DEBUG")
+        assertFalse(variant.source.contains("binding ="))
+        assertFalse(variant.source.contains("location ="))
+    }
+
+    @Test
+    fun producesDeterministicSourceSpirvAndArtifactPaths() = withWorkspace { workspace ->
+        val request = SpirvOptimizationRequest("basic.fsh", ShaderStage.FRAGMENT, fixture("basic.fsh"))
+        val optimizer = SpirvOptimizer(workspace)
+
+        val first = optimizer.optimize(request)
+        val restored = first.source
+        val firstVariant = first.variants.single()
+        val firstSpirv = firstVariant.optimizedSpirv.readBytes()
+        val second = optimizer.optimize(request)
+
+        assertContains(firstVariant.artifactDirectory.resolve("compiler.glsl").readText(), "colortex3Format = 0;")
+        assertContains(firstVariant.artifactDirectory.resolve("validation.glsl").readText(), "colortex3Format = 0;")
+        assertContains(restored, "/* RENDERTARGETS:3 */")
+        assertContains(restored, "const int noiseTextureResolution = 256;")
+        assertContains(restored, "const float sunPathRotation = -20.0; //[-90.0 -20.0 0.0 20.0 90.0]")
+        assertContains(restored, "const int colortex3Format = RGBA16F; // Iris string directive")
+        assertContains(restored, "const bool colortex3Clear = false;")
+        assertContains(restored, "const vec4 colortex3ClearColor = vec4(0.25, 0.5, 0.75, 1.0);")
+        assertFalse(restored.contains("colortex4Format"))
+        assertEquals(first.source, second.source)
+        assertEquals(first.artifactDirectory, second.artifactDirectory)
+        assertEquals(first.variants.single().artifactDirectory, second.variants.single().artifactDirectory)
+        assertTrue(firstSpirv.contentEquals(second.variants.single().optimizedSpirv.readBytes()))
+    }
+
+    @Test
+    fun preservesExplicitResourceBindingLocationAndInterpolationContracts() = withWorkspace { workspace ->
+        val result = SpirvOptimizer(workspace).optimize(
+            SpirvOptimizationRequest(
+                "explicit-contract.fsh",
+                ShaderStage.FRAGMENT,
+                fixture("explicit-contract.fsh"),
+            ),
+        )
+        val source = result.source
+
+        assertContains(source, "layout(location = 3) flat in highp vec2 texCoord;")
+        assertContains(source, "layout(location = 1) out vec4 fragColor;")
+        assertContains(source, "layout(binding = 5) uniform sampler2D colorTexture;")
+        assertTrue(result.variants.single().validationSpirv.isRegularFile())
+    }
+
+    @Test
+    fun preservesMacroHeavySourceAndOptimizesEveryExplicitBranchVariant() = withWorkspace { workspace ->
+        val original = fixture("macro-heavy.fsh")
+        val optimizer = SpirvOptimizer(workspace)
+        val result = optimizer.optimize(
+            SpirvOptimizationRequest(
+                sourceName = "macro-heavy.fsh",
+                stage = ShaderStage.FRAGMENT,
+                source = original,
+                variants = listOf(
+                    SpirvShaderVariant(
+                        "tint-on",
+                        fixture("macro-heavy-on.fsh"),
+                        setOf(PreprocessorBranchSelection(0, 0)),
+                    ),
+                    SpirvShaderVariant(
+                        "tint-off",
+                        fixture("macro-heavy-off.fsh"),
+                        setOf(PreprocessorBranchSelection(0, 1)),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(SpirvEmissionMode.PRESERVED_PREPROCESSOR, result.emissionMode)
+        assertEquals(original, result.source)
+        assertContains(result.source, "#if defined(SETTING_TINT)")
+        assertContains(result.source, "#define APPLY_TINT(value)")
+        assertContains(result.source, "//#define SETTING_TINT")
+        assertEquals(
+            setOf(PreprocessorBranchSelection(0, 0), PreprocessorBranchSelection(0, 1)),
+            result.requiredBranches,
+        )
+        assertEquals(listOf("tint-on", "tint-off"), result.variants.map { it.name })
+        assertTrue(result.variants.all { it.validationSpirv.isRegularFile() && it.validationSpirv.fileSize() > 0 })
+        assertTrue(result.variants.all { "APPLY_TINT" !in it.source })
+    }
+
+    @Test
+    fun refusesDefaultOnlyCompilationBeforeInvokingAnyTool() = withWorkspace { workspace ->
+        var invoked = false
+        val optimizer = SpirvOptimizer(
+            workspace,
+            processRunner = SpirvProcessRunner { _, _, _, _ ->
+                invoked = true
+                error("tool must not run")
+            },
+        )
+
+        val exception = assertFailsWith<SpirvRoundTripException> {
+            optimizer.optimize(
+                SpirvOptimizationRequest(
+                    "macro-heavy.fsh",
+                    ShaderStage.FRAGMENT,
+                    fixture("macro-heavy.fsh"),
+                ),
+            )
+        }
+
+        assertEquals(SpirvRoundTripPhase.MATERIALIZE, exception.phase)
+        assertContains(exception.message.orEmpty(), "no explicit variants")
+        assertFalse(invoked)
+        assertTrue(exception.artifactDirectory.resolve("original.glsl").isRegularFile())
+        assertTrue(exception.artifactDirectory.listDirectoryEntries("*.spv").isEmpty())
+    }
+
+    @Test
+    fun refusesIncompleteOrContradictoryVariantCoverage() = withWorkspace { workspace ->
+        val optimizer = SpirvOptimizer(workspace)
+        val incomplete = assertFailsWith<SpirvRoundTripException> {
+            optimizer.optimize(
+                SpirvOptimizationRequest(
+                    "macro-heavy.fsh",
+                    ShaderStage.FRAGMENT,
+                    fixture("macro-heavy.fsh"),
+                    variants = listOf(
+                        SpirvShaderVariant(
+                            "only-default",
+                            fixture("macro-heavy-off.fsh"),
+                            setOf(PreprocessorBranchSelection(0, 1)),
+                        ),
+                    ),
+                ),
+            )
+        }
+        assertEquals(SpirvRoundTripPhase.MATERIALIZE, incomplete.phase)
+        assertContains(incomplete.message.orEmpty(), "0:0")
+
+        val contradictory = assertFailsWith<SpirvRoundTripException> {
+            optimizer.optimize(
+                SpirvOptimizationRequest(
+                    "macro-heavy.fsh",
+                    ShaderStage.FRAGMENT,
+                    fixture("macro-heavy.fsh"),
+                    variants = listOf(
+                        SpirvShaderVariant(
+                            "both",
+                            fixture("macro-heavy-off.fsh"),
+                            setOf(
+                                PreprocessorBranchSelection(0, 0),
+                                PreprocessorBranchSelection(0, 1),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        }
+        assertEquals(SpirvRoundTripPhase.MATERIALIZE, contradictory.phase)
+        assertContains(contradictory.message.orEmpty(), "multiple branches")
+    }
+
+    @Test
+    fun resourceAndGeneratedLayoutMismatchesFailLoudly() {
+        val source = fixture("basic.fsh")
+        val protected = PreprocessorProtection.protect(source, "basic.fsh")
+        val patcher = OpenGlShaderPatcher()
+        val patch = patcher.patch(protected, ShaderStage.FRAGMENT)
+
+        val missingResource = patch.compilerSource.replace(
+            Regex("(?m)^layout\\([^\n]+colorTexture;\\n?"),
+            "",
+        )
+        val missingException = assertFailsWith<OpenGlShaderPatchException> {
+            patcher.restore(missingResource, patch)
+        }
+        assertContains(missingException.reason, "colorTexture")
+        assertContains(missingException.reason, "missing")
+
+        val samplerLayout = patch.generatedLayouts.single { it.key.name == "colorTexture" }
+        val changedBinding = patch.compilerSource.replace(
+            "${samplerLayout.qualifier} = ${samplerLayout.value}",
+            "${samplerLayout.qualifier} = ${samplerLayout.value + 7}",
+        )
+        val bindingException = assertFailsWith<OpenGlShaderPatchException> {
+            patcher.restore(changedBinding, patch)
+        }
+        assertContains(bindingException.reason, "changed from")
+
+        val computePatch = patcher.patch(
+            PreprocessorProtection.protect(fixture("dead-code.csh"), "dead-code.csh"),
+            ShaderStage.COMPUTE,
+        )
+        val changedBlock = computePatch.compilerSource.replace("float weights[];", "vec2 weights[];")
+        val blockException = assertFailsWith<OpenGlShaderPatchException> {
+            patcher.restore(changedBlock, computePatch)
+        }
+        assertContains(blockException.reason, "DataBuffer")
+        assertContains(blockException.reason, "block declaration changed")
+    }
+
+    @Test
+    fun refusesUsingAnIrisFormatDirectiveAsShaderCode() {
+        val source = """
+            #version 460 compatibility
+            const int colortex0Format = RGBA16F;
+            out vec4 fragColor;
+            void main() {
+                fragColor = vec4(float(colortex0Format));
+            }
+        """.trimIndent()
+
+        val exception = assertFailsWith<OpenGlShaderPatchException> {
+            OpenGlShaderPatcher().patch(
+                PreprocessorProtection.protect(source, "referenced-format.fsh"),
+                ShaderStage.FRAGMENT,
+            )
+        }
+
+        assertEquals(2, exception.sourceLine)
+        assertContains(exception.reason, "colortex0Format")
+        assertContains(exception.reason, "referenced by shader code")
+    }
+
+    @Test
+    fun refusesUnparsedResourceDeclarations() {
+        val source = """
+            #version 460 compatibility
+            uniform sampler2D firstTexture, secondTexture;
+            out vec4 fragColor;
+            void main() {
+                fragColor = texture(firstTexture, vec2(0.5));
+            }
+        """.trimIndent()
+
+        val exception = assertFailsWith<OpenGlShaderPatchException> {
+            OpenGlShaderPatcher().patch(
+                PreprocessorProtection.protect(source, "comma-resource.fsh"),
+                ShaderStage.FRAGMENT,
+            )
+        }
+
+        assertEquals(2, exception.sourceLine)
+        assertContains(exception.reason, "unsupported top-level")
+    }
+
+    @Test
+    fun compileFailureKeepsInputsAndToolLogsWithPhaseContext() = withWorkspace { workspace ->
+        val invalid = """
+            #version 460 compatibility
+            layout(local_size_x = 1) in;
+            void main() {
+                missingSymbol = 1;
+            }
+        """.trimIndent()
+
+        val exception = assertFailsWith<SpirvRoundTripException> {
+            SpirvOptimizer(workspace).optimize(
+                SpirvOptimizationRequest("invalid.csh", ShaderStage.COMPUTE, invalid),
+            )
+        }
+
+        assertEquals(SpirvRoundTripPhase.COMPILE, exception.phase)
+        assertContains(exception.message.orEmpty(), "invalid.csh")
+        assertContains(exception.message.orEmpty(), "[comp]")
+        assertTrue(exception.artifactDirectory.resolve("input.glsl").isRegularFile())
+        assertTrue(exception.artifactDirectory.resolve("compiler.glsl").isRegularFile())
+        val logs = exception.artifactDirectory.resolve("logs")
+        assertTrue(logs.exists())
+        assertTrue(
+            logs.listDirectoryEntries("*.log").any { it.fileSize() > 0 },
+            "glslang diagnostics should be retained in stdout or stderr",
+        )
+    }
+
+    private fun fixture(name: String): String {
+        return requireNotNull(javaClass.getResource("/spirv/$name")) {
+            "Missing SPIR-V fixture $name"
+        }.readText()
+    }
+
+    private fun withWorkspace(block: (Path) -> Unit) {
+        val workspace = Files.createTempDirectory("shadesmith spirv optimizer test ")
+        try {
+            block(workspace)
+        } finally {
+            workspace.toFile().deleteRecursively()
+        }
+    }
+}
