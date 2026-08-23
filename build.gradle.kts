@@ -29,6 +29,8 @@ dependencies {
 
     implementation(libs.bundles.kotlinEcosystem)
     implementation(libs.simpleLogger)
+
+    testImplementation(kotlin("test"))
 }
 
 kotlin {
@@ -41,6 +43,10 @@ kotlin {
 
 tasks {
     val mainClassRef = "dev.luna5ama.shadesmith.Main"
+    test {
+        useJUnitPlatform()
+    }
+
     jar {
         manifest {
             attributes["Main-Class"] = mainClassRef
