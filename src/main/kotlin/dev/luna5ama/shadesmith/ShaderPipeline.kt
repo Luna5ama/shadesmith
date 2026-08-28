@@ -179,24 +179,40 @@ internal class ShaderPipeline(
             toolCapabilities.localSizeId,
             toolCapabilities.diagnostic,
         )
-        if (plan.structuralBlockers.isNotEmpty()) {
-            val reason = plan.structuralBlockers.joinToString("; ") { "line ${it.sourceLine}: ${it.reason}" }
-            return OptimizedShaderFile(
-                file = file,
-                stage = entryPoint.stage,
-                processingMode = ShaderProcessingMode.PRESERVED_STRUCTURAL,
-                textureAccess = TextureAccessAnalyzer.fromOptimizedSource(file.code),
-                moduleCount = 0,
-                fallbackReason = reason,
-            )
+        val modules = if (!ShaderStructuralPlanner.requiresPlanning(plan)) {
+            listOf(materializer.materialize(sourceName, entryPoint.stage, plan, probe))
+        } else {
+            when (val structural = ShaderStructuralPlanner.plan(plan, entryPoint.stage)) {
+                is ShaderStructuralPlanningResult.Preserved -> {
+                    return preservedStructural(file, entryPoint.stage, structural.reason)
+                }
+                is ShaderStructuralPlanningResult.Planned -> {
+                    val candidates = structural.plan.rows.map { row ->
+                        materializer.materialize(
+                            sourceName,
+                            entryPoint.stage,
+                            row.compilerPlan,
+                            probe,
+                            row.name,
+                        )
+                    }
+                    when (val finalized = structural.plan.deduplicate(candidates)) {
+                        is ShaderStructuralMaterializationResult.Preserved -> {
+                            return preservedStructural(file, entryPoint.stage, finalized.reason)
+                        }
+                        is ShaderStructuralMaterializationResult.Materialized -> {
+                            finalized.modules.map { it.module }
+                        }
+                    }
+                }
+            }
         }
-        val module = materializer.materialize(sourceName, entryPoint.stage, plan, probe)
         val result = optimizer.optimize(
             SpirvOptimizationRequest(
                 sourceName = sourceName,
                 stage = entryPoint.stage,
                 source = file.code,
-                compilerModules = listOf(module),
+                compilerModules = modules,
             ),
         )
         return OptimizedShaderFile(
@@ -207,6 +223,21 @@ internal class ShaderPipeline(
                 .map { it.textureAccess }
                 .fold(TextureAccess(), TextureAccess::plus),
             moduleCount = result.modules.size,
+        )
+    }
+
+    private fun preservedStructural(
+        file: ShaderFile,
+        stage: ShaderStage,
+        reason: String,
+    ): OptimizedShaderFile {
+        return OptimizedShaderFile(
+            file = file,
+            stage = stage,
+            processingMode = ShaderProcessingMode.PRESERVED_STRUCTURAL,
+            textureAccess = TextureAccessAnalyzer.fromOptimizedSource(file.code),
+            moduleCount = 0,
+            fallbackReason = reason,
         )
     }
 

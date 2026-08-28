@@ -79,6 +79,7 @@ internal data class ShaderCompilerCopyPlan(
     val sourceName: String,
     val originalSource: String,
     val compilerSource: String?,
+    val compilerCandidateSource: String,
     val settings: List<ShaderSetting>,
     val macros: List<ShaderMacroDependency>,
     val sourceRegions: List<ShaderSourceRegion>,
@@ -200,6 +201,7 @@ internal object ShaderCompilerCopyPlanner {
             sourceMap,
             protection.directives,
             settingsByName.keys,
+            macroDependencies,
         )
         protection.directives.filter {
             it.kind == PreprocessorDirectiveKind.UNDEF && it.macroName in settingsByName
@@ -223,6 +225,7 @@ internal object ShaderCompilerCopyPlanner {
             sourceName = sourceName,
             originalSource = source,
             compilerSource = compilerCandidate.takeIf { distinctBlockers.isEmpty() },
+            compilerCandidateSource = compilerCandidate,
             settings = typedSettings,
             macros = macroDependencies,
             sourceRegions = regions,
@@ -548,7 +551,10 @@ internal object ShaderCompilerCopyPlanner {
                 renderGroup(group, source, sourceMap, groupsById, settings.associateBy { it.name }, macros),
             )
         }
-        directives.filter { it.macroName in settings.mapTo(hashSetOf()) { setting -> setting.name } }.forEach {
+        directives.filter {
+            it.kind in SETTING_DEFINITION_DIRECTIVES &&
+                it.macroName in settings.mapTo(hashSetOf()) { setting -> setting.name }
+        }.forEach {
             val range = sourceMap.directiveRange(it)
             if (rootSafe.none { group -> range.first >= group.range.first && range.last <= group.range.last }) {
                 replacements += Replacement(range.first, range.last + 1, maskSource(source.substring(range)))
@@ -828,12 +834,32 @@ internal object ShaderCompilerCopyPlanner {
         sourceMap: SourceMap,
         directives: List<PreprocessorDirective>,
         settingNames: Set<String>,
+        macros: List<ShaderMacroDependency>,
     ): List<ShaderCompilerCopyBlocker> {
         if (settingNames.isEmpty()) return emptyList()
         val directiveLines = directives.flatMapTo(hashSetOf()) { it.sourceLine..it.endLine }
+        val macrosByName = macros.associateBy { it.name }
+        val tokenPasteMemo = mutableMapOf<String, Boolean>()
+        fun usesTokenPaste(name: String, visiting: MutableSet<String>): Boolean {
+            tokenPasteMemo[name]?.let { return it }
+            val macro = macrosByName[name] ?: return false
+            if (!visiting.add(name)) return false
+            val result = macro.sourceSlices.any { TOKEN_PASTE.containsMatchIn(it) } ||
+                macro.dependencies.any { usesTokenPaste(it, visiting) }
+            visiting.remove(name)
+            tokenPasteMemo[name] = result
+            return result
+        }
         return sourceMap.lines.mapNotNull { line ->
-            if (line.number in directiveLines || settingNames.none { IDENTIFIER_TOKEN(it).containsMatchIn(line.text) }) {
-                return@mapNotNull null
+            if (line.number in directiveLines) return@mapNotNull null
+            val lineIdentifiers = identifiers(maskCommentsAndStrings(line.text))
+            val settingDependencies = buildSet {
+                addAll(lineIdentifiers.filter(settingNames::contains))
+                lineIdentifiers.forEach { addAll(macrosByName[it]?.settingDependencies.orEmpty()) }
+            }
+            if (settingDependencies.isEmpty()) return@mapNotNull null
+            val tokenPaste = TOKEN_PASTE.containsMatchIn(line.text) || lineIdentifiers.any {
+                usesTokenPaste(it, linkedSetOf())
             }
             when {
                 LAYOUT_USE.containsMatchIn(line.text) -> ShaderCompilerCopyBlocker(
@@ -846,7 +872,12 @@ internal object ShaderCompilerCopyPlanner {
                     "setting affects a resource or stage-interface declaration",
                 )
 
-                TOKEN_PASTE.containsMatchIn(line.text) -> ShaderCompilerCopyBlocker(
+                line.braceDepth == 0 && FUNCTION_WITH_OPEN.containsMatchIn(line.text) -> ShaderCompilerCopyBlocker(
+                    line.number,
+                    "setting affects a function signature or ABI",
+                )
+
+                tokenPaste -> ShaderCompilerCopyBlocker(
                     line.number,
                     "setting participates in token paste",
                 )
@@ -1235,6 +1266,10 @@ internal object ShaderCompilerCopyPlanner {
         PreprocessorDirectiveKind.ERROR,
         PreprocessorDirectiveKind.WARNING,
     )
+    private val SETTING_DEFINITION_DIRECTIVES = setOf(
+        PreprocessorDirectiveKind.DEFINE,
+        PreprocessorDirectiveKind.DISABLED_DEFINE,
+    )
     private const val SETTING_PREFIX = "SETTING_"
     private val SETTING_TOKEN = "\\bSETTING_[A-Za-z0-9_]+\\b".toRegex()
     private val IDENTIFIER = "[A-Za-z_][A-Za-z0-9_]*".toRegex()
@@ -1320,12 +1355,14 @@ internal class ShaderCompilerCopyMaterializer(
         stage: ShaderStage,
         plan: ShaderCompilerCopyPlan,
         probe: TextureAccessProbe,
+        moduleName: String = "compiler-copy",
     ): SpirvCompilerModule {
+        require(moduleName.isNotBlank()) { "compiler module name cannot be blank" }
         val source = requireNotNull(plan.compilerSource) {
             "$sourceName has structural compiler-copy blockers: ${plan.structuralBlockers.joinToString { it.reason }}"
         }
         val artifactDirectory = workingDirectory.resolve(
-            "${safeName(sourceName)}-${stage.glslangName}-${shortHash(source)}",
+            "${safeName(sourceName)}-${stage.glslangName}-${safeName(moduleName)}-${shortHash(source)}",
         )
         artifactDirectory.createDirectories()
         val inputPath = artifactDirectory.resolve("compiler-copy.glsl")
@@ -1374,7 +1411,7 @@ internal class ShaderCompilerCopyMaterializer(
         outputPath.writeText(materialized)
         metrics?.recordCompilerModules(1)
         return SpirvCompilerModule(
-            name = "compiler-copy",
+            name = moduleName,
             source = materialized,
             resourceMarkers = probe.markers,
             conservativeAccess = probe.conservativeAccess,

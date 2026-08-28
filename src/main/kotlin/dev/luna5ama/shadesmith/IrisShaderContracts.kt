@@ -35,12 +35,35 @@ internal data class IrisSourceContractSlice(
 
 internal data class LocalSizeAbiSignature(val x: Int, val y: Int, val z: Int)
 
+internal data class LocalSizeAbiAssignment(
+    val settings: Map<String, String>,
+    val signature: LocalSizeAbiSignature,
+)
+
 internal data class LocalSizeSpecializationContract(
     val defaultSignature: LocalSizeAbiSignature,
     val signatures: List<LocalSizeAbiSignature>,
+    val settingDependencies: Set<String>,
+    val assignments: List<LocalSizeAbiAssignment>,
     val specializationIds: Map<Char, Int>,
     val compilerLayout: String,
     val fallbackRequired: Boolean,
+) {
+    fun signatureFor(values: Map<String, String>): LocalSizeAbiSignature? {
+        return assignments.firstOrNull { row ->
+            row.settings.all { (name, value) -> values[name] == value }
+        }?.signature
+    }
+}
+
+internal enum class IrisStructuralIssueKind {
+    LOCAL_SIZE_FALLBACK,
+    UNSUPPORTED,
+}
+
+internal data class IrisStructuralIssue(
+    val kind: IrisStructuralIssueKind,
+    val reason: String,
 )
 
 internal data class IrisDerivedMacroContract(
@@ -61,10 +84,43 @@ internal data class IrisShaderContractPlan(
     val contracts: List<IrisSourceContractSlice>,
     val derivedMacros: List<IrisDerivedMacroContract>,
     val localSize: LocalSizeSpecializationContract?,
-    val structuralReason: String?,
+    val structuralIssues: List<IrisStructuralIssue>,
     private val compilerPrelude: String,
     private val compilerSettings: List<ShaderSetting>,
 ) {
+    val structuralReason: String?
+        get() = structuralIssues.takeIf { it.isNotEmpty() }?.joinToString("; ") { it.reason }
+
+    fun forStructuralModule(
+        source: String,
+        fallbackSignature: LocalSizeAbiSignature?,
+    ): IrisShaderContractPlan {
+        if (fallbackSignature == null) return copy(compilerSource = source)
+        val local = requireNotNull(localSize) { "$sourceName has no local-size contract to specialize" }
+        require(local.fallbackRequired) { "$sourceName local-size contract does not require a structural fallback" }
+        val fixedLayout = renderFixedLocalSize(fallbackSignature)
+        require(local.compilerLayout in source) {
+            "$sourceName compiler copy is missing the local-size fallback slot"
+        }
+        require(local.compilerLayout in compilerPrelude) {
+            "$sourceName compiler prelude is missing the local-size fallback slot"
+        }
+        return copy(
+            compilerSource = source.replace(local.compilerLayout, fixedLayout),
+            localSize = local.copy(
+                defaultSignature = fallbackSignature,
+                signatures = listOf(fallbackSignature),
+                specializationIds = emptyMap(),
+                compilerLayout = fixedLayout,
+                fallbackRequired = false,
+            ),
+            structuralIssues = structuralIssues.filterNot {
+                it.kind == IrisStructuralIssueKind.LOCAL_SIZE_FALLBACK
+            },
+            compilerPrelude = compilerPrelude.replace(local.compilerLayout, fixedLayout),
+        )
+    }
+
     fun restore(decompiledSource: String): IrisContractRestoration {
         var result = normalizeCompilerText(decompiledSource)
         if (localSize != null) result = LOCAL_SIZE_LAYOUT.replace(result, "")
@@ -397,17 +453,21 @@ internal object IrisShaderContractExtractor {
                 placement,
             )
         }
-        val structuralReasons = buildList {
-            addAll(extractionErrors)
-            localAnalysis?.error?.let(::add)
-            derivedAnalysis.error?.let(::add)
-            if (localAnalysis?.contract?.fallbackRequired == true) add(buildString {
-                append("local-size ABI requires structural signatures ")
-                append(localAnalysis.contract.signatures.joinToString(prefix = "[", postfix = "]"))
-                localSizeProbeDiagnostic?.let { append("; $it") }
-            })
+        val structuralIssues = buildList {
+            extractionErrors.forEach { add(IrisStructuralIssue(IrisStructuralIssueKind.UNSUPPORTED, it)) }
+            localAnalysis?.error?.let { add(IrisStructuralIssue(IrisStructuralIssueKind.UNSUPPORTED, it)) }
+            derivedAnalysis.error?.let { add(IrisStructuralIssue(IrisStructuralIssueKind.UNSUPPORTED, it)) }
+            if (localAnalysis?.contract?.fallbackRequired == true) add(
+                IrisStructuralIssue(
+                    IrisStructuralIssueKind.LOCAL_SIZE_FALLBACK,
+                    buildString {
+                        append("local-size ABI requires structural signatures ")
+                        append(localAnalysis.contract.signatures.joinToString(prefix = "[", postfix = "]"))
+                        localSizeProbeDiagnostic?.let { append("; $it") }
+                    },
+                ),
+            )
         }
-        val structuralReason = structuralReasons.takeIf { it.isNotEmpty() }?.joinToString("; ")
         return IrisShaderContractPlan(
             sourceName,
             originalVersion,
@@ -415,7 +475,7 @@ internal object IrisShaderContractExtractor {
             contracts,
             derivedMacros,
             localAnalysis?.contract,
-            structuralReason,
+            structuralIssues,
             compilerPrelude,
             settings,
         )
@@ -561,6 +621,7 @@ internal object IrisShaderContractExtractor {
                 error = "$sourceName: local-size dependency domain exceeds $MAX_LOCAL_SIZE_ASSIGNMENTS assignments",
             )
         val signatures = linkedSetOf<LocalSizeAbiSignature>()
+        val signatureAssignments = mutableListOf<LocalSizeAbiAssignment>()
         var defaultSignature: LocalSizeAbiSignature? = null
         assignments.forEach { assignment ->
             val active = layouts.filter { it.predicate.evaluate(assignment, settingsByName) == true }
@@ -585,6 +646,7 @@ internal object IrisShaderContractExtractor {
             }
             val signature = LocalSizeAbiSignature(values.getValue('x'), values.getValue('y'), values.getValue('z'))
             signatures += signature
+            signatureAssignments += LocalSizeAbiAssignment(assignment.toSortedMap(), signature)
             if (relevant.all { assignment[it.name] == scalarDefault(it) }) defaultSignature = signature
         }
         val default = defaultSignature ?: signatures.first()
@@ -619,6 +681,8 @@ internal object IrisShaderContractExtractor {
             LocalSizeSpecializationContract(
                 default,
                 signatures.sortedWith(compareBy(LocalSizeAbiSignature::x, LocalSizeAbiSignature::y, LocalSizeAbiSignature::z)),
+                relevant.mapTo(sortedSetOf()) { it.name },
+                signatureAssignments,
                 if (localSizeIdSupported) ids else emptyMap(),
                 compilerLayout,
                 !localSizeIdSupported && signatures.size > 1,
@@ -1139,6 +1203,10 @@ private fun LocalSizeAbiSignature.axis(axis: Char): Int = when (axis) {
     'y' -> y
     'z' -> z
     else -> error("invalid local-size axis $axis")
+}
+
+private fun renderFixedLocalSize(signature: LocalSizeAbiSignature): String {
+    return "layout(local_size_x = ${signature.x}, local_size_y = ${signature.y}, local_size_z = ${signature.z}) in;\n"
 }
 
 private class IntegerExpressionParser(
