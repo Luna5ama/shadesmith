@@ -105,6 +105,38 @@ class ShaderCompilerCopyTest {
     }
 
     @Test
+    fun relaxesOnlyAggregateGlobalConstantsThatDependOnSpecializationValues() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_GAIN 1.0 //[1.0 2.0]
+            #define SETTING_SIZE 2 //[2 4]
+            #define MAKE_TINT(value) vec3(value * SETTING_GAIN)
+            const float scalarGain = SETTING_GAIN;
+            const int scalarSize = SETTING_SIZE;
+            const vec3 tint = vec3(SETTING_GAIN);
+            const vec2 offsets[2] = vec2[2](vec2(0.0), vec2(SETTING_GAIN));
+            const vec2[3] typedOffsets = vec2[3](vec2(0.0), vec2(SETTING_GAIN), vec2(2.0));
+            const vec3 indirectTint = MAKE_TINT(1.0);
+            float values[SETTING_SIZE];
+            void main() {
+                values[0] = tint.x + offsets[1].x + typedOffsets[1].x + indirectTint.x + scalarGain + float(scalarSize);
+            }
+        """.trimIndent()
+
+        val compiler = assertNotNull(ShaderCompilerCopyPlanner.plan(source, "aggregate-const.csh").compilerSource)
+
+        assertContains(compiler, "layout(constant_id = 0) const float SM_SETTING_GAIN = 1.0;")
+        assertContains(compiler, "layout(constant_id = 1) const int SM_SETTING_SIZE = 2;")
+        assertContains(compiler, "#define scalarGain (SM_SETTING_GAIN)")
+        assertContains(compiler, "#define scalarSize (SM_SETTING_SIZE)")
+        assertContains(compiler, "#define tint (vec3(SM_SETTING_GAIN))")
+        assertContains(compiler, "      vec2 offsets[2] = vec2[2](vec2(0.0), vec2(SM_SETTING_GAIN));")
+        assertContains(compiler, "      vec2[3] typedOffsets")
+        assertContains(compiler, "      vec3 indirectTint = MAKE_TINT(1.0);")
+        assertContains(compiler, "float values[SM_SETTING_SIZE];")
+    }
+
+    @Test
     fun lowersACompleteConditionalExpressionToATernary() {
         val source = """
             #version 460 compatibility
@@ -447,6 +479,31 @@ class ShaderCompilerCopyTest {
         assertFalse("CALL(" in module.source)
         assertEquals(1, metrics.snapshot().compilerModules)
         assertEquals(1, metrics.snapshot().clangProcesses)
+    }
+
+    @Test
+    fun preservesSpirvCrossDirectiveOnlyCapabilityDispatchForGlslang() = withWorkspace { workspace ->
+        val source = """
+            #version 460 core
+            #if defined(GL_KHR_shader_subgroup_basic)
+            #extension GL_KHR_shader_subgroup_basic : require
+            #else
+            #error No extensions available to emulate requested subgroup feature.
+            #endif
+            #define VALUE 3
+            void main() { int value = VALUE; }
+        """.trimIndent()
+
+        val materialized = ShaderCompilerCopyMaterializer(workspace).materializeSource(
+            "cross-capability.csh",
+            ShaderStage.COMPUTE,
+            source,
+            "final-validation",
+        )
+
+        assertContains(materialized, "#if defined(GL_KHR_shader_subgroup_basic)")
+        assertContains(materialized, "#error No extensions available to emulate requested subgroup feature.")
+        assertContains(materialized, "int value = 3;")
     }
 
     @Test

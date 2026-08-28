@@ -284,7 +284,7 @@ internal object SpirvFinalEmitter {
         }
 
         val signatures = modules.map { requireNotNull(it.structuralSignature) }
-        val varying = VaryingStructuralSlots.from(signatures)
+        val varying = ShaderVaryingStructuralSlots.from(signatures)
         val stripped = modules.map { module -> stripStructuralSlots(module, varying) }
         stripped.filterIsInstance<StructuralStripResult.Preserved>().firstOrNull()?.let {
             return preserved(request, it.reason)
@@ -345,39 +345,28 @@ internal object SpirvFinalEmitter {
 
     private fun stripStructuralSlots(
         module: SpirvModuleResult,
-        varying: VaryingStructuralSlots,
+        varying: ShaderVaryingStructuralSlots,
     ): StructuralStripResult {
         val signature = requireNotNull(module.structuralSignature)
-        val expectedResources = signature.resources.filterTo(linkedSetOf()) { it in varying.resources }
-        val expectedInterfaces = signature.stageInterfaces.filterTo(linkedSetOf()) { it in varying.interfaces }
-        val expectedFunctions = signature.functionAbi.filterTo(linkedSetOf()) { it in varying.functionAbi }
-        val matchedResources = linkedSetOf<String>()
-        val matchedInterfaces = linkedSetOf<String>()
-        val matchedFunctions = linkedSetOf<String>()
+        val expectedResources = signature.resources.filter { it in varying.resources }
+            .mapTo(linkedSetOf(), ::normalizeStructuralEntity)
+        val expectedInterfaces = signature.stageInterfaces.filter { it in varying.interfaces }
+            .mapTo(linkedSetOf(), ::normalizeStructuralEntity)
+        val expectedFunctions = signature.functionAbi.filter { it in varying.functionAbi }
+            .mapTo(linkedSetOf(), ::normalizeStructuralEntity)
         val removals = mutableListOf<IntRange>()
         structuralEntities(module.coreSource).forEach { entity ->
             when {
                 entity.canonical in expectedResources -> {
-                    matchedResources += entity.canonical
                     removals += entity.range
                 }
                 entity.canonical in expectedInterfaces -> {
-                    matchedInterfaces += entity.canonical
                     removals += entity.range
                 }
                 entity.canonical in expectedFunctions -> {
-                    matchedFunctions += entity.canonical
                     removals += entity.range
                 }
             }
-        }
-        val missing = (expectedResources - matchedResources) +
-            (expectedInterfaces - matchedInterfaces) +
-            (expectedFunctions - matchedFunctions)
-        if (missing.isNotEmpty()) {
-            return StructuralStripResult.Preserved(
-                "${module.name}: optimized structural slots cannot be located: ${missing.sorted()}",
-            )
         }
         var source = module.coreSource
         removals.distinct().sortedByDescending { it.first }.forEach { range ->
@@ -393,27 +382,6 @@ internal object SpirvFinalEmitter {
     private sealed interface StructuralStripResult {
         data class Restored(val source: String) : StructuralStripResult
         data class Preserved(val reason: String) : StructuralStripResult
-    }
-
-    private data class VaryingStructuralSlots(
-        val resources: Set<String>,
-        val interfaces: Set<String>,
-        val functionAbi: Set<String>,
-    ) {
-        companion object {
-            fun from(signatures: List<ShaderStructuralSignature>): VaryingStructuralSlots {
-                fun varying(values: List<List<String>>): Set<String> {
-                    val union = values.flatten().toSet()
-                    val common = values.drop(1).fold(values.first().toSet()) { result, value -> result intersect value.toSet() }
-                    return union - common
-                }
-                return VaryingStructuralSlots(
-                    varying(signatures.map { it.resources }),
-                    varying(signatures.map { it.stageInterfaces }),
-                    varying(signatures.map { it.functionAbi }),
-                )
-            }
-        }
     }
 
     private fun shortHash(value: String): String {
@@ -492,7 +460,8 @@ private fun firstNonWhitespace(source: String, start: Int, end: Int): Int {
     return cursor
 }
 
-private fun normalizeStructuralEntity(value: String): String = value.replace("\\s+".toRegex(), " ").trim()
+private fun normalizeStructuralEntity(value: String): String =
+    maskStructuralSource(value).replace("\\s+".toRegex(), " ").trim()
 
 private fun maskStructuralSource(source: String): String {
     val result = source.toCharArray()

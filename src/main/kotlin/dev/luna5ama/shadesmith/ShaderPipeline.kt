@@ -21,6 +21,7 @@ internal data class OptimizedShaderFile(
     val processingMode: ShaderProcessingMode,
     val textureAccess: TextureAccess,
     val moduleCount: Int,
+    val moduleRowCount: Int = moduleCount,
     val fallbackReason: String? = null,
     val specializationSettings: List<String> = emptyList(),
     val structuralSignatures: List<ShaderStructuralSignature> = emptyList(),
@@ -434,6 +435,7 @@ internal class ShaderPipeline(
                 processingMode = ShaderProcessingMode.valueOf(cached.processingMode),
                 textureAccess = TextureAccess(cached.reads.toSet(), cached.writes.toSet()),
                 moduleCount = cached.moduleCount,
+                moduleRowCount = cached.moduleRowCount,
                 fallbackReason = cached.fallbackReason,
                 specializationSettings = cached.specializationSettings,
                 structuralSignatures = cached.structuralSignatures.map(CachedStructuralSignature::restore),
@@ -460,6 +462,7 @@ internal class ShaderPipeline(
             reads = result.textureAccess.reads.sorted(),
             writes = result.textureAccess.writes.sorted(),
             moduleCount = result.moduleCount,
+            moduleRowCount = result.moduleRowCount,
             fallbackReason = result.fallbackReason,
             specializationSettings = result.specializationSettings.distinct().sorted(),
             structuralSignatures = result.structuralSignatures.map(CachedStructuralSignature::from),
@@ -514,7 +517,8 @@ internal class ShaderPipeline(
             textureAccess = result.modules
                 .map { it.textureAccess }
                 .fold(TextureAccess(), TextureAccess::plus),
-            moduleCount = result.modules.size,
+            moduleCount = result.compilerModuleCount,
+            moduleRowCount = result.modules.size,
             fallbackReason = result.fallbackReason,
             specializationSettings = result.specializationSettings,
             structuralSignatures = result.structuralSignatures,
@@ -641,7 +645,7 @@ internal class ShaderPipeline(
         val content = buildString {
             appendLine(
                 "source\tstage\tdisposition\tsource_sha256\tsettings\tstructural_signatures\tfallback\t" +
-                    "modules\tlifecycle_reads\tlifecycle_writes",
+                    "modules\tmodule_rows\tlifecycle_reads\tlifecycle_writes",
             )
             files.forEach { file ->
                 append(sourceName(file.file).asTsvField())
@@ -659,6 +663,8 @@ internal class ShaderPipeline(
                 append(file.fallbackReason.orEmpty().asTsvField())
                 append('\t')
                 append(file.moduleCount)
+                append('\t')
+                append(file.moduleRowCount)
                 append('\t')
                 append(file.textureAccess.reads.sorted().joinToString(",").asTsvField())
                 append('\t')
@@ -681,6 +687,7 @@ internal class ShaderPipeline(
             appendLine("requested_roots\t$requestedRoots")
             appendLine("completed_roots\t${files.size}")
             appendLine("validated_modules\t${files.sumOf { it.moduleCount }}")
+            appendLine("validated_module_rows\t${files.sumOf { it.moduleRowCount }}")
             appendLine("ordinary_setting_variants\t0")
             appendLine("shader_processes\t${files.sumOf { it.processCount }}")
             appendLine("final_validation_processes\t${files.sumOf { it.finalValidationProcessCount }}")

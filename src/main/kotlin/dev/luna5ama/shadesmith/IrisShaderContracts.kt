@@ -28,6 +28,7 @@ internal data class IrisSourceContractSlice(
     val kind: IrisSourceContractKind,
     val exactText: String,
     val sourceLine: Int,
+    val sourceRange: IntRange,
     val beforeAnchor: IrisSourceAnchor?,
     val afterAnchor: IrisSourceAnchor?,
     val placement: IrisAnchorPlacement,
@@ -69,6 +70,7 @@ internal data class IrisStructuralIssue(
 internal data class IrisDerivedMacroContract(
     val sourceName: String,
     val compilerName: String,
+    val compilerType: ShaderSettingType,
     val compilerExpression: String,
 )
 
@@ -211,6 +213,16 @@ internal data class IrisShaderContractPlan(
             ?: throw IllegalArgumentException("$sourceName: restored source has no #version directive")
         result = result.replaceRange(version.range, "#version 460 core")
         if (!alreadyCompilerSource) {
+            val compilerValueNames = derivedMacros.map { it.compilerName } + compilerHostNames
+            compilerValueNames.forEach { name ->
+                val matches = compilerHostDeclaration(name).findAll(result).toList()
+                require(matches.size <= 1) {
+                    "$sourceName: compiler value $name has ${matches.size} declarations"
+                }
+                matches.singleOrNull()?.let { declaration ->
+                    result = result.removeRange(declaration.range)
+                }
+            }
             val existingDeclarations = compilerSettings.associateWith { setting ->
                 val matches = compilerSettingDeclaration(setting.compilerName).findAll(result).toList()
                 require(matches.size <= 1) {
@@ -491,8 +503,17 @@ internal object IrisShaderContractExtractor {
             ) {
                 appendLine(COMPILER_MARKER)
             }
+            localAnalysis?.axisMacros.orEmpty().forEach { (name, axis) ->
+                append("#define ")
+                append(name)
+                append(" int(gl_WorkGroupSize.")
+                append(axis)
+                appendLine(")")
+            }
             derivedMacros.forEach {
-                append("const int ")
+                append("const ")
+                append(it.compilerType.glslName)
+                append(' ')
                 append(it.compilerName)
                 append(" = ")
                 append(it.compilerExpression)
@@ -560,6 +581,7 @@ internal object IrisShaderContractExtractor {
                 draft.kind,
                 draft.exactText,
                 lines.lineAt(draft.range.first),
+                draft.range,
                 nearestBefore?.anchor,
                 nearestAfter?.anchor,
                 placement,
@@ -650,10 +672,11 @@ internal object IrisShaderContractExtractor {
         }
 
         val contracts = mutableListOf<IrisDerivedMacroContract>()
+        val contractTypes = mutableMapOf<String, ShaderSettingType>()
         ordered.forEach { name ->
             val definitions = macroDefinitions[name].orEmpty().sortedBy { it.range.first }
-            if (definitions.isEmpty() || definitions.any { !INTEGER_MACRO_BODY.matches(stripComments(it.body).trim()) }) {
-                return DerivedMacroAnalysis(error = "$sourceName: derived Iris contract macro $name is not a provable integer expression")
+            if (definitions.isEmpty() || definitions.any { !SCALAR_MACRO_BODY.matches(stripComments(it.body).trim()) }) {
+                return DerivedMacroAnalysis(error = "$sourceName: derived Iris contract macro $name is not a provable scalar expression")
             }
             val unsupportedPredicateNames = definitions.flatMapTo(linkedSetOf()) { it.predicate.identifierNames() }
                 .filterNot { it in settings || it == "defined" || it == "true" || it == "false" }
@@ -683,7 +706,20 @@ internal object IrisShaderContractExtractor {
                 convertMacroBody(definition.body, settings, axisMacros, compilerNames)
             }
             val expression = renderDerivedDecision(relevantSettings, assignments, bodies)
-            contracts += IrisDerivedMacroContract(name, compilerNames.getValue(name), expression)
+            val type = if (definitions.any { definition ->
+                    CONTRACT_FLOAT_LITERAL.containsMatchIn(stripComments(definition.body)) ||
+                        identifiers(definition.body).any { identifier ->
+                            settings[identifier]?.type == ShaderSettingType.FLOAT ||
+                                contractTypes[identifier] == ShaderSettingType.FLOAT
+                        }
+                }
+            ) {
+                ShaderSettingType.FLOAT
+            } else {
+                ShaderSettingType.INT
+            }
+            contractTypes[name] = type
+            contracts += IrisDerivedMacroContract(name, compilerNames.getValue(name), type, expression)
         }
         return DerivedMacroAnalysis(contracts)
     }
@@ -1651,7 +1687,9 @@ private val STABLE_ABI_DECLARATION = (
 private val IDENTIFIER = "[A-Za-z_][A-Za-z0-9_]*".toRegex()
 private val SETTING_IDENTIFIER = "\\bSETTING_[A-Za-z0-9_]+\\b".toRegex()
 private val INTEGER_LITERAL = "[0-9]+[uU]?".toRegex()
-private val INTEGER_MACRO_BODY = "[-+*/%() A-Za-z0-9_]+".toRegex()
+private val SCALAR_MACRO_BODY = "[-+*/%(). A-Za-z0-9_]+".toRegex()
+private val CONTRACT_FLOAT_LITERAL =
+    "(?<![A-Za-z0-9_])(?:(?:[0-9]+\\.[0-9]*|\\.[0-9]+)(?:[eE][-+]?[0-9]+)?|[0-9]+[eE][-+]?[0-9]+)".toRegex()
 private val LINE_ENDING = "\\r\\n|\\n|\\r".toRegex()
 private val LINE_COMMENT = "//[^\\r\\n]*".toRegex()
 private val BLOCK_COMMENT = "/\\*[\\s\\S]*?\\*/".toRegex()

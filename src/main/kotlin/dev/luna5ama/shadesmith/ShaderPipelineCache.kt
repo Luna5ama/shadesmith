@@ -83,6 +83,7 @@ internal data class CachedOptimizedShader(
     val reads: List<String>,
     val writes: List<String>,
     val moduleCount: Int,
+    val moduleRowCount: Int = moduleCount,
     val fallbackReason: String? = null,
     val specializationSettings: List<String> = emptyList(),
     val structuralSignatures: List<CachedStructuralSignature> = emptyList(),
@@ -199,6 +200,7 @@ internal class ShaderPipelineCache(
         val stage = ShaderStage.valueOf(cached.stage)
         ShaderProcessingMode.valueOf(cached.processingMode)
         require(cached.moduleCount >= 0)
+        require(cached.moduleRowCount >= cached.moduleCount)
         require(cached.reads == cached.reads.distinct().sorted())
         require(cached.writes == cached.writes.distinct().sorted())
         require(cached.specializationSettings == cached.specializationSettings.distinct().sorted())
@@ -210,7 +212,7 @@ internal class ShaderPipelineCache(
     }
 
     companion object {
-        private const val CACHE_HEADER = "shadesmith-structural-pipeline-cache-v2"
+        private const val CACHE_HEADER = "shadesmith-structural-pipeline-cache-v3"
         private val HEX_SHA256 = "[0-9A-F]{64}".toRegex()
         private val ENTRY_LOCKS = ConcurrentHashMap<Path, Any>()
         private val JSON = Json {

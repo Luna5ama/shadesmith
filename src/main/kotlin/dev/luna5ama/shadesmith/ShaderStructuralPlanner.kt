@@ -85,6 +85,29 @@ internal data class ShaderStructuralSignature(
     }
 }
 
+internal data class ShaderVaryingStructuralSlots(
+    val resources: Set<String>,
+    val interfaces: Set<String>,
+    val functionAbi: Set<String>,
+) {
+    companion object {
+        fun from(signatures: List<ShaderStructuralSignature>): ShaderVaryingStructuralSlots {
+            fun varying(values: List<List<String>>): Set<String> {
+                val union = values.flatten().toSet()
+                val common = values.drop(1).fold(values.first().toSet()) { result, value ->
+                    result intersect value.toSet()
+                }
+                return union - common
+            }
+            return ShaderVaryingStructuralSlots(
+                varying(signatures.map { it.resources }),
+                varying(signatures.map { it.stageInterfaces }),
+                varying(signatures.map { it.functionAbi }),
+            )
+        }
+    }
+}
+
 internal data class ShaderStructuralSourceIsland(
     val ordinal: Int,
     val exactText: String,
@@ -177,20 +200,9 @@ internal data class ShaderStructuralRestorationPlan(
             val source = basePlan.originalSource
             val model = StructuralSourceModel(source, basePlan.sourceName, basePlan.settings)
             val contractLocations = basePlan.irisContracts.contracts.map { contract ->
-                contract to textRangeAtLine(source, contract.exactText, contract.sourceLine)
+                contract to contract.sourceRange
             }
-            val missingContract = contractLocations.firstOrNull { it.second == null }?.first
-            if (missingContract != null) {
-                return ShaderStructuralRestorationPlan(
-                    basePlan.sourceName,
-                    basePlan.settings,
-                    graph.structuralSettings,
-                    emptyList(),
-                    basePlan.irisContracts.contracts,
-                    "${basePlan.sourceName}:${missingContract.sourceLine}: Iris contract cannot be uniquely re-anchored",
-                )
-            }
-            val contractRanges = contractLocations.map { requireNotNull(it.second) }
+            val contractRanges = contractLocations.map { it.second }
             val structuralConditionalIds = basePlan.conditionals.filter {
                 it.disposition == ShaderConditionalDisposition.STRUCTURAL
             }.mapTo(hashSetOf()) { it.id }
@@ -222,7 +234,9 @@ internal data class ShaderStructuralRestorationPlan(
                 )
             }
             val excluded = merged + contractRanges
-            val anchors = findStableAnchors(source).filter { anchor -> excluded.none { it.overlaps(anchor.range) } }
+            val anchors = findStableAnchors(source).filter { anchor ->
+                anchor.anchor.kind != IrisAnchorKind.DECLARATION && excluded.none { it.overlaps(anchor.range) }
+            }
             var issue: String? = null
             val islands = merged.mapIndexed { ordinal, range ->
                 val before = anchors.filter { it.range.last < range.first }.maxByOrNull { it.range.last }
@@ -520,36 +534,36 @@ internal object ShaderStructuralPlanner {
                 )
             val rows = mutableListOf<ShaderStructuralCoverageRow>()
             val plansByShape = linkedMapOf<StructuralCoverageShapeKey, ShaderCompilerCopyPlan>()
-            assignments.forEachIndexed { index, assignment ->
-                val fallback = basePlan.irisContracts.localSize?.takeIf { it.fallbackRequired }
-                    ?.signatureFor(assignment)
-                    ?: if (basePlan.irisContracts.localSize?.fallbackRequired == true) {
-                        return ShaderStructuralPlanningResult.Preserved(
-                            "${basePlan.sourceName}: local-size fallback has no signature for $assignment",
-                        )
-                    } else {
-                        null
+            try {
+                assignments.forEachIndexed { index, assignment ->
+                    val fallback = basePlan.irisContracts.localSize?.takeIf { it.fallbackRequired }
+                        ?.signatureFor(assignment)
+                        ?: if (basePlan.irisContracts.localSize?.fallbackRequired == true) {
+                            return ShaderStructuralPlanningResult.Preserved(
+                                "${basePlan.sourceName}: local-size fallback has no signature for $assignment",
+                            )
+                        } else {
+                            null
+                        }
+                    val requiredCapabilities = originalModel.activeCapabilities(assignment)
+                    val selectionModel = if (coupledStructuralSettings.isEmpty()) compilerModel else originalModel
+                    val selectedConditionalIds = selectedOriginalConditionalIds.takeIf {
+                        coupledStructuralSettings.isNotEmpty()
                     }
-                val requiredCapabilities = originalModel.activeCapabilities(assignment)
-                val selectionModel = if (coupledStructuralSettings.isEmpty()) compilerModel else originalModel
-                val selectedConditionalIds = selectedOriginalConditionalIds.takeIf {
-                    coupledStructuralSettings.isNotEmpty()
-                }
-                val shape = StructuralCoverageShapeKey(
-                    selectedBranches = selectionModel.structuralSelectionSignature(
-                        assignment,
-                        preprocessorMaterializedSettings,
-                        selectedConditionalIds,
-                    ),
-                    valueSensitiveSettings = shapeValueSettings.map { name ->
-                        name to (assignment[name] ?: settings.getValue(name).defaultValue)
-                    },
-                    requiredCapabilities = requiredCapabilities,
-                    localSizeFallback = fallback,
-                )
-                val rowPlan = plansByShape[shape] ?: run {
-                    val planned = try {
-                        if (coupledStructuralSettings.isEmpty()) {
+                    val shape = StructuralCoverageShapeKey(
+                        selectedBranches = selectionModel.structuralSelectionSignature(
+                            assignment,
+                            preprocessorMaterializedSettings,
+                            selectedConditionalIds,
+                        ),
+                        valueSensitiveSettings = shapeValueSettings.map { name ->
+                            name to (assignment[name] ?: settings.getValue(name).defaultValue)
+                        },
+                        requiredCapabilities = requiredCapabilities,
+                        localSizeFallback = fallback,
+                    )
+                    val rowPlan = plansByShape[shape] ?: run {
+                        val planned = if (coupledStructuralSettings.isEmpty()) {
                             basePlan.copy(
                                 compilerCandidateSource = compilerModel.renderCompilerStructuralSource(
                                     assignment,
@@ -575,64 +589,64 @@ internal object ShaderStructuralPlanner {
                                 localSizeProbeDiagnostic = "inherited LocalSizeId structural fallback",
                             )
                         }
-                    } catch (e: StructuralEvaluationException) {
-                        return ShaderStructuralPlanningResult.Preserved(e.message.orEmpty())
-                    }
-                    val localOnlyIssue = planned.irisContracts.structuralIssues.isNotEmpty() &&
-                        planned.irisContracts.structuralIssues.all {
-                            it.kind == IrisStructuralIssueKind.LOCAL_SIZE_FALLBACK
+                        val localOnlyIssue = planned.irisContracts.structuralIssues.isNotEmpty() &&
+                            planned.irisContracts.structuralIssues.all {
+                                it.kind == IrisStructuralIssueKind.LOCAL_SIZE_FALLBACK
+                            }
+                        val expectedContractBlocker = planned.irisContracts.structuralReason.takeIf { localOnlyIssue }
+                        val remainingBlockers = planned.structuralBlockers.filterNot { blocker ->
+                            expectedContractBlocker != null && blocker.reason == expectedContractBlocker
                         }
-                    val expectedContractBlocker = planned.irisContracts.structuralReason.takeIf { localOnlyIssue }
-                    val remainingBlockers = planned.structuralBlockers.filterNot { blocker ->
-                        expectedContractBlocker != null && blocker.reason == expectedContractBlocker
+                        if (remainingBlockers.isNotEmpty()) {
+                            return ShaderStructuralPlanningResult.Preserved(
+                                buildString {
+                                    append(basePlan.sourceName)
+                                    append(": structural row ")
+                                    append(assignment.toSortedMap())
+                                    append(" still has compiler-copy blockers: ")
+                                    append(remainingBlockers.joinToString { "line ${it.sourceLine}: ${it.reason}" })
+                                },
+                            )
+                        }
+                        val contracts = try {
+                            basePlan.irisContracts.forStructuralModule(planned.compilerCandidateSource, fallback)
+                        } catch (e: IllegalArgumentException) {
+                            return ShaderStructuralPlanningResult.Preserved(e.message.orEmpty())
+                        }
+                        planned.copy(
+                            originalSource = basePlan.originalSource,
+                            compilerSource = contracts.compilerSource,
+                            compilerCandidateSource = contracts.compilerSource,
+                            structuralBlockers = emptyList(),
+                            irisContracts = contracts,
+                        ).also { plansByShape[shape] = it }
                     }
-                    if (remainingBlockers.isNotEmpty()) {
+                    if (plansByShape.size > MAX_STRUCTURAL_MODULES) {
                         return ShaderStructuralPlanningResult.Preserved(
-                            buildString {
-                                append(basePlan.sourceName)
-                                append(": structural row ")
-                                append(assignment.toSortedMap())
-                                append(" still has compiler-copy blockers: ")
-                                append(remainingBlockers.joinToString { "line ${it.sourceLine}: ${it.reason}" })
-                            },
+                            structuralCompilerModuleCapDiagnostic(
+                                basePlan.sourceName,
+                                graph,
+                                assignments.size,
+                                assignment,
+                                plansByShape,
+                            ),
                         )
                     }
-                    val contracts = try {
-                        basePlan.irisContracts.forStructuralModule(planned.compilerCandidateSource, fallback)
-                    } catch (e: IllegalArgumentException) {
-                        return ShaderStructuralPlanningResult.Preserved(e.message.orEmpty())
-                    }
-                    planned.copy(
-                        originalSource = basePlan.originalSource,
-                        compilerSource = contracts.compilerSource,
-                        compilerCandidateSource = contracts.compilerSource,
-                        structuralBlockers = emptyList(),
-                        irisContracts = contracts,
-                    ).also { plansByShape[shape] = it }
-                }
-                if (plansByShape.size > MAX_STRUCTURAL_MODULES) {
-                    return ShaderStructuralPlanningResult.Preserved(
-                        structuralCompilerModuleCapDiagnostic(
-                            basePlan.sourceName,
-                            graph,
-                            assignments.size,
-                            assignment,
-                            plansByShape,
-                        ),
+                    val changed = graph.components.filter { component ->
+                        component.settings.any { name -> assignment[name] != settings.getValue(name).defaultValue }
+                    }.map { it.id }
+                    val rowName = "structural-row-${index.toString().padStart(4, '0')}"
+                    rows += ShaderStructuralCoverageRow(
+                        name = rowName,
+                        assignment = assignment,
+                        changedComponents = changed,
+                        requiredCapabilities = requiredCapabilities,
+                        localSizeFallback = fallback,
+                        compilerPlan = rowPlan,
                     )
                 }
-                val changed = graph.components.filter { component ->
-                    component.settings.any { name -> assignment[name] != settings.getValue(name).defaultValue }
-                }.map { it.id }
-                val rowName = "structural-row-${index.toString().padStart(4, '0')}"
-                rows += ShaderStructuralCoverageRow(
-                    name = rowName,
-                    assignment = assignment,
-                    changedComponents = changed,
-                    requiredCapabilities = requiredCapabilities,
-                    localSizeFallback = fallback,
-                    compilerPlan = rowPlan,
-                )
+            } catch (e: StructuralEvaluationException) {
+                return ShaderStructuralPlanningResult.Preserved(e.message.orEmpty())
             }
             val hidden = compileFeedback?.hiddenDependency(rows)?.toSortedSet()
             if (hidden.isNullOrEmpty()) {
@@ -706,10 +720,17 @@ internal object ShaderStructuralPlanner {
     ): ShaderStructuralDependencyGraph {
         val names = nodes.flatMapTo(sortedSetOf()) { it.settings }
         val union = SettingUnion(names)
+        val linkableSymbols = nodes.filter { it.kind != ShaderStructuralNodeKind.CONDITIONAL }
+            .flatMapTo(hashSetOf()) { it.symbols }
+            .apply {
+                addAll(nodes.flatMap { it.symbols }.filter {
+                    it.startsWith(STRUCTURAL_SCOPE_PREFIX) || it.startsWith(STRUCTURAL_LAYOUT_PREFIX)
+                })
+            }
         nodes.forEach { node -> union.merge(node.settings) }
         nodes.indices.forEach { left ->
             for (right in left + 1 until nodes.size) {
-                if (nodes[left].symbols.intersect(nodes[right].symbols).isNotEmpty()) {
+                if (nodes[left].symbols.intersect(nodes[right].symbols).any(linkableSymbols::contains)) {
                     union.merge(nodes[left].settings + nodes[right].settings)
                 }
             }
@@ -812,6 +833,9 @@ private class StructuralSourceModel(
             macros.dependencies(directiveCondition(delimiter.directive))
         }
     }
+    private val topLevelBlocks by lazy {
+        scanTopLevelGlslBlocks(source, maskStructuralCommentsAndStrings(source))
+    }
     private val sourceDirectRegions by lazy { directRegions() }
 
     fun structuralNodes(): List<ShaderStructuralNode> {
@@ -823,7 +847,8 @@ private class StructuralSourceModel(
                 kind = ShaderStructuralNodeKind.CONDITIONAL,
                 sourceLine = group.opener.directive.sourceLine,
                 settings = dependencies,
-                symbols = structuralSymbols(source.substring(group.range), settingAliases.keys, macros.names),
+                symbols = structuralSymbols(source.substring(group.range), settingAliases.keys, macros.names) +
+                    enclosingFunctionScope(group.range),
                 detail = "setting-controlled preprocessor region remains outside ordinary GLSL control flow",
             )
         }
@@ -888,14 +913,21 @@ private class StructuralSourceModel(
     }
 
     fun activeCapabilities(assignment: Map<String, String>): List<String> {
-        val evaluation = evaluate(assignment)
-        return directives.filter {
-            it.directive.kind == PreprocessorDirectiveKind.EXTENSION && it.directive.index in evaluation.activeDirectives
-        }.mapNotNull { directive ->
-            EXTENSION.find(directive.directive.exactText)?.let {
-                "${it.groupValues[1]}:${it.groupValues[2]}"
-            }
-        }.distinct().sorted()
+        val extensions = directives.filter {
+            it.directive.kind == PreprocessorDirectiveKind.EXTENSION
+        }
+        if (extensions.none { extension -> groups.any { extension.range.first in it.range } }) {
+            return extensions.mapNotNull(::capabilityName).distinct().sorted()
+        }
+        val evaluation = evaluate(assignment, extensions.maxOf { it.directive.index })
+        return extensions.filter { it.directive.index in evaluation.activeDirectives }
+            .mapNotNull(::capabilityName).distinct().sorted()
+    }
+
+    private fun capabilityName(directive: StructuralDirective): String? {
+        return EXTENSION.find(directive.directive.exactText)?.let {
+            "${it.groupValues[1]}:${it.groupValues[2]}"
+        }
     }
 
     fun structuralSelectionSignature(
@@ -903,11 +935,12 @@ private class StructuralSourceModel(
         selectedSettings: Set<String>,
         selectedGroupIds: Set<Int>? = null,
     ): List<Pair<Int, Int>> {
-        val evaluation = evaluate(assignment)
-        return groups.filter { group ->
+        val selectedGroups = groups.filter { group ->
             (selectedGroupIds == null || group.id in selectedGroupIds) &&
                 groupSettingDependencies.getValue(group.id).any(selectedSettings::contains)
-        }.sortedBy { it.id }.map { group ->
+        }
+        val evaluation = evaluate(assignment, selectedGroupIds = selectedGroups.mapTo(hashSetOf()) { it.id })
+        return selectedGroups.sortedBy { it.id }.map { group ->
             group.id to (evaluation.selectedBranches[group.id] ?: -1)
         }
     }
@@ -930,11 +963,11 @@ private class StructuralSourceModel(
         require(renderSource.length == source.length) {
             "$sourceName structural render source changed length"
         }
-        val evaluation = evaluate(assignment)
         val structuralGroups = groups.filter { group ->
             (selectedGroupIds == null || group.id in selectedGroupIds) &&
                 groupSettingDependencies.getValue(group.id).any(selectedSettings::contains)
         }.mapTo(hashSetOf()) { it.id }
+        val evaluation = evaluate(assignment, selectedGroupIds = structuralGroups)
 
         lateinit var renderGroup: (StructuralConditionalGroup) -> String
         fun renderRange(start: Int, end: Int, parentId: Int?): String {
@@ -1142,33 +1175,51 @@ private class StructuralSourceModel(
         val directiveLines = directives.flatMapTo(hashSetOf()) {
             it.directive.sourceLine..it.directive.endLine
         }
-        val abiBlockLines = hashSetOf<Int>()
-        var inAbiBlock = false
-        lines.lines.forEach { line ->
-            val lexical = maskStructuralCommentsAndStrings(line.text)
-            val opensDeclarationBlock = line.braceDepth == 0 && '{' in lexical &&
-                !FUNCTION_SIGNATURE.containsMatchIn(lexical)
-            if (!inAbiBlock && opensDeclarationBlock) inAbiBlock = true
-            if (inAbiBlock) abiBlockLines += line.number
-            if (inAbiBlock && line.braceDepth <= 1 && '}' in lexical) inAbiBlock = false
-        }
-        return lines.lines.mapNotNull { line ->
-            if (line.number in directiveLines) return@mapNotNull null
-            val dependencies = macros.dependencies(line.text)
+        val abiBlocks = topLevelBlocks.filter { it.kind == TopLevelGlslBlockKind.ABI }
+        val abiBlockRanges = abiBlocks.map { it.fullRange }
+        val functionSignatureRanges = topLevelBlocks.filter { it.kind == TopLevelGlslBlockKind.FUNCTION }
+            .map { it.prefixRange }
+        val blocks = abiBlocks.mapNotNull { block ->
+            val text = source.substring(block.fullRange)
+            val dependencies = macros.dependencies(text)
             if (dependencies.isEmpty()) return@mapNotNull null
-            val normalized = line.text.trim()
-            val tokenPaste = macros.usesTokenPaste(line.text)
-            val functionAbi = line.braceDepth == 0 && FUNCTION_SIGNATURE.containsMatchIn(normalized)
+            val lexical = maskStructuralCommentsAndStrings(text)
+            val tokenPaste = macros.usesTokenPaste(text)
+            val kind = when {
+                tokenPaste -> ShaderStructuralNodeKind.TOKEN_PASTE
+                INTERFACE_DECLARATION.containsMatchIn(lexical) -> ShaderStructuralNodeKind.STAGE_INTERFACE
+                else -> ShaderStructuralNodeKind.RESOURCE
+            }
+            StructuralDirectRegion(
+                kind,
+                lineAt(block.fullRange.first),
+                block.fullRange,
+                dependencies,
+                when (kind) {
+                    ShaderStructuralNodeKind.TOKEN_PASTE -> "setting participates in token-pasted structural code"
+                    ShaderStructuralNodeKind.STAGE_INTERFACE -> "setting affects a stage interface declaration"
+                    else -> "setting affects a resource/layout declaration"
+                },
+            )
+        }
+        val direct = lines.lines.mapNotNull { line ->
+            if (line.number in directiveLines) return@mapNotNull null
+            val analysisText = maskGlslRanges(
+                line.text,
+                line.range.first,
+                functionSignatureRanges + abiBlockRanges,
+            )
+            val normalized = analysisText.trim()
+            val tokenPaste = macros.usesTokenPaste(analysisText)
+            val dependencies = macros.dependencies(analysisText)
+            if (dependencies.isEmpty()) return@mapNotNull null
             val layout = LAYOUT.containsMatchIn(normalized) &&
                 !CONSTANT_ID.containsMatchIn(normalized) &&
                 !LOCAL_SIZE_ID.containsMatchIn(normalized)
-            val abiBlock = line.number in abiBlockLines
-            val abi = abiBlock || line.braceDepth == 0 && ABI_DECLARATION.containsMatchIn(normalized)
-            if (!tokenPaste && !functionAbi && !layout && !abi) return@mapNotNull null
+            val abi = line.braceDepth == 0 && ABI_DECLARATION.containsMatchIn(normalized)
+            if (!tokenPaste && !layout && !abi) return@mapNotNull null
             val kind = when {
                 tokenPaste -> ShaderStructuralNodeKind.TOKEN_PASTE
-                functionAbi -> ShaderStructuralNodeKind.FUNCTION_ABI
-                abiBlock -> ShaderStructuralNodeKind.RESOURCE
                 INTERFACE_DECLARATION.containsMatchIn(normalized) -> ShaderStructuralNodeKind.STAGE_INTERFACE
                 else -> ShaderStructuralNodeKind.RESOURCE
             }
@@ -1184,16 +1235,63 @@ private class StructuralSourceModel(
                     else -> "setting affects a resource/layout declaration"
                 },
             )
-        }.distinctBy { it.range }
+        }
+        val functions = topLevelBlocks.filter { it.kind == TopLevelGlslBlockKind.FUNCTION }.mapNotNull { block ->
+            val text = source.substring(block.prefixRange)
+            val dependencies = macros.dependencies(text)
+            if (dependencies.isEmpty()) return@mapNotNull null
+            StructuralDirectRegion(
+                if (macros.usesTokenPaste(text)) {
+                    ShaderStructuralNodeKind.TOKEN_PASTE
+                } else {
+                    ShaderStructuralNodeKind.FUNCTION_ABI
+                },
+                lineAt(block.prefixRange.first),
+                block.prefixRange,
+                dependencies,
+                if (macros.usesTokenPaste(text)) {
+                    "setting participates in token-pasted structural code"
+                } else {
+                    "setting affects a function signature"
+                },
+            )
+        }
+        return (blocks + direct + functions).distinctBy { it.range }
     }
 
-    private fun evaluate(assignment: Map<String, String>): StructuralEvaluation {
+    private fun enclosingFunctionScope(range: IntRange): Set<String> {
+        val function = topLevelBlocks.singleOrNull { block ->
+            block.kind == TopLevelGlslBlockKind.FUNCTION &&
+                block.fullRange.first <= range.first && block.fullRange.last >= range.last
+        } ?: return emptySet()
+        return setOf("$STRUCTURAL_SCOPE_PREFIX${function.fullRange.first}")
+    }
+
+    private fun evaluate(
+        assignment: Map<String, String>,
+        lastDirectiveIndex: Int? = null,
+        selectedGroupIds: Set<Int>? = null,
+    ): StructuralEvaluation {
+        val relevantGroups = selectedGroupIds?.let { selected ->
+            buildSet {
+                fun addWithParents(id: Int) {
+                    if (!add(id)) return
+                    groups.firstOrNull { it.id == id }?.parentId?.let(::addWithParents)
+                }
+                selected.forEach(::addWithParents)
+            }
+        }
         val evaluator = StructuralPreprocessorEvaluator(
             sourceName,
-            directives,
+            if (lastDirectiveIndex == null) {
+                directives
+            } else {
+                directives.takeWhile { it.directive.index <= lastDirectiveIndex }
+            },
             settingAliases,
             settingsByCanonical,
             assignment,
+            relevantGroups,
         )
         return evaluator.evaluate()
     }
@@ -1385,6 +1483,7 @@ private class StructuralPreprocessorEvaluator(
     private val settingAliases: Map<String, String>,
     private val settings: Map<String, ShaderSetting>,
     private val assignment: Map<String, String>,
+    private val relevantGroups: Set<Int>? = null,
 ) {
     private data class Macro(val body: String, val functionLike: Boolean)
     private data class Frame(
@@ -1393,6 +1492,7 @@ private class StructuralPreprocessorEvaluator(
         var branchIndex: Int,
         var branchTaken: Boolean,
         var active: Boolean,
+        val evaluated: Boolean,
     )
 
     private val macros = linkedMapOf<String, Macro>()
@@ -1410,15 +1510,17 @@ private class StructuralPreprocessorEvaluator(
                 PreprocessorDirectiveKind.IFNDEF,
                 -> {
                     val parentActive = active
-                    val condition = if (parentActive) evaluateCondition(directive) else false
-                    val frame = Frame(requireNotNull(directive.conditionalId), parentActive, 0, condition, parentActive && condition)
+                    val id = requireNotNull(directive.conditionalId)
+                    val evaluated = relevantGroups == null || id in relevantGroups
+                    val condition = if (parentActive && evaluated) evaluateCondition(directive) else false
+                    val frame = Frame(id, parentActive, 0, condition, parentActive && condition, evaluated)
                     frames += frame
                     if (frame.active) selected[frame.id] = 0
                 }
                 PreprocessorDirectiveKind.ELIF -> {
                     val frame = frames.last()
                     frame.branchIndex++
-                    val condition = frame.parentActive && !frame.branchTaken && evaluateCondition(directive)
+                    val condition = frame.evaluated && frame.parentActive && !frame.branchTaken && evaluateCondition(directive)
                     frame.active = condition
                     if (condition) {
                         frame.branchTaken = true
@@ -1428,7 +1530,7 @@ private class StructuralPreprocessorEvaluator(
                 PreprocessorDirectiveKind.ELSE -> {
                     val frame = frames.last()
                     frame.branchIndex++
-                    frame.active = frame.parentActive && !frame.branchTaken
+                    frame.active = frame.evaluated && frame.parentActive && !frame.branchTaken
                     if (frame.active) {
                         frame.branchTaken = true
                         selected[frame.id] = frame.branchIndex
@@ -1671,22 +1773,25 @@ internal object ShaderStructuralSignatureExtractor {
         localSizeFallback: LocalSizeAbiSignature?,
     ): ShaderStructuralSignature {
         val declarations = topLevelDeclarations(source)
-        val resources = declarations.filter {
-            RESOURCE_KEYWORD.containsMatchIn(it) && !SHADESMITH_RESOURCE_MARKER.containsMatchIn(it)
+        val resources = declarations.filter { declaration ->
+            val lexical = stripStructuralComments(declaration)
+            RESOURCE_KEYWORD.containsMatchIn(lexical) && !SHADESMITH_RESOURCE_MARKER.containsMatchIn(lexical)
         }
-            .map(::normalizeStructuralText).distinct().sorted()
-        val interfaces = declarations.filter {
-            INTERFACE_KEYWORD.containsMatchIn(it) && !RESOURCE_KEYWORD.containsMatchIn(it) &&
-                !LOCAL_SIZE_DECLARATION.containsMatchIn(it)
-        }.map(::normalizeStructuralText).distinct().sorted()
+            .map(::normalizeStructuralSignatureText).distinct().sorted()
+        val interfaces = declarations.filter { declaration ->
+            val lexical = stripStructuralComments(declaration)
+            INTERFACE_KEYWORD.containsMatchIn(lexical) && !RESOURCE_KEYWORD.containsMatchIn(lexical) &&
+                !LOCAL_SIZE_DECLARATION.containsMatchIn(lexical)
+        }.map(::normalizeStructuralSignatureText).distinct().sorted()
         val functions = FUNCTION_ABI.findAll(maskStructuralCommentsAndStrings(source))
-            .map { normalizeStructuralText(it.value.substringBefore('{')) }
+            .map { normalizeStructuralSignatureText(it.value.substringBefore('{')) }
             .filterNot(::isMainFunctionAbi)
             .toList()
-        val prototypes = declarations.filter { FUNCTION_PROTOTYPE.containsMatchIn(it) }
-            .map(::normalizeStructuralText)
+        val prototypes = declarations.map(::normalizeStructuralSignatureText)
+            .filter { FUNCTION_PROTOTYPE.containsMatchIn(it) }
             .filterNot(::isMainFunctionAbi)
-        val types = declarations.filter { STRUCT_DECLARATION.containsMatchIn(it) }.map(::normalizeStructuralText)
+        val types = declarations.map(::normalizeStructuralSignatureText)
+            .filter { STRUCT_DECLARATION.containsMatchIn(it) }
         return ShaderStructuralSignature(
             stage,
             requiredCapabilities.distinct().sorted(),
@@ -1720,6 +1825,104 @@ private class StructuralLineMap(private val source: String) {
         val end = if (directive.endLine < starts.size) starts[directive.endLine] else source.length
         return start until end
     }
+}
+
+internal enum class TopLevelGlslBlockKind {
+    FUNCTION,
+    ABI,
+    OTHER,
+}
+
+internal data class TopLevelGlslBlock(
+    val kind: TopLevelGlslBlockKind,
+    val prefixRange: IntRange,
+    val fullRange: IntRange,
+)
+
+internal fun scanTopLevelGlslBlocks(source: String, masked: String): List<TopLevelGlslBlock> {
+    require(source.length == masked.length)
+    val result = mutableListOf<TopLevelGlslBlock>()
+    var depth = 0
+    var boundary = 0
+    var prefixStart = 0
+    var prefixEnd = 0
+    var blockKind = TopLevelGlslBlockKind.OTHER
+    var cursor = 0
+    while (cursor < masked.length) {
+        when (masked[cursor]) {
+            '{' -> {
+                if (depth == 0) {
+                    prefixStart = boundary
+                    prefixEnd = cursor
+                    val prefix = masked.substring(prefixStart, prefixEnd).trim()
+                    blockKind = when {
+                        prefix.endsWith(')') -> TopLevelGlslBlockKind.FUNCTION
+                        !hasTopLevelAssignment(prefix) -> TopLevelGlslBlockKind.ABI
+                        else -> TopLevelGlslBlockKind.OTHER
+                    }
+                }
+                depth++
+            }
+            '}' -> {
+                if (depth > 0) depth--
+                if (depth == 0) {
+                    var fullEnd = cursor
+                    if (blockKind == TopLevelGlslBlockKind.ABI) {
+                        while (fullEnd + 1 < masked.length && masked[fullEnd + 1].isWhitespace()) fullEnd++
+                        while (fullEnd + 1 < masked.length && masked[fullEnd + 1] != ';') fullEnd++
+                        if (masked.getOrNull(fullEnd + 1) == ';') fullEnd++
+                    }
+                    result += TopLevelGlslBlock(
+                        blockKind,
+                        prefixStart until prefixEnd,
+                        prefixStart..fullEnd,
+                    )
+                    if (blockKind == TopLevelGlslBlockKind.FUNCTION) boundary = cursor + 1
+                }
+            }
+            ';' -> if (depth == 0) boundary = cursor + 1
+            '\r', '\n' -> if (depth == 0) {
+                val lineStart = source.lastIndexOf('\n', cursor - 1).let { if (it < 0) 0 else it + 1 }
+                if (source.substring(lineStart, cursor).trimStart().startsWith('#')) boundary = cursor + 1
+            }
+        }
+        cursor++
+    }
+    return result
+}
+
+private fun hasTopLevelAssignment(source: String): Boolean {
+    var parenDepth = 0
+    var bracketDepth = 0
+    source.forEachIndexed { index, char ->
+        when (char) {
+            '(' -> parenDepth++
+            ')' -> if (parenDepth > 0) parenDepth--
+            '[' -> bracketDepth++
+            ']' -> if (bracketDepth > 0) bracketDepth--
+            '=' -> if (
+                parenDepth == 0 && bracketDepth == 0 &&
+                source.getOrNull(index - 1) !in listOf('!', '<', '>', '=') &&
+                source.getOrNull(index + 1) != '='
+            ) {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+internal fun maskGlslRanges(text: String, sourceOffset: Int, ranges: List<IntRange>): String {
+    if (ranges.none { it.first < sourceOffset + text.length && sourceOffset <= it.last }) return text
+    val result = text.toCharArray()
+    ranges.forEach { range ->
+        val start = maxOf(range.first, sourceOffset) - sourceOffset
+        val end = minOf(range.last + 1, sourceOffset + text.length) - sourceOffset
+        for (index in start until end) {
+            if (result[index] !in "\r\n") result[index] = ' '
+        }
+    }
+    return result.concatToString()
 }
 
 private fun lineBraceDepths(source: String): List<Int> {
@@ -1838,25 +2041,25 @@ private fun reanchorContracts(
     basePlan: ShaderCompilerCopyPlan,
     source: String,
     structuralRanges: List<IntRange>,
-    locations: List<Pair<IrisSourceContractSlice, IntRange?>>,
+    locations: List<Pair<IrisSourceContractSlice, IntRange>>,
 ): ReanchoredStructuralContracts {
-    val contractRanges = locations.map { requireNotNull(it.second) }
+    val contractRanges = locations.map { it.second }
     val excluded = structuralRanges + contractRanges
-    val anchors = findStableAnchors(source).filter { anchor -> excluded.none { it.overlaps(anchor.range) } }
+    val anchors = findStableAnchors(source).filter { anchor ->
+        anchor.anchor.kind != IrisAnchorKind.DECLARATION && excluded.none { it.overlaps(anchor.range) }
+    }
+    val version = anchors.singleOrNull { it.anchor.kind == IrisAnchorKind.VERSION }
+    val main = anchors.singleOrNull { it.anchor == IrisSourceAnchor(IrisAnchorKind.FUNCTION, "main") }
     var issue: String? = null
-    val contracts = locations.map { (contract, nullableRange) ->
-        val range = requireNotNull(nullableRange)
-        val before = anchors.filter { it.range.last < range.first }.maxByOrNull { it.range.last }
-        val after = anchors.filter { it.range.first > range.last }.minByOrNull { it.range.first }
+    val contracts = locations.map { (contract, range) ->
+        val before = version?.takeIf { it.range.last < range.first }
+        val after = main?.takeIf { it.range.first > range.last }
         if (before == null && after == null) {
             issue = "${basePlan.sourceName}:${contract.sourceLine}: Iris ${contract.kind} contract has no structural-safe anchor"
         }
         val placement = when {
-            after == null -> IrisAnchorPlacement.AFTER_BEFORE
             before == null -> IrisAnchorPlacement.BEFORE_AFTER
-            contract.kind == IrisSourceContractKind.EXTENSION -> IrisAnchorPlacement.AFTER_BEFORE
-            range.first - before.range.last <= after.range.first - range.last -> IrisAnchorPlacement.AFTER_BEFORE
-            else -> IrisAnchorPlacement.BEFORE_AFTER
+            else -> IrisAnchorPlacement.AFTER_BEFORE
         }
         contract.copy(
             beforeAnchor = before?.anchor,
@@ -1865,32 +2068,6 @@ private fun reanchorContracts(
         )
     }
     return ReanchoredStructuralContracts(contracts, issue)
-}
-
-private fun textRangeAtLine(source: String, text: String, sourceLine: Int): IntRange? {
-    if (text.isEmpty()) return null
-    val matches = mutableListOf<IntRange>()
-    var offset = source.indexOf(text)
-    while (offset >= 0) {
-        if (sourceLineAt(source, offset) == sourceLine) matches += offset until offset + text.length
-        offset = source.indexOf(text, offset + 1)
-    }
-    return matches.singleOrNull()
-}
-
-private fun sourceLineAt(source: String, offset: Int): Int {
-    var line = 1
-    var cursor = 0
-    while (cursor < offset) {
-        if (source[cursor] == '\r') {
-            if (source.getOrNull(cursor + 1) == '\n') cursor++
-            line++
-        } else if (source[cursor] == '\n') {
-            line++
-        }
-        cursor++
-    }
-    return line
 }
 
 private fun mergeStructuralRanges(source: String, ranges: List<IntRange>): List<IntRange> {
@@ -1910,12 +2087,13 @@ private fun mergeStructuralRanges(source: String, ranges: List<IntRange>): List<
     return result
 }
 
-private fun IntRange.overlaps(other: IntRange): Boolean = first <= other.last && other.first <= last
+internal fun IntRange.overlaps(other: IntRange): Boolean = first <= other.last && other.first <= last
 private fun IntRange.containsRange(other: IntRange): Boolean = first <= other.first && last >= other.last
 
 private data class StructuralReplacement(val start: Int, val end: Int, val text: String)
 
 private fun normalizeStructuralText(value: String): String = value.replace(STRUCTURAL_WHITESPACE, " ").trim()
+private fun normalizeStructuralSignatureText(value: String): String = normalizeStructuralText(stripStructuralComments(value))
 private fun isMainFunctionAbi(value: String): Boolean = "\\bmain\\s*\\(".toRegex().containsMatchIn(value)
 
 private fun stripStructuralComments(value: String): String {
@@ -2075,6 +2253,8 @@ private fun shortHash(value: String): String {
 private const val MAX_STRUCTURAL_MODULES = 32
 private const val MAX_COMPONENT_ASSIGNMENTS = 4096
 private const val STRUCTURAL_SETTING_PREFIX = "SM_SETTING_"
+private const val STRUCTURAL_SCOPE_PREFIX = "@scope:function:"
+private const val STRUCTURAL_LAYOUT_PREFIX = "layout:"
 private val STRUCTURAL_IDENTIFIER = "[A-Za-z_][A-Za-z0-9_]*".toRegex()
 private val STRUCTURAL_SPECIALIZATION_DECLARATION =
     ("(?m)^[\\t ]*layout\\s*\\(\\s*constant_id\\s*=\\s*[0-9]+\\s*\\)\\s*" +

@@ -152,6 +152,30 @@ class IrisShaderContractTest {
     }
 
     @Test
+    fun floatDerivedHostMacrosUseFloatCompilerConstants() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_SCALE 0 //[0 1]
+            #if SETTING_SCALE == 0
+            #define RENDER_MULTIPLIER 1.0
+            #else
+            #define RENDER_MULTIPLIER 0.5
+            #endif
+            const vec2 workGroupsRender = vec2(RENDER_MULTIPLIER);
+            layout(local_size_x = 1) in;
+            void main() { float scale = RENDER_MULTIPLIER; }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "float-derived-host.csh")
+
+        assertTrue(plan.structuralBlockers.isEmpty(), plan.structuralBlockers.toString())
+        val compiler = assertNotNull(plan.compilerSource)
+        assertContains(compiler, "const float SM_DERIVED_RENDER_MULTIPLIER")
+        assertContains(compiler, "SM_SETTING_SCALE == 0")
+        assertContains(compiler, "float scale = SM_DERIVED_RENDER_MULTIPLIER;")
+    }
+
+    @Test
     fun specializationDependentTopLevelConstantsBecomeCompilerOnlyMacros() {
         val source = """
             #version 460 compatibility
@@ -200,10 +224,16 @@ class IrisShaderContractTest {
         assertEquals(mapOf('y' to 1), localSize.specializationIds)
         val compiler = assertNotNull(plan.compilerSource)
         assertContains(compiler, "layout(local_size_y_id = 1) in;")
+        assertContains(compiler, "#define WORK_GROUP_SIZE int(gl_WorkGroupSize.y)")
         assertContains(compiler, "int(gl_WorkGroupSize.y)")
         assertContains(compiler, "SM_DERIVED_LOOP_COUNT")
         assertFalse("#define LOOP_COUNT" in compiler)
         assertFalse("#if SETTING_SLICE_SAMPLES" in compiler)
+        val validation = plan.irisContracts.prepareCompilerSource(
+            "#version 460 compatibility\nconst int SM_DERIVED_LOOP_COUNT = 1;\n" +
+                "void main() { int value = SM_DERIVED_LOOP_COUNT; }\n",
+        )
+        assertEquals(1, "\\bconst\\s+int\\s+SM_DERIVED_LOOP_COUNT\\b".toRegex().findAll(validation).count())
     }
 
     @Test
@@ -530,6 +560,8 @@ class IrisShaderContractTest {
         #define LOOP_COUNT 4
         #endif
         layout(local_size_x = 1, local_size_y = WORK_GROUP_SIZE) in;
+        #define SHADOW_SAMPLE_COUNT (WORK_GROUP_SIZE * 2)
+        shared float shadowSamples[SHADOW_SAMPLE_COUNT];
         const ivec3 workGroups = ivec3(8, 1, 1);
         void main() {
             for (int i = 0; i < LOOP_COUNT; i++) {

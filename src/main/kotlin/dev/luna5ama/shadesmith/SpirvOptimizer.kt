@@ -71,6 +71,11 @@ internal data class SpirvOptimizationResult(
     val artifactDirectory: Path,
     val modules: List<SpirvModuleResult>,
 ) {
+    val compilerModuleCount: Int
+        get() = modules.map { module ->
+            MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(module.originalSpirv)).toList()
+        }.distinct().size
+
     val processCount: Int
         get() = modules.sumOf { it.invocations.size } + finalValidationInvocations.size
 }
@@ -312,7 +317,8 @@ internal class SpirvOptimizer(
                 restorationFailure = bridge.reason
             }
         }
-        val contractSource = if (restorationFailure == null) {
+        val deferFinalRestoration = request.structuralPlan != null
+        val contractSource = if (restorationFailure == null && !deferFinalRestoration) {
             when (val contracts = patcher.restoreContracts(internalCoreSource, patch)) {
                 is IrisContractRestoration.Restored -> contracts.source.also {
                     patcher.validateContract(it, patch)
@@ -347,7 +353,7 @@ internal class SpirvOptimizer(
                 restorationFailure = bridgeCompletion.reason
             }
         }
-        val restored = if (restorationFailure == null) {
+        val restored = if (restorationFailure == null && !deferFinalRestoration) {
             when (
                 val bridges = SpirvSettingBridge.placeAfterDefinitions(
                     bridgeSource,
@@ -401,10 +407,19 @@ internal class SpirvOptimizer(
         }
         val validationSource = moduleDirectory.resolve("validation.glsl")
         validationSource.writeText(validationCompilerSource)
-        val validationSpirv = moduleDirectory.resolve("validation.spv")
-        val validationInvocation = toolchain.compileInvocation(request.stage, validationSource, validationSpirv)
-        phase(request, SpirvRoundTripPhase.RECOMPILE, moduleDirectory, moduleSourceName) {
-            toolchain.execute(validationInvocation)
+        val validationSpirv = if (deferFinalRestoration) {
+            requestDirectory.resolve("final-structural-validation").resolve(safeName(module.name)).resolve("final.spv")
+        } else {
+            moduleDirectory.resolve("validation.spv")
+        }
+        val validationInvocation = if (deferFinalRestoration) {
+            null
+        } else {
+            toolchain.compileInvocation(request.stage, validationSource, validationSpirv).also { invocation ->
+                phase(request, SpirvRoundTripPhase.RECOMPILE, moduleDirectory, moduleSourceName) {
+                    toolchain.execute(invocation)
+                }
+            }
         }
 
         val emissionCore = phase(request, SpirvRoundTripPhase.RESTORE, moduleDirectory, moduleSourceName) {
@@ -421,7 +436,7 @@ internal class SpirvOptimizer(
                 sourceContracts = module.irisContracts,
             )
         }
-        if (restorationFailure == null) {
+        if (restorationFailure == null && !deferFinalRestoration) {
             phase(request, SpirvRoundTripPhase.VALIDATE, moduleDirectory, moduleSourceName) {
                 patcher.validateContract(emissionSource, emissionPatch)
             }
@@ -446,7 +461,7 @@ internal class SpirvOptimizer(
             originalSpirv = originalSpirv,
             optimizedSpirv = optimizedSpirv,
             validationSpirv = validationSpirv,
-            invocations = listOf(
+            invocations = listOfNotNull(
                 compileInvocation,
                 optimizeInvocation,
                 decompileInvocation,
@@ -464,6 +479,9 @@ internal class SpirvOptimizer(
     ): List<SpirvInvocation> {
         val finalDirectory = requestDirectory.resolve("final-structural-validation")
         finalDirectory.createDirectories()
+        val varying = ShaderVaryingStructuralSlots.from(
+            modules.map { requireNotNull(it.structuralSignature) },
+        )
         val materializer = ShaderCompilerCopyMaterializer(
             finalDirectory.resolve("cc"),
             processGate = processGate,
@@ -524,7 +542,7 @@ internal class SpirvOptimizer(
                 signature.requiredCapabilities,
                 signature.localSizeFallback,
             )
-            if (actualSignature != signature) {
+            if (!sameStructuralProjection(actualSignature, signature, varying)) {
                 fail(
                     request,
                     SpirvRoundTripPhase.VALIDATE,
@@ -589,6 +607,31 @@ internal class SpirvOptimizer(
             }
             invocation
         }
+    }
+
+    private fun sameStructuralProjection(
+        actual: ShaderStructuralSignature,
+        expected: ShaderStructuralSignature,
+        varying: ShaderVaryingStructuralSlots,
+    ): Boolean {
+        fun compatible(
+            actualValues: List<String>,
+            expectedValues: List<String>,
+            varyingValues: Set<String>,
+            include: (String) -> Boolean = { true },
+        ): Boolean {
+            val expectedProjection = expectedValues.filterTo(linkedSetOf()) {
+                it in varyingValues && include(it)
+            }
+            return actualValues.filter { it in varyingValues && include(it) }
+                .all(expectedProjection::contains)
+        }
+        return actual.stage == expected.stage &&
+            actual.requiredCapabilities == expected.requiredCapabilities &&
+            actual.localSizeFallback == expected.localSizeFallback &&
+            compatible(actual.resources, expected.resources, varying.resources) { !it.startsWith("shared ") } &&
+            compatible(actual.stageInterfaces, expected.stageInterfaces, varying.interfaces) &&
+            compatible(actual.functionAbi, expected.functionAbi, varying.functionAbi)
     }
 
     private fun validateModules(

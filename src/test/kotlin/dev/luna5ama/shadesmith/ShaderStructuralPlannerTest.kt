@@ -15,8 +15,10 @@ class ShaderStructuralPlannerTest {
     fun independentStructuralComponentsUseCoverageRowsInsteadOfCartesianProduct() = withWorkspace { workspace ->
         val base = ShaderCompilerCopyPlanner.plan(independentResources(), "independent.csh")
 
+        val result = ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE)
         val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
-            ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE),
+            result,
+            (result as? ShaderStructuralPlanningResult.Preserved)?.reason,
         ).plan
 
         assertEquals(2, planned.graph.components.size)
@@ -46,6 +48,35 @@ class ShaderStructuralPlannerTest {
         ).modules
         assertEquals(3, finalized.size)
         optimizeAll(workspace, independentResources(), ShaderStage.COMPUTE, finalized.map { it.module })
+    }
+
+    @Test
+    fun identicalLocalsInDifferentFunctionsDoNotCoupleStructuralComponents() {
+        val source = buildString {
+            appendLine("#version 460 compatibility")
+            repeat(8) { appendLine("//#define SETTING_$it") }
+            repeat(8) { index ->
+                appendLine("float evaluate$index() {")
+                appendLine("#ifdef SETTING_$index")
+                appendLine("    float value = 1.0;")
+                appendLine("#else")
+                appendLine("    float value = 0.0;")
+                appendLine("#endif")
+                appendLine("    return value;")
+                appendLine("}")
+            }
+            appendLine("layout(local_size_x = 1) in;")
+            appendLine("void main() { float value = evaluate0(); }")
+        }
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(
+                ShaderCompilerCopyPlanner.plan(source, "independent-function-locals.csh"),
+                ShaderStage.COMPUTE,
+            ),
+        ).plan
+
+        assertEquals(8, planned.graph.components.size)
+        assertEquals(9, planned.rows.size)
     }
 
     @Test
@@ -92,6 +123,151 @@ class ShaderStructuralPlannerTest {
 
         assertEquals(1, base.compilerModuleCount)
         assertTrue(!ShaderStructuralPlanner.requiresPlanning(base))
+    }
+
+    @Test
+    fun tokenPasteFailsClosedWhenFloatArgumentsCannotBeSeparated() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define SETTING_GAIN 0.5 //[0.5 1.0]
+            #define SELECTED_MODE SETTING_MODE
+            #define PASTE_IMPL(a, b) a ## b
+            #define PASTE(a, b) PASTE_IMPL(a, b)
+            #define APPLY(value) PASTE(mode, SELECTED_MODE)(value * SETTING_GAIN)
+            float mode0(float value) { return value; }
+            float mode1(float value) { return value + 1.0; }
+            layout(local_size_x = 1) in;
+            void main() { float value = APPLY(2.0); }
+        """.trimIndent()
+        val base = ShaderCompilerCopyPlanner.plan(source, "token-paste-float.csh")
+        val preserved = assertIs<ShaderStructuralPlanningResult.Preserved>(
+            ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE),
+        )
+
+        assertTrue("floating-point structural settings" in preserved.reason, preserved.reason)
+        assertTrue("SETTING_GAIN" in preserved.reason)
+    }
+
+    @Test
+    fun capabilitiesDoNotEvaluateLaterUnrelatedFloatControlFlow() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_EXTENSION
+            #ifdef SETTING_EXTENSION
+            #extension GL_ARB_gpu_shader_int64 : enable
+            #endif
+            #define SETTING_LAYOUT 0 //[0 1]
+            #define SETTING_GAIN 0.5 //[0.0 0.5 1.0]
+            #if SETTING_LAYOUT == 0
+            layout(r32f) uniform image2D target;
+            #else
+            layout(r32ui) uniform uimage2D target;
+            #endif
+            layout(local_size_x = 1) in;
+            void main() {
+            #if SETTING_GAIN > 0.0
+                float value = SETTING_GAIN;
+            #endif
+            }
+        """.trimIndent()
+        val base = ShaderCompilerCopyPlanner.plan(source, "unconditional-capability.csh")
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE),
+        ).plan
+
+        assertEquals(3, planned.rows.size)
+        assertTrue(planned.rows.any { it.requiredCapabilities == listOf("GL_ARB_gpu_shader_int64:enable") })
+        assertTrue(planned.rows.any { it.requiredCapabilities.isEmpty() })
+    }
+
+    @Test
+    fun structuralSelectionDoesNotEvaluateUnrelatedFloatControlFlow() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_LAYOUT 0 //[0 1]
+            #define SETTING_GAIN 0.5 //[0.0 0.5 1.0]
+            #if SETTING_LAYOUT == 0
+            layout(r32f) uniform image2D target;
+            #else
+            layout(r32ui) uniform uimage2D target;
+            #endif
+            layout(local_size_x = 1) in;
+            void main() {
+            #if SETTING_LAYOUT == 0
+                imageStore(target, ivec2(0), vec4(1.0));
+            #else
+                imageStore(target, ivec2(0), uvec4(1u));
+            #endif
+            #if SETTING_GAIN > 0.0
+                float value = SETTING_GAIN;
+            #endif
+            }
+        """.trimIndent()
+        val base = ShaderCompilerCopyPlanner.plan(source, "evaluation-failure.csh")
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE),
+        ).plan
+
+        assertEquals(2, planned.rows.size)
+        planned.rows.forEach { row ->
+            assertContains(requireNotNull(row.compilerPlan.compilerSource), "SM_SETTING_GAIN")
+        }
+    }
+
+    @Test
+    fun multilineFunctionBodiesDoNotBecomeAbiBlocks() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_GAIN 0.5 //[0.0 0.5 1.0]
+            float evaluate(
+                float value
+            ) {
+                return value * SETTING_GAIN;
+            }
+            layout(local_size_x = 1) in;
+            void main() { float value = evaluate(1.0); }
+        """.trimIndent()
+        val base = ShaderCompilerCopyPlanner.plan(source, "multiline-function-body.csh")
+
+        assertTrue(!ShaderStructuralPlanner.requiresPlanning(base), base.structuralBlockers.toString())
+    }
+
+    @Test
+    fun multilineFunctionSignaturesRemainStructural() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_COUNT 2 //[2 4]
+            float evaluate(
+                float value[SETTING_COUNT]
+            ) {
+                return value[0];
+            }
+            layout(local_size_x = 1) in;
+            void main() {}
+        """.trimIndent()
+        val base = ShaderCompilerCopyPlanner.plan(source, "multiline-function-signature.csh")
+
+        assertTrue(ShaderStructuralPlanner.requiresPlanning(base), base.structuralBlockers.toString())
+    }
+
+    @Test
+    fun commentsDoNotTurnFunctionPrototypesIntoResources() {
+        val signature = ShaderStructuralSignatureExtractor.extract(
+            ShaderStage.COMPUTE,
+            """
+                #version 460 core
+                // Uniform buffer compatibility helper.
+                float ffxSqrt(float value);
+                layout(local_size_x = 1) in;
+                void main() {}
+            """.trimIndent(),
+            emptyList(),
+            null,
+        )
+
+        assertTrue(signature.resources.isEmpty(), signature.resources.toString())
+        assertEquals(listOf("float ffxSqrt(float value);"), signature.functionAbi)
     }
 
     @Test
@@ -142,10 +318,19 @@ class ShaderStructuralPlannerTest {
         """.trimIndent()
         val base = ShaderCompilerCopyPlanner.plan(source, "storage-array.csh")
         assertContains(base.structuralBlockers.single().reason, "resource block member")
+        val result = ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE)
         val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
-            ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE),
+            result,
+            (result as? ShaderStructuralPlanningResult.Preserved)?.reason,
         ).plan
 
+        assertEquals(null, planned.restorationPlan.issue)
+        assertEquals(1, planned.restorationPlan.islands.size)
+        val island = planned.restorationPlan.islands.single()
+        assertContains(island.exactText, "layout(std430, binding = 0)")
+        assertContains(island.exactText, "uint tail;")
+        assertEquals(IrisSourceAnchor(IrisAnchorKind.VERSION, "version"), island.beforeAnchor)
+        assertEquals(IrisSourceAnchor(IrisAnchorKind.FUNCTION, "main"), island.afterAnchor)
         assertEquals(2, planned.materializationRows().size)
         val arraySizes = planned.materializationRows().map { row ->
             val compilerSource = requireNotNull(row.compilerPlan.compilerSource)
@@ -253,6 +438,64 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
+    fun optimizedAwayStructuralFunctionDoesNotForceSourcePreservation() = withWorkspace { workspace ->
+        val source = optimizedAwayStructuralFunction()
+        val result = optimizeStructural(workspace, "dead-function.csh", source, ShaderStage.COMPUTE)
+        val exactIsland = """
+            #ifdef SETTING_FLOAT
+            float unusedStructural(float value) { return value; }
+            #else
+            int unusedStructural(int value) { return value; }
+            #endif
+        """.trimIndent()
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertContains(result.source, exactIsland)
+        assertEquals(2, result.structuralSignatures.size)
+        assertEquals(2, result.finalValidationInvocations.size)
+    }
+
+    @Test
+    fun optimizedAwayCommonFunctionDoesNotChangeStructuralAbi() = withWorkspace { workspace ->
+        val source = equalStructuralBodies().replace(
+            "layout(local_size_x = 1) in;",
+            "float unusedCommon(float value) { return value; }\nlayout(local_size_x = 1) in;",
+        )
+        val result = optimizeStructural(workspace, "dead-common.csh", source, ShaderStage.COMPUTE)
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertFalse("unusedCommon" in result.source)
+        assertEquals(2, result.finalValidationInvocations.size)
+    }
+
+    @Test
+    fun structuralContractsUseDurablePrologueAnchors() {
+        val source = equalStructuralBodies()
+        val base = ShaderCompilerCopyPlanner.plan(source, "durable-contract.csh")
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE),
+        ).plan
+
+        planned.restorationPlan.restorationContracts.forEach { contract ->
+            assertEquals(IrisSourceAnchor(IrisAnchorKind.VERSION, "version"), contract.beforeAnchor)
+            assertEquals(IrisSourceAnchor(IrisAnchorKind.FUNCTION, "main"), contract.afterAnchor)
+            assertEquals(IrisAnchorPlacement.AFTER_BEFORE, contract.placement)
+        }
+    }
+
+    @Test
+    fun structuralResourceCommentsDoNotPreventCrossOutputMatching() = withWorkspace { workspace ->
+        val source = commentedStructuralResource()
+        val result = optimizeStructural(workspace, "commented-resource.csh", source, ShaderStage.COMPUTE)
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertContains(result.source, "// wide storage contract")
+        assertContains(result.source, "// narrow storage contract")
+        assertEquals(2, result.structuralSignatures.size)
+        assertEquals(2, result.finalValidationInvocations.size)
+    }
+
+    @Test
     fun mixedStructuralAndOrdinaryUsesRestoreOnlyAbiIsland() = withWorkspace { workspace ->
         val source = mixedStructuralAndOrdinaryUses()
         val result = optimizeStructural(workspace, "mixed.csh", source, ShaderStage.COMPUTE)
@@ -318,7 +561,8 @@ class ShaderStructuralPlannerTest {
         assertContains(first.fallbackReason.orEmpty(), "optimized structural semantic bodies diverged")
         assertEquals(first.fallbackReason, second.fallbackReason)
         assertTrue(first.modules.size >= 2)
-        assertTrue(first.modules.all { Files.isRegularFile(it.validationSpirv) })
+        assertTrue(first.finalValidationInvocations.isEmpty())
+        assertTrue(first.modules.all { Files.notExists(it.validationSpirv) })
     }
 
     @Test
@@ -543,6 +787,32 @@ class ShaderStructuralPlannerTest {
         #endif
         layout(local_size_x = 1) in;
         const ivec3 workGroups = ivec3(1, 1, 1);
+        void main() { imageStore(target, ivec2(0), vec4(1.0)); }
+    """.trimIndent()
+
+    private fun optimizedAwayStructuralFunction(): String = """
+        #version 460 compatibility
+        //#define SETTING_FLOAT
+        #ifdef SETTING_FLOAT
+        float unusedStructural(float value) { return value; }
+        #else
+        int unusedStructural(int value) { return value; }
+        #endif
+        layout(local_size_x = 1) in;
+        void main() {}
+    """.trimIndent()
+
+    private fun commentedStructuralResource(): String = """
+        #version 460 compatibility
+        //#define SETTING_WIDE
+        #ifdef SETTING_WIDE
+        // wide storage contract
+        layout(rgba16f, binding = 0) uniform image2D target;
+        #else
+        // narrow storage contract
+        layout(r32f, binding = 0) uniform image2D target;
+        #endif
+        layout(local_size_x = 1) in;
         void main() { imageStore(target, ivec2(0), vec4(1.0)); }
     """.trimIndent()
 

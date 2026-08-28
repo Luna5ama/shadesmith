@@ -578,6 +578,7 @@ internal object ShaderCompilerCopyPlanner {
         }
         var result = applyReplacements(source, replacements)
         result = replaceIdentifierTokens(result, settings.associate { it.name to it.compilerName })
+        result = relaxAggregateSpecializationInitializers(result, macros)
         if (settings.isEmpty()) return result
 
         val newline = when {
@@ -604,6 +605,29 @@ internal object ShaderCompilerCopyPlanner {
         val insertion = compilerDeclarationInsertionOffset(result, version.range.last + 1)
         val prefix = if (insertion == version.range.last + 1) newline else ""
         return result.substring(0, insertion) + prefix + declarationBlock + result.substring(insertion)
+    }
+
+    private fun relaxAggregateSpecializationInitializers(
+        source: String,
+        macros: List<ShaderMacroDependency>,
+    ): String {
+        val settingDependentMacros = macros.filter { it.settingDependencies.isNotEmpty() }.mapTo(hashSetOf()) { it.name }
+        val regions = findSourceRegions(source, SourceMap(source, "compiler-copy aggregate specialization"))
+        val replacements = regions.filter {
+            it.kind == ShaderSourceRegionKind.TOP_LEVEL_DECLARATION
+        }.mapNotNull { region ->
+            val declaration = region.exactSlice
+            val settingDependent = COMPILER_SETTING_PREFIX in declaration ||
+                identifiers(maskCommentsAndStrings(declaration)).any(settingDependentMacros::contains)
+            if (!settingDependent) return@mapNotNull null
+            val match = GLOBAL_CONST_INITIALIZER.find(declaration) ?: return@mapNotNull null
+            val scalar = match.groupValues[1] in SCALAR_GLSL_TYPES &&
+                match.groupValues[2].isEmpty() && match.groupValues[3].isEmpty()
+            if (scalar) return@mapNotNull null
+            val start = region.startOffset + match.range.first
+            Replacement(start, start + "const".length, " ".repeat("const".length))
+        }
+        return applyReplacements(source, replacements)
     }
 
     private fun compilerDeclarationInsertionOffset(source: String, versionEnd: Int): Int {
@@ -863,16 +887,11 @@ internal object ShaderCompilerCopyPlanner {
         if (settingNames.isEmpty()) return emptyList()
         val directiveLines = directives.flatMapTo(hashSetOf()) { it.sourceLine..it.endLine }
         val maskedSource = maskCommentsAndStrings(source)
-        val abiBlockLines = hashSetOf<Int>()
-        var inAbiBlock = false
-        sourceMap.lines.forEach { line ->
-            val lexical = maskCommentsAndStrings(line.text)
-            val opensDeclarationBlock = line.braceDepth == 0 && '{' in lexical &&
-                !FUNCTION_WITH_OPEN.containsMatchIn(lexical)
-            if (!inAbiBlock && opensDeclarationBlock) inAbiBlock = true
-            if (inAbiBlock) abiBlockLines += line.number
-            if (inAbiBlock && line.braceDepth <= 1 && '}' in lexical) inAbiBlock = false
-        }
+        val topLevelBlocks = scanTopLevelGlslBlocks(source, maskedSource)
+        val abiBlocks = topLevelBlocks.filter { it.kind == TopLevelGlslBlockKind.ABI }
+        val abiBlockRanges = abiBlocks.map { it.fullRange }
+        val functionSignatureRanges = topLevelBlocks.filter { it.kind == TopLevelGlslBlockKind.FUNCTION }
+            .map { it.prefixRange }
         val macrosByName = macros.associateBy { it.name }
         val tokenPasteMemo = mutableMapOf<String, Boolean>()
         fun usesTokenPaste(name: String, visiting: MutableSet<String>): Boolean {
@@ -885,36 +904,46 @@ internal object ShaderCompilerCopyPlanner {
             tokenPasteMemo[name] = result
             return result
         }
-        return sourceMap.lines.mapNotNull { line ->
-            if (line.number in directiveLines) return@mapNotNull null
-            val lineIdentifiers = identifiers(maskCommentsAndStrings(line.text))
-            val settingDependencies = buildSet {
+        fun settingDependencies(text: String): Set<String> {
+            val lineIdentifiers = identifiers(maskCommentsAndStrings(text))
+            return buildSet {
                 addAll(lineIdentifiers.filter(settingNames::contains))
                 lineIdentifiers.forEach { addAll(macrosByName[it]?.settingDependencies.orEmpty()) }
             }
-            if (settingDependencies.isEmpty()) return@mapNotNull null
-            val tokenPaste = TOKEN_PASTE.containsMatchIn(line.text) || lineIdentifiers.any {
+        }
+        val blocks = abiBlocks.mapNotNull { block ->
+            val text = source.substring(block.fullRange)
+            if (settingDependencies(text).isEmpty()) return@mapNotNull null
+            val blockIdentifiers = identifiers(maskCommentsAndStrings(text))
+            val tokenPaste = TOKEN_PASTE.containsMatchIn(text) || blockIdentifiers.any {
+                usesTokenPaste(it, linkedSetOf())
+            }
+            ShaderCompilerCopyBlocker(
+                sourceMap.lineAt(block.fullRange.first),
+                if (tokenPaste) "setting participates in token paste" else "setting affects a resource block member or layout",
+            )
+        }
+        val direct = sourceMap.lines.mapNotNull { line ->
+            if (line.number in directiveLines) return@mapNotNull null
+            val analysisText = maskGlslRanges(
+                line.text,
+                line.range.first,
+                functionSignatureRanges + abiBlockRanges,
+            )
+            if (settingDependencies(analysisText).isEmpty()) return@mapNotNull null
+            val lineIdentifiers = identifiers(maskCommentsAndStrings(analysisText))
+            val tokenPaste = TOKEN_PASTE.containsMatchIn(analysisText) || lineIdentifiers.any {
                 usesTokenPaste(it, linkedSetOf())
             }
             when {
-                LAYOUT_USE.containsMatchIn(line.text) -> ShaderCompilerCopyBlocker(
+                LAYOUT_USE.containsMatchIn(analysisText) -> ShaderCompilerCopyBlocker(
                     line.number,
                     "setting affects a layout or execution-mode directive",
                 )
 
-                line.number in abiBlockLines -> ShaderCompilerCopyBlocker(
-                    line.number,
-                    "setting affects a resource block member or layout",
-                )
-
-                line.braceDepth == 0 && ABI_DECLARATION.containsMatchIn(line.text) -> ShaderCompilerCopyBlocker(
+                line.braceDepth == 0 && ABI_DECLARATION.containsMatchIn(analysisText) -> ShaderCompilerCopyBlocker(
                     line.number,
                     "setting affects a resource or stage-interface declaration",
-                )
-
-                line.braceDepth == 0 && FUNCTION_WITH_OPEN.containsMatchIn(line.text) -> ShaderCompilerCopyBlocker(
-                    line.number,
-                    "setting affects a function signature or ABI",
                 )
 
                 tokenPaste -> ShaderCompilerCopyBlocker(
@@ -925,6 +954,14 @@ internal object ShaderCompilerCopyPlanner {
                 else -> null
             }
         }
+        val functions = topLevelBlocks.filter { it.kind == TopLevelGlslBlockKind.FUNCTION }.mapNotNull { block ->
+            if (settingDependencies(source.substring(block.prefixRange)).isEmpty()) return@mapNotNull null
+            ShaderCompilerCopyBlocker(
+                sourceMap.lineAt(block.prefixRange.first),
+                "setting affects a function signature or ABI",
+            )
+        }
+        return (blocks + direct + functions).distinct()
     }
 
     private fun findSourceRegions(source: String, sourceMap: SourceMap): List<ShaderSourceRegion> {
@@ -1275,7 +1312,7 @@ internal object ShaderCompilerCopyPlanner {
             val depths = lineBraceDepths(source)
             lines = startsList.mapIndexed { index, start ->
                 val end = if (index + 1 < startsList.size) startsList[index + 1] else source.length
-                SourceLine(index + 1, source.substring(start, end), depths.getOrElse(index) { 0 })
+                SourceLine(index + 1, source.substring(start, end), start until end, depths.getOrElse(index) { 0 })
             }
         }
 
@@ -1293,7 +1330,7 @@ internal object ShaderCompilerCopyPlanner {
         }
     }
 
-    private data class SourceLine(val number: Int, val text: String, val braceDepth: Int)
+    private data class SourceLine(val number: Int, val text: String, val range: IntRange, val braceDepth: Int)
 
     private fun lineBraceDepths(source: String): List<Int> {
         val masked = maskCommentsAndStrings(source)
@@ -1345,6 +1382,7 @@ internal object ShaderCompilerCopyPlanner {
         PreprocessorDirectiveKind.DISABLED_DEFINE,
     )
     private const val SETTING_PREFIX = "SETTING_"
+    private const val COMPILER_SETTING_PREFIX = "SM_SETTING_"
     private val SETTING_TOKEN = "\\bSETTING_[A-Za-z0-9_]+\\b".toRegex()
     private val IDENTIFIER = "[A-Za-z_][A-Za-z0-9_]*".toRegex()
     private fun IDENTIFIER_TOKEN(name: String) = "(?<![A-Za-z0-9_])${Regex.escape(name)}(?![A-Za-z0-9_])".toRegex()
@@ -1368,6 +1406,10 @@ internal object ShaderCompilerCopyPlanner {
     private val LAYOUT_USE = "\\blayout\\s*\\(".toRegex()
     private val ABI_DECLARATION = "\\b(?:uniform|buffer|in|out|attribute|varying|shared)\\b".toRegex()
     private val ABI_BLOCK_DECLARATION = "\\b(?:uniform|buffer)\\b[^{;]*\\{".toRegex()
+    private val GLOBAL_CONST_INITIALIZER =
+        ("\\bconst\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(\\[[^=;]*])?\\s+" +
+            "[A-Za-z_][A-Za-z0-9_]*\\s*(\\[[^=;]*])?\\s*=").toRegex()
+    private val SCALAR_GLSL_TYPES = setOf("bool", "int", "uint", "float", "double")
     private val VERSION_LINE = "(?m)^[ \\t]*#version\\b[^\\r\\n]*".toRegex()
     private val LINE_ENDING = "\\r\\n|\\n|\\r".toRegex()
 }
@@ -1740,12 +1782,70 @@ internal class ShaderCompilerCopyMaterializer(
     private fun protectGlslDirectives(source: String): ProtectedCompilerCopySource {
         var namespace = "__SHADESMITH_COMPILER_DIRECTIVE__"
         while (source.contains(namespace)) namespace += '_'
+        val capabilityProtected = protectDirectiveOnlyCapabilityBlocks(source, namespace)
         return ProtectedCompilerCopySource(
-            PROTECTED_GLSL_DIRECTIVE.replace(source) { match ->
+            PROTECTED_GLSL_DIRECTIVE.replace(capabilityProtected) { match ->
                 match.groupValues[1] + "//$namespace" + match.groupValues[2]
             },
             namespace,
         )
+    }
+
+    private fun protectDirectiveOnlyCapabilityBlocks(source: String, namespace: String): String {
+        data class PhysicalLine(val start: Int, val end: Int, val content: String)
+        val starts = buildList {
+            add(0)
+            COMPILER_LINE_ENDING.findAll(source).forEach { add(it.range.last + 1) }
+        }.distinct()
+        val lines = starts.mapIndexed { index, start ->
+            val end = starts.getOrElse(index + 1) { source.length }
+            PhysicalLine(start, end, source.substring(start, end))
+        }
+        val hashes = mutableListOf<Int>()
+        var index = 0
+        while (index < lines.size) {
+            val opening = lines[index].content.trimStart()
+            if (!CAPABILITY_CONDITIONAL_OPEN.matches(opening.substringBefore('\r').substringBefore('\n'))) {
+                index++
+                continue
+            }
+            var depth = 0
+            var cursor = index
+            var closed = false
+            var directiveOnly = true
+            val blockHashes = mutableListOf<Int>()
+            while (cursor < lines.size) {
+                val line = lines[cursor]
+                val text = line.content.trimStart().trimEnd('\r', '\n')
+                if (text.isNotBlank()) {
+                    if (!text.startsWith('#')) {
+                        directiveOnly = false
+                    } else {
+                        blockHashes += line.start + line.content.indexOf('#')
+                        when {
+                            CONDITIONAL_OPEN.matches(text) -> depth++
+                            CONDITIONAL_END.matches(text) -> {
+                                depth--
+                                if (depth == 0) {
+                                    closed = true
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+                cursor++
+            }
+            if (closed && directiveOnly) {
+                hashes += blockHashes
+                index = cursor + 1
+            } else {
+                index++
+            }
+        }
+        return hashes.distinct().sortedDescending().fold(source) { result, offset ->
+            result.substring(0, offset) + "//$namespace" + result.substring(offset)
+        }
     }
 
     private fun restoreGlslDirectives(source: String, namespace: String): String = source.replace("//$namespace", "")
@@ -1805,6 +1905,11 @@ internal class ShaderCompilerCopyMaterializer(
 
         private val INVALID_PATH_CHAR = "[^A-Za-z0-9._-]".toRegex()
         private val PROTECTED_GLSL_DIRECTIVE = "(?m)^([ \\t]*)(#(?:version|extension|pragma|line)\\b)".toRegex()
+        private val COMPILER_LINE_ENDING = "\\r\\n|\\n|\\r".toRegex()
+        private val CAPABILITY_CONDITIONAL_OPEN =
+            "#[ \\t]*if\\b.*\\bdefined[ \\t]*(?:\\([ \\t]*)?GL_[A-Za-z0-9_]+.*".toRegex()
+        private val CONDITIONAL_OPEN = "#[ \\t]*(?:if|ifdef|ifndef)\\b.*".toRegex()
+        private val CONDITIONAL_END = "#[ \\t]*endif\\b.*".toRegex()
         private val TOKEN_PASTE_BEFORE_OPENING_DELIMITER = "##(?=[ \\t]*[({\\[])".toRegex()
         private val PATH_SENSITIVE_PREPROCESSOR_BUILTIN =
             "\\b__(?:FILE|BASE_FILE)__\\b".toRegex()
