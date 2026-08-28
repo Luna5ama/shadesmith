@@ -15,6 +15,7 @@ internal data class SpirvCompilerModule(
     val source: String,
     val resourceMarkers: List<TextureResourceMarker> = emptyList(),
     val conservativeAccess: TextureAccess = TextureAccess(),
+    val irisContracts: IrisShaderContractPlan? = null,
 )
 
 internal data class SpirvOptimizationRequest(
@@ -202,6 +203,7 @@ internal class SpirvOptimizer(
             patcher.patch(
                 moduleProtection,
                 request.stage,
+                sourceContracts = module.irisContracts,
             )
         }
         val compilerPath = moduleDirectory.resolve("compiler.glsl")
@@ -243,6 +245,7 @@ internal class SpirvOptimizer(
                 restoredProtection,
                 request.stage,
                 patch.generatedLayouts,
+                patch.irisContracts,
             )
         }
         if (validationPatch.generatedLayouts.toSet() != patch.generatedLayouts.toSet()) {

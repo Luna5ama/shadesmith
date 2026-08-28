@@ -55,10 +55,18 @@ internal class ShaderPipelineException(
 internal class ShaderPipeline(
     artifactDirectory: Path,
     private val parallelism: Int = DEFAULT_PARALLELISM,
+    private val capabilityProvider: (() -> OpenGlSpirvCapabilities)? = null,
 ) {
     val artifactDirectory: Path = artifactDirectory.toAbsolutePath().normalize()
     private val metrics = PipelineMetrics()
     private val processGate = ExternalProcessGate(parallelism)
+    private val capabilities by lazy {
+        capabilityProvider?.invoke() ?: OpenGlSpirvCapabilityProbe(
+            this.artifactDirectory.resolve("capabilities"),
+            processGate = processGate,
+            metrics = metrics,
+        ).probe()
+    }
     private val materializer by lazy {
         ShaderCompilerCopyMaterializer(
             this.artifactDirectory.resolve("compiler-copies"),
@@ -164,7 +172,13 @@ internal class ShaderPipeline(
             )
         }
         val probe = TextureAccessAnalyzer.createProbe(file.code, ioContext.config)
-        val plan = ShaderCompilerCopyPlanner.plan(probe.source, sourceName)
+        val toolCapabilities = capabilities
+        val plan = ShaderCompilerCopyPlanner.plan(
+            probe.source,
+            sourceName,
+            toolCapabilities.localSizeId,
+            toolCapabilities.diagnostic,
+        )
         if (plan.structuralBlockers.isNotEmpty()) {
             val reason = plan.structuralBlockers.joinToString("; ") { "line ${it.sourceLine}: ${it.reason}" }
             return OptimizedShaderFile(

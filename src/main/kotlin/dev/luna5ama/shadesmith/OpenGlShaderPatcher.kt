@@ -39,12 +39,10 @@ internal data class OpenGlShaderPatch(
     val sourceName: String,
     val stage: ShaderStage,
     val compilerSource: String,
-    val originalVersion: String,
     val generatedLayouts: List<GeneratedShaderLayout>,
     val restorableTypeDeclarations: Map<String, String>,
     val restorableDeclarations: Map<ShaderAbiKey, String>,
-    val restoredDirectives: List<String>,
-    val restoredIrisContracts: List<String>,
+    val irisContracts: IrisShaderContractPlan,
     val originalContract: ShaderAbiContract,
 )
 
@@ -72,36 +70,39 @@ internal class OpenGlShaderPatcher {
         protectedSource: ProtectedPreprocessorSource,
         stage: ShaderStage,
         preferredLayouts: List<GeneratedShaderLayout> = emptyList(),
+        sourceContracts: IrisShaderContractPlan? = null,
     ): OpenGlShaderPatch {
-        val source = normalizeLineEndings(protectedSource.compilerSource())
-        val versionDirectives = protectedSource.directives.filter {
-            it.kind == PreprocessorDirectiveKind.VERSION
-        }
-        if (versionDirectives.size != 1) {
+        val contracts = try {
+            sourceContracts ?: IrisShaderContractExtractor.extract(
+                protectedSource.originalSource,
+                protectedSource.sourceName,
+            )
+        } catch (exception: IllegalArgumentException) {
+            val message = exception.message.orEmpty()
+            val sourceLine = "^${Regex.escape(protectedSource.sourceName)}:(\\d+):".toRegex()
+                .find(message)
+                ?.groupValues
+                ?.get(1)
+                ?.toInt()
             fail(
                 protectedSource.sourceName,
                 stage,
-                null,
-                "expected exactly one #version directive, found ${versionDirectives.size}",
+                sourceLine,
+                message.substringAfter(": ", message),
             )
         }
-        val versionDirective = versionDirectives.single()
-        val originalVersion = normalizeDirective(versionDirective.exactText)
-        val versionRange = sourceLineRange(source, versionDirective.sourceLine)
-        if (source.substring(versionRange) != originalVersion) {
-            fail(
-                protectedSource.sourceName,
-                stage,
-                versionDirective.sourceLine,
-                "#version restoration metadata does not match compiler source",
-            )
+        contracts.structuralReason?.let { reason ->
+            fail(protectedSource.sourceName, stage, null, reason)
         }
-        var compilerSource = source.replaceRange(versionRange, "#version 460 core")
-        compilerSource = patchIrisCompilerDeclarations(
-            compilerSource,
-            protectedSource.sourceName,
-            stage,
-        )
+        val contractCompilerSource = if (sourceContracts == null) {
+            contracts.compilerSource
+        } else {
+            contracts.prepareCompilerSource(protectedSource.compilerSource())
+        }
+        val source = normalizeLineEndings(contractCompilerSource)
+        val version = VERSION_REGEX.find(source)
+            ?: fail(protectedSource.sourceName, stage, null, "compiler source has no #version directive")
+        var compilerSource = source.replaceRange(version.range, "#version 460 core")
 
         val originalDeclarations = parseDeclarations(source)
         val declarations = parseDeclarations(compilerSource)
@@ -119,7 +120,6 @@ internal class OpenGlShaderPatcher {
             sourceName = protectedSource.sourceName,
             stage = stage,
             compilerSource = normalizeOutput(compilerSource),
-            originalVersion = originalVersion,
             generatedLayouts = generatedLayouts,
             restorableTypeDeclarations = collectRestorableTypeDeclarations(
                 source,
@@ -132,12 +132,7 @@ internal class OpenGlShaderPatcher {
                 protectedSource.sourceName,
                 stage,
             ),
-            restoredDirectives = collectRestoredDirectives(protectedSource),
-            restoredIrisContracts = collectIrisSourceContracts(
-                source,
-                protectedSource.sourceName,
-                stage,
-            ),
+            irisContracts = contracts,
             originalContract = analyzeContract(source, protectedSource.sourceName, stage),
         )
     }
@@ -162,11 +157,12 @@ internal class OpenGlShaderPatcher {
         restored = restoreMissingQualifiers(restored, patch)
         restored = restoreSourceContracts(restored, patch)
         validateContract(restored, patch)
-        return normalizeOutput(restored)
+        return restored.trimEnd() + "\n"
     }
 
     fun validateContract(restoredSource: String, patch: OpenGlShaderPatch) {
-        val actual = analyzeContract(restoredSource, patch.sourceName, patch.stage)
+        val compilerView = patch.irisContracts.prepareCompilerSource(restoredSource)
+        val actual = analyzeContract(compilerView, patch.sourceName, patch.stage)
         val expected = patch.originalContract
         val missing = expected.entries.keys - actual.entries.keys
         val unexpected = actual.entries.keys - expected.entries.keys
@@ -243,23 +239,13 @@ internal class OpenGlShaderPatcher {
         if (!MAIN_REGEX.containsMatchIn(restoredSource)) {
             fail(patch.sourceName, patch.stage, null, "entry point main disappeared after round-trip")
         }
-        patch.restoredDirectives.forEach { directive ->
-            if (!normalizeLineEndings(restoredSource).contains(directive)) {
+        patch.irisContracts.contracts.forEach { contract ->
+            if (!restoredSource.contains(contract.exactText)) {
                 fail(
                     patch.sourceName,
                     patch.stage,
-                    null,
-                    "source directive was not restored: ${directive.lineSequence().first()}",
-                )
-            }
-        }
-        patch.restoredIrisContracts.forEach { contract ->
-            if (!normalizeLineEndings(restoredSource).contains(contract)) {
-                fail(
-                    patch.sourceName,
-                    patch.stage,
-                    null,
-                    "Iris source contract was not restored: ${contract.lineSequence().first()}",
+                    contract.sourceLine,
+                    "Iris ${contract.kind} source contract was not restored exactly",
                 )
             }
         }
@@ -398,25 +384,15 @@ internal class OpenGlShaderPatcher {
     }
 
     private fun restoreSourceContracts(source: String, patch: OpenGlShaderPatch): String {
-        var result = removeIrisSourceContracts(source)
-        val version = VERSION_REGEX.find(result)
-            ?: fail(patch.sourceName, patch.stage, null, "spirv-cross output has no #version directive")
-        result = result.replaceRange(version.range, patch.originalVersion)
-        val missingContracts = patch.restoredDirectives.filterNot { result.contains(it) } +
-            patch.restoredIrisContracts
-        if (missingContracts.isEmpty()) return result
-
-        val restoredVersion = VERSION_REGEX.find(result)!!
-        val insertionOffset = restoredVersion.range.last + 1
-        val insertion = buildString {
-            append('\n')
-            missingContracts.forEach {
-                append(it)
-                if (!it.endsWith('\n')) append('\n')
-            }
+        return when (val restoration = patch.irisContracts.restore(source)) {
+            is IrisContractRestoration.Restored -> restoration.source
+            is IrisContractRestoration.StructuralPreservation -> fail(
+                patch.sourceName,
+                patch.stage,
+                null,
+                restoration.reason,
+            )
         }
-        result = result.substring(0, insertionOffset) + insertion + result.substring(insertionOffset)
-        return result
     }
 
     private fun restoreDeclarations(source: String, patch: OpenGlShaderPatch): String {
@@ -511,54 +487,6 @@ internal class OpenGlShaderPatcher {
         return result
     }
 
-    private fun collectRestoredDirectives(source: ProtectedPreprocessorSource): List<String> {
-        val regular = source.directives.filter {
-            it.disposition == PreprocessorDisposition.RESTORED &&
-                it.kind in RESTORED_SOURCE_DIRECTIVES
-        }.map { normalizeDirective(it.exactText) }
-        val evaluated = source.directives.filter {
-            it.disposition == PreprocessorDisposition.EVALUATED &&
-                it.kind != PreprocessorDirectiveKind.VERSION
-        }.map { normalizeDirective(it.exactText) }
-
-        return buildList {
-            addAll(regular)
-            if (evaluated.isNotEmpty()) {
-                add(
-                    buildString {
-                        appendLine("/*const*/")
-                        evaluated.forEach {
-                            append(it)
-                            if (!it.endsWith('\n')) append('\n')
-                        }
-                        append("/*const*/")
-                    },
-                )
-            }
-        }
-    }
-
-    private fun collectIrisSourceContracts(
-        source: String,
-        sourceName: String,
-        stage: ShaderStage,
-    ): List<String> {
-        val lexicalMap = buildLexicalMap(source)
-        IRIS_CONST_DIRECTIVE_REGEX.findAll(source).firstOrNull { match ->
-            lexicalMap.isCode(match.range.first) &&
-                !lexicalMap.isTopLevelCode(match.range.first) &&
-                isIrisConstDirectiveName(match.groupValues[3])
-        }?.let { directive ->
-            fail(
-                sourceName,
-                stage,
-                sourceLine(source, directive.range.first),
-                "Iris const directive ${directive.groupValues[3]} must be declared at global scope",
-            )
-        }
-        return findIrisSourceContracts(source).map { it.text }
-    }
-
     private fun collectRestorableDeclarations(
         source: String,
         declarations: List<ParsedDeclaration>,
@@ -594,71 +522,6 @@ internal class OpenGlShaderPatcher {
         return STRUCT_DECLARATION_REGEX.findAll(source)
             .filter { lexicalMap.isTopLevelCode(it.range.first) }
             .mapTo(linkedSetOf()) { it.groupValues[1] }
-    }
-
-    private fun patchIrisCompilerDeclarations(source: String, sourceName: String, stage: ShaderStage): String {
-        val lexicalMap = buildLexicalMap(source)
-        val formatDirectives = IRIS_CONST_DIRECTIVE_REGEX.findAll(source).filter { match ->
-            lexicalMap.isTopLevelCode(match.range.first) &&
-                match.groupValues[2] == "int" &&
-                IRIS_FORMAT_DIRECTIVE_NAME_REGEX.matches(match.groupValues[3])
-        }.toList()
-
-        formatDirectives.forEach { directive ->
-            val name = directive.groupValues[3]
-            val referenced = Regex("\\b${Regex.escape(name)}\\b").findAll(source).any { reference ->
-                reference.range.first !in directive.range && lexicalMap.code[reference.range.first]
-            }
-            if (referenced) {
-                fail(
-                    sourceName,
-                    stage,
-                    sourceLine(source, directive.range.first),
-                    "Iris format directive $name is also referenced by shader code",
-                )
-            }
-        }
-
-        var result = source
-        formatDirectives.asReversed().forEach { directive ->
-            result = result.replaceRange(directive.groups[5]!!.range, "0")
-        }
-        return result
-    }
-
-    private fun removeIrisSourceContracts(source: String): String {
-        var result = source
-        findIrisSourceContracts(source).asReversed().forEach { contract ->
-            result = result.removeRange(contract.range)
-        }
-        return result
-    }
-
-    private fun findIrisSourceContracts(source: String): List<IrisSourceContract> {
-        val lexicalMap = buildLexicalMap(source)
-        val candidates = buildList<IrisSourceContract> {
-            IRIS_CONST_DIRECTIVE_REGEX.findAll(source).filter { match ->
-                lexicalMap.isTopLevelCode(match.range.first) &&
-                    isIrisConstDirectiveName(match.groupValues[3])
-            }.forEach { add(IrisSourceContract(it.range, it.value)) }
-            IRIS_COMMENT_DIRECTIVE_REGEX.findAll(source).filter { match ->
-                lexicalMap.isCode(match.range.first)
-            }.forEach { add(IrisSourceContract(it.range, it.value)) }
-        }.sortedWith(compareBy<IrisSourceContract> { it.range.first }.thenByDescending { it.range.last })
-
-        return buildList<IrisSourceContract> {
-            candidates.forEach { candidate ->
-                if (none { rangesOverlap(it.range, candidate.range) }) add(candidate)
-            }
-        }.sortedBy { it.range.first }
-    }
-
-    private fun isIrisConstDirectiveName(name: String): Boolean {
-        return name in IRIS_CONST_DIRECTIVE_NAMES || IRIS_CONST_DIRECTIVE_NAME_PATTERNS.any { it.matches(name) }
-    }
-
-    private fun rangesOverlap(first: IntRange, second: IntRange): Boolean {
-        return first.first <= second.last && second.first <= first.last
     }
 
     private fun analyzeContract(source: String, sourceName: String, stage: ShaderStage): ShaderAbiContract {
@@ -1064,10 +927,6 @@ internal class OpenGlShaderPatcher {
         }
     }
 
-    private fun normalizeDirective(text: String): String {
-        return normalizeLineEndings(text).removeSuffix("\n")
-    }
-
     private fun normalizeOutput(source: String): String {
         return normalizeLineEndings(source).trimEnd() + "\n"
     }
@@ -1078,17 +937,6 @@ internal class OpenGlShaderPatcher {
 
     private fun sourceLine(source: String, offset: Int): Int {
         return source.take(offset).count { it == '\n' } + 1
-    }
-
-    private fun sourceLineRange(source: String, lineNumber: Int): IntRange {
-        var start = 0
-        repeat(lineNumber - 1) {
-            start = source.indexOf('\n', start).let { newline ->
-                if (newline < 0) source.length else newline + 1
-            }
-        }
-        val end = source.indexOf('\n', start).let { if (it < 0) source.length else it }
-        return start until end
     }
 
     private fun fail(
@@ -1141,7 +989,6 @@ internal class OpenGlShaderPatcher {
     private data class BlockDeclarationRange(val openBrace: Int, val closeBrace: Int, val semicolon: Int)
 
     private data class SourceInsertion(val offset: Int, val text: String)
-    private data class IrisSourceContract(val range: IntRange, val text: String)
     private data class LexicalMap(val depth: IntArray, val code: BooleanArray) {
         fun isCode(offset: Int): Boolean = code[offset]
         fun isTopLevelCode(offset: Int): Boolean = code[offset] && depth[offset] == 0
@@ -1177,48 +1024,6 @@ internal class OpenGlShaderPatcher {
             ).toRegex()
         private val WORKGROUP_LAYOUT_REGEX =
             """(?m)^\s*layout\s*\(([^)]*\blocal_size_[xyz]\b[^)]*)\)\s*in\s*;""".toRegex()
-        private val IRIS_CONST_DIRECTIVE_REGEX = (
-            "(?m)^([\\t ]*const[\\t ]+(int|float|vec2|ivec3|vec4|bool)[\\t ]+)" +
-                "([A-Za-z_][A-Za-z0-9_]*)([\\t ]*=[\\t ]*)([^;\\r\\n]+)(;[^\\r\\n]*)"
-            ).toRegex()
-        private val IRIS_COMMENT_DIRECTIVE_REGEX =
-            """/\*[\t ]*(?:DRAWBUFFERS|RENDERTARGETS|SHADOWRES|SHADOWFOV|SHADOWHPL|GAUX4FORMAT):[\s\S]*?\*/"""
-                .toRegex()
-        private val IRIS_CONST_DIRECTIVE_NAMES = setOf(
-            "noiseTextureResolution",
-            "sunPathRotation",
-            "ambientOcclusionLevel",
-            "wetnessHalflife",
-            "drynessHalflife",
-            "eyeBrightnessHalflife",
-            "centerDepthHalflife",
-            "shadowMapResolution",
-            "shadowMapFov",
-            "shadowDistance",
-            "shadowNearPlane",
-            "shadowFarPlane",
-            "voxelDistance",
-            "entityShadowDistanceMul",
-            "shadowDistanceRenderMul",
-            "shadowIntervalSize",
-            "shadowHardwareFiltering",
-            "generateShadowMipmap",
-            "shadowtexMipmap",
-            "generateShadowColorMipmap",
-            "shadowtexNearest",
-            "workGroups",
-            "workGroupsRender",
-        )
-        private val IRIS_CONST_DIRECTIVE_NAME_PATTERNS = listOf(
-            "(?:colortex\\d+|gcolor|gdepth|gnormal|composite|gaux[1-4])(?:Format|Clear|ClearColor|MipmapEnabled)".toRegex(),
-            "shadowHardwareFiltering\\d+".toRegex(),
-            "shadowtex\\d+(?:Mipmap|Nearest)".toRegex(),
-            "shadow\\d+MinMagNearest".toRegex(),
-            "shadowcolor\\d+(?:Mipmap|Nearest|Format|Clear|ClearColor)".toRegex(),
-            "shadowColor\\d+(?:Mipmap|Nearest|MinMagNearest)".toRegex(),
-        )
-        private val IRIS_FORMAT_DIRECTIVE_NAME_REGEX =
-            "(?:colortex\\d+|gcolor|gdepth|gnormal|composite|gaux[1-4]|shadowcolor\\d+)Format".toRegex()
         private val STAGE_LAYOUT_REGEX =
             """(?m)^\s*layout\s*\(([^)]*)\)\s*(in|out)\s*;""".toRegex()
         private val MAIN_REGEX = """\bvoid\s+main\s*\(""".toRegex()
@@ -1229,11 +1034,6 @@ internal class OpenGlShaderPatcher {
         private val WHITESPACE_REGEX = """\s+""".toRegex()
         private val LINE_COMMENT_REGEX = """//[^\r\n]*""".toRegex()
         private val BLOCK_COMMENT_REGEX = """/\*[\s\S]*?\*/""".toRegex()
-        private val RESTORED_SOURCE_DIRECTIVES = setOf(
-            PreprocessorDirectiveKind.EXTENSION,
-            PreprocessorDirectiveKind.PRAGMA,
-            PreprocessorDirectiveKind.DISABLED_DEFINE,
-        )
         private val BLOCK_KINDS = setOf(ShaderAbiKind.UNIFORM_BLOCK, ShaderAbiKind.STORAGE_BLOCK)
     }
 }

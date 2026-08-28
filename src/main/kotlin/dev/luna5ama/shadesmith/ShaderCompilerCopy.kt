@@ -84,40 +84,44 @@ internal data class ShaderCompilerCopyPlan(
     val sourceRegions: List<ShaderSourceRegion>,
     val conditionals: List<ShaderConditionalRegion>,
     val structuralBlockers: List<ShaderCompilerCopyBlocker>,
+    val irisContracts: IrisShaderContractPlan,
 ) {
     val compilerModuleCount: Int
         get() = if (compilerSource == null) 0 else 1
 }
 
 internal object ShaderCompilerCopyPlanner {
-    fun plan(source: String, sourceName: String = "<shader>"): ShaderCompilerCopyPlan {
-        val protection = PreprocessorProtection.protect(source, sourceName)
-        val sourceMap = SourceMap(source, sourceName)
-        sourceMap.directives += protection.directives
-        val settingCandidates = collectSettingCandidates(protection.directives)
-        val macroDrafts = collectMacros(protection.directives)
-        val macroDependencies = resolveMacroDependencies(macroDrafts)
-        val groups = buildConditionalGroups(protection.directives, sourceMap)
-        val regions = findSourceRegions(source, sourceMap)
+    fun plan(
+        source: String,
+        sourceName: String = "<shader>",
+        localSizeIdSupported: Boolean = true,
+        localSizeProbeDiagnostic: String? = null,
+    ): ShaderCompilerCopyPlan {
+        val initialProtection = PreprocessorProtection.protect(source, sourceName)
+        val initialSourceMap = SourceMap(source, sourceName)
+        initialSourceMap.directives += initialProtection.directives
+        val settingCandidates = collectSettingCandidates(initialProtection.directives)
+        val initialMacroDependencies = resolveMacroDependencies(collectMacros(initialProtection.directives))
+        val initialGroups = buildConditionalGroups(initialProtection.directives, initialSourceMap)
 
         val referencedSettings = linkedSetOf<String>()
-        groups.forEach { group ->
+        initialGroups.forEach { group ->
             group.settingDependencies += settingDependencies(
                 group.delimiters.mapNotNull { it.expression }.joinToString(" "),
-                macroDependencies,
+                initialMacroDependencies,
             )
             referencedSettings += group.settingDependencies
         }
-        val definitionRanges = protection.directives
+        val definitionRanges = initialProtection.directives
             .filter { it.macroName?.startsWith(SETTING_PREFIX) == true }
-            .map { sourceMap.directiveRange(it) }
+            .map { initialSourceMap.directiveRange(it) }
         val sourceWithoutDefinitions = applyReplacements(
             source,
             definitionRanges.map { Replacement(it.first, it.last + 1, maskSource(source.substring(it))) },
         )
         val executableSource = maskCommentsAndStrings(sourceWithoutDefinitions)
         referencedSettings += SETTING_TOKEN.findAll(executableSource).map { it.value }
-        referencedSettings += macroDependencies
+        referencedSettings += initialMacroDependencies
             .filter { macro -> macro.settingDependencies.isNotEmpty() && macro.name in identifiers(executableSource) }
             .flatMap { it.settingDependencies }
 
@@ -126,7 +130,7 @@ internal object ShaderCompilerCopyPlanner {
             val candidates = settingCandidates[name].orEmpty()
             if (candidates.isEmpty()) {
                 blockers += ShaderCompilerCopyBlocker(
-                    firstSettingUseLine(source, sourceMap, name),
+                    firstSettingUseLine(source, initialSourceMap, name),
                     "setting $name has no scalar option definition in this compiler root",
                 )
                 null
@@ -159,15 +163,40 @@ internal object ShaderCompilerCopyPlanner {
         }
         val settingsByName = typedSettings.associateBy { it.name }
 
+        val irisContracts = IrisShaderContractExtractor.extract(
+            source,
+            sourceName,
+            typedSettings,
+            existingIds,
+            localSizeIdSupported,
+            localSizeProbeDiagnostic,
+        )
+        val planningSource = irisContracts.compilerSource
+        val protection = PreprocessorProtection.protect(planningSource, sourceName)
+        val sourceMap = SourceMap(planningSource, sourceName)
+        sourceMap.directives += protection.directives
+        val macroDependencies = resolveMacroDependencies(collectMacros(protection.directives))
+        val groups = buildConditionalGroups(protection.directives, sourceMap)
+        val regions = findSourceRegions(planningSource, sourceMap)
+        groups.forEach { group ->
+            group.settingDependencies += settingDependencies(
+                group.delimiters.mapNotNull { it.expression }.joinToString(" "),
+                macroDependencies,
+            )
+        }
+        irisContracts.structuralReason?.let { reason ->
+            blockers += ShaderCompilerCopyBlocker(1, reason)
+        }
+
         val groupById = groups.associateBy { it.id }
         groups.sortedByDescending { it.depth }.forEach { group ->
-            classifyGroup(group, groupById, source, sourceMap, settingsByName, macroDependencies, regions)
+            classifyGroup(group, groupById, planningSource, sourceMap, settingsByName, macroDependencies, regions)
             if (group.disposition == ShaderConditionalDisposition.STRUCTURAL) {
                 blockers += ShaderCompilerCopyBlocker(group.opener.sourceLine, requireNotNull(group.reason))
             }
         }
         blockers += findStructuralSettingUses(
-            source,
+            planningSource,
             sourceMap,
             protection.directives,
             settingsByName.keys,
@@ -183,7 +212,7 @@ internal object ShaderCompilerCopyPlanner {
 
         val distinctBlockers = blockers.distinctBy { it.sourceLine to it.reason }.sortedBy { it.sourceLine }
         val compilerCandidate = buildCompilerSource(
-            source,
+            planningSource,
             sourceMap,
             protection.directives,
             typedSettings,
@@ -203,13 +232,14 @@ internal object ShaderCompilerCopyPlanner {
                     parentId = group.parentId,
                     sourceLine = group.opener.sourceLine,
                     endLine = requireNotNull(group.endif).endLine,
-                    exactSlice = source.substring(group.range),
+                    exactSlice = planningSource.substring(group.range),
                     settingDependencies = group.settingDependencies.toSortedSet(),
                     disposition = group.disposition,
                     reason = group.reason,
                 )
             },
             structuralBlockers = distinctBlockers,
+            irisContracts = irisContracts,
         )
     }
 
@@ -551,8 +581,30 @@ internal object ShaderCompilerCopyPlanner {
         }
         val version = VERSION_LINE.find(result)
             ?: throw PreprocessorProtectionException(sourceMap.sourceName, 1, "compiler root has no #version directive")
-        val insertion = version.range.last + 1
-        return result.substring(0, insertion) + newline + declarationBlock + result.substring(insertion)
+        val insertion = compilerDeclarationInsertionOffset(result, version.range.last + 1)
+        val prefix = if (insertion == version.range.last + 1) newline else ""
+        return result.substring(0, insertion) + prefix + declarationBlock + result.substring(insertion)
+    }
+
+    private fun compilerDeclarationInsertionOffset(source: String, versionEnd: Int): Int {
+        var cursor = versionEnd
+        var insertion = versionEnd
+        while (cursor < source.length) {
+            if (source[cursor] == '\r') {
+                cursor++
+                if (source.getOrNull(cursor) == '\n') cursor++
+                insertion = cursor
+            } else if (source[cursor] == '\n') {
+                cursor++
+                insertion = cursor
+            }
+            val lineEnd = source.indexOfAny(charArrayOf('\r', '\n'), cursor).let { if (it < 0) source.length else it }
+            val line = source.substring(cursor, lineEnd).trim()
+            if (line.isNotEmpty() && !line.startsWith("#extension")) break
+            cursor = lineEnd
+            insertion = lineEnd
+        }
+        return insertion
     }
 
     private fun renderGroup(
@@ -1326,6 +1378,7 @@ internal class ShaderCompilerCopyMaterializer(
             source = materialized,
             resourceMarkers = probe.markers,
             conservativeAccess = probe.conservativeAccess,
+            irisContracts = plan.irisContracts,
         )
     }
 

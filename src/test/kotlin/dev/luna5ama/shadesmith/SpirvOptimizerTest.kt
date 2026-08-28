@@ -104,7 +104,7 @@ class SpirvOptimizerTest {
         assertContains(module.source, "uniform Params")
         assertContains(module.source, "float weights[];")
         assertContains(module.source, "vec4 tint;")
-        assertContains(module.source, "layout(local_size_x = 8, local_size_y = 4, local_size_z = 1) in;")
+        assertContains(module.source, "layout(local_size_x = 8, local_size_y = 4) in;")
         assertContains(
             module.source,
             "const ivec3 workGroups = ivec3(32, 18, 1); // Iris dispatch contract",
@@ -127,8 +127,8 @@ class SpirvOptimizerTest {
         val firstSpirv = firstModule.optimizedSpirv.readBytes()
         val second = optimizer.optimize(request)
 
-        assertContains(firstModule.artifactDirectory.resolve("compiler.glsl").readText(), "colortex3Format = 0;")
-        assertContains(firstModule.artifactDirectory.resolve("validation.glsl").readText(), "colortex3Format = 0;")
+        assertFalse(firstModule.artifactDirectory.resolve("compiler.glsl").readText().contains("colortex3Format"))
+        assertFalse(firstModule.artifactDirectory.resolve("validation.glsl").readText().contains("colortex3Format"))
         assertContains(restored, "/* RENDERTARGETS:3 */")
         assertContains(restored, "const int noiseTextureResolution = 256;")
         assertContains(restored, "const float sunPathRotation = -20.0; //[-90.0 -20.0 0.0 20.0 90.0]")
