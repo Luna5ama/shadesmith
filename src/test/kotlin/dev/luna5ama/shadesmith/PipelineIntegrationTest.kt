@@ -4,7 +4,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
+import kotlin.io.path.fileSize
 import kotlin.io.path.isRegularFile
+import kotlin.io.path.listDirectoryEntries
 import kotlin.io.path.name
 import kotlin.io.path.readBytes
 import kotlin.io.path.readText
@@ -33,6 +35,7 @@ class PipelineIntegrationTest {
 
         assertEquals(firstSnapshot, secondSnapshot)
         assertEquals(firstResult.map { it.textureAccess }, secondResult.map { it.textureAccess })
+        assertEquals(firstResult.map { it.file.path.name }.sorted(), firstResult.map { it.file.path.name })
         assertEquals(setOf("transient_a"), access(firstResult, "composite.csh").reads)
         assertEquals(emptySet(), access(firstResult, "composite1.csh").reads)
         assertEquals(setOf("transient_b"), access(firstResult, "composite1.csh").writes)
@@ -44,6 +47,10 @@ class PipelineIntegrationTest {
         assertContains(emittedBranchShader, "#define transient_branch_sample(x)")
         assertFalse("shadesmith_resource_" in emittedBranchShader)
         assertContains(properties.readText(), "image.uimg_rgba16f=usam_rgba16f RGBA RGBA16F HALF_FLOAT false true 1.0 1.0")
+        val hostFragment = firstResult.single { it.file.path.name == "voxy_hook.glsl" }
+        assertEquals(ShaderProcessingMode.PRESERVED_HOST_INTEGRATION, hostFragment.processingMode)
+        assertEquals(hostFragment.file.code, output.resolve("voxy_hook.glsl").readText())
+        assertContains(artifacts.resolve("boundaries.tsv").readText(), "voxy_hook.glsl\tfrag")
     }
 
     @Test
@@ -72,13 +79,67 @@ class PipelineIntegrationTest {
         assertFalse(properties.exists())
     }
 
+    @Test
+    fun parallelFailuresRetainOrderedUniqueDiagnosticsAndArtifacts() = withWorkspace { workspace ->
+        val input = workspace.resolve("input")
+        val output = workspace.resolve("output")
+        val artifacts = workspace.resolve("artifacts")
+        input.createDirectories()
+        val invalid = { symbol: String ->
+            """
+                #version 460 compatibility
+                layout(local_size_x = 1) in;
+                void main() {
+                    $symbol = 1;
+                }
+            """.trimIndent()
+        }
+        input.resolve("composite.csh").writeText(invalid("missingFirst"))
+        input.resolve("composite1.csh").writeText(invalid("missingSecond"))
+        val ioContext = IOContext(input, output)
+
+        val exception = context(ioContext) {
+            assertFailsWith<ShaderPipelineException> {
+                ShaderPipeline(artifacts, parallelism = 2).optimize(
+                    listOf(
+                        requireNotNull(ioContext.readInputRoot("composite1.csh")),
+                        requireNotNull(ioContext.readInputRoot("composite.csh")),
+                    ),
+                )
+            }
+        }
+
+        assertEquals(listOf("composite.csh", "composite1.csh"), exception.failures.map { it.sourceName })
+        assertTrue(exception.failures.all { it.stage == "comp" })
+        assertTrue(exception.failures.all { it.phase == "OpenGL SPIR-V compilation" })
+        assertTrue(exception.failures.all { it.command.contains("glslang") })
+        assertEquals(2, exception.failures.map { it.artifactDirectory }.toSet().size)
+        exception.failures.forEach { failure ->
+            val artifact = Path.of(failure.artifactDirectory)
+            assertTrue(artifact.resolve("input.glsl").isRegularFile())
+            assertTrue(artifact.resolve("compiler.glsl").isRegularFile())
+            assertTrue(artifact.resolve("logs").listDirectoryEntries("*.log").any { it.fileSize() > 0 })
+        }
+        val manifest = artifacts.resolve("failures.tsv").readText()
+        assertTrue(manifest.indexOf("composite.csh") < manifest.indexOf("composite1.csh"))
+        assertContains(manifest, "OpenGL SPIR-V compilation")
+        assertContains(manifest, "glslang")
+    }
+
     private fun access(files: List<OptimizedShaderFile>, name: String): TextureAccess {
         return files.single { it.file.path.name == name }.textureAccess
     }
 
     private fun copyFixture(target: Path) {
         target.createDirectories()
-        listOf("shadesmith.json", "common.glsl", "composite.csh", "composite1.csh", "composite2.csh")
+        listOf(
+            "shadesmith.json",
+            "common.glsl",
+            "composite.csh",
+            "composite1.csh",
+            "composite2.csh",
+            "voxy_hook.glsl",
+        )
             .forEach { name ->
                 val source = requireNotNull(javaClass.getResource("/pipeline/$name")) {
                     "Missing pipeline fixture $name"

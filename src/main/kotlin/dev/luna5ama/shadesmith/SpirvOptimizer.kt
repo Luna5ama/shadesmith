@@ -3,6 +3,9 @@ package dev.luna5ama.shadesmith
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
 import kotlin.io.path.createDirectories
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
@@ -98,6 +101,7 @@ internal class SpirvOptimizer(
     private val executables: SpirvExecutables = SpirvExecutables(),
     private val processRunner: SpirvProcessRunner? = null,
     private val patcher: OpenGlShaderPatcher = OpenGlShaderPatcher(),
+    private val variantExecutor: ExecutorService? = null,
 ) {
     val workingDirectory: Path = workingDirectory.toAbsolutePath().normalize()
 
@@ -135,9 +139,7 @@ internal class SpirvOptimizer(
 
         val requiredBranches = requiredPreprocessorBranches(protection)
         validateVariants(request, protection, requiredBranches, requestDirectory)
-        val results = request.variants.map { variant ->
-            optimizeVariant(request, variant, requestDirectory)
-        }
+        val results = optimizeVariants(request, requestDirectory)
         requestDirectory.resolve("preserved.glsl").writeText(request.source)
 
         return SpirvOptimizationResult(
@@ -147,6 +149,36 @@ internal class SpirvOptimizer(
             variants = results,
             requiredBranches = requiredBranches,
         )
+    }
+
+    private fun optimizeVariants(
+        request: SpirvOptimizationRequest,
+        requestDirectory: Path,
+    ): List<SpirvVariantResult> {
+        val executor = variantExecutor ?: return request.variants.map { variant ->
+            optimizeVariant(request, variant, requestDirectory)
+        }
+        return try {
+            executor.invokeAll(
+                request.variants.map { variant ->
+                    Callable { optimizeVariant(request, variant, requestDirectory) }
+                },
+            ).map { future ->
+                try {
+                    future.get()
+                } catch (e: ExecutionException) {
+                    val cause = e.cause
+                    when (cause) {
+                        is RuntimeException -> throw cause
+                        is Error -> throw cause
+                        else -> throw IllegalStateException("Shader variant task failed", cause)
+                    }
+                }
+            }
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw IllegalStateException("Shader variant processing interrupted", e)
+        }
     }
 
     private fun optimizeVariant(

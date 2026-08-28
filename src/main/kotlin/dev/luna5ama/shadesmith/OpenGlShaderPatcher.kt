@@ -213,7 +213,7 @@ internal class OpenGlShaderPatcher {
                     "${key.kind}:${key.name} lost layout contract ${expectedEntry.layout - actualEntry.layout}",
                 )
             }
-            if (!blockSignatureCompatible(expectedEntry.blockSignature, actualEntry.blockSignature)) {
+            if (expectedEntry.blockSignature != actualEntry.blockSignature) {
                 fail(
                     patch.sourceName,
                     patch.stage,
@@ -304,7 +304,10 @@ internal class OpenGlShaderPatcher {
                             "preferred layout kind changed for ${declaration.key.kind}:${declaration.key.name}",
                         )
                     }
-                    if (!isFree(occupied.getValue(namespace), preferredLayout.value, slots)) {
+                    if (
+                        !isFree(occupied.getValue(namespace), preferredLayout.value, slots) &&
+                        !namespace.allowsGeneratedAlias
+                    ) {
                         fail(
                             sourceName,
                             stage,
@@ -315,7 +318,12 @@ internal class OpenGlShaderPatcher {
                     }
                     preferredLayout.value
                 } else {
-                    firstFree(occupied.getValue(namespace), slots)
+                    val firstFree = firstFree(occupied.getValue(namespace), slots)
+                    if (namespace == LayoutNamespace.SAMPLER_BINDING && firstFree >= MAX_COMPILER_SAMPLER_BINDINGS) {
+                        0
+                    } else {
+                        firstFree
+                    }
                 }
                 occupy(occupied.getValue(namespace), value, slots)
                 add(GeneratedShaderLayout(declaration.key, qualifier, value))
@@ -413,9 +421,35 @@ internal class OpenGlShaderPatcher {
 
     private fun restoreDeclarations(source: String, patch: OpenGlShaderPatch): String {
         val actual = parseDeclarations(source).associateBy { it.key }
-        val replacements = patch.restorableDeclarations.mapNotNull { (key, original) ->
-            actual[key]?.takeIf { it.key.kind !in BLOCK_KINDS }?.let { declaration ->
-                declarationSourceRange(source, declaration, patch.sourceName, patch.stage) to original
+        val lexicalMap = buildLexicalMap(source)
+        val replacements = mutableListOf<Pair<IntRange, String>>()
+        patch.restorableDeclarations.forEach { (key, original) ->
+            val declaration = actual[key] ?: return@forEach
+            val declarationRange = declarationSourceRange(source, declaration, patch.sourceName, patch.stage)
+            if (key.kind !in BLOCK_KINDS) {
+                replacements += declarationRange to original
+                return@forEach
+            }
+
+            val expected = patch.originalContract.entries.getValue(key).blockSignature
+            val current = blockSignature(source, declaration, patch.sourceName, patch.stage)
+            if (!blockSignatureRestorable(expected, current)) {
+                fail(
+                    patch.sourceName,
+                    patch.stage,
+                    sourceLine(source, declaration.range.first),
+                    "${key.kind}:${key.name} block declaration changed from $expected to $current",
+                )
+            }
+            replacements += declarationRange to original
+
+            if (expected!!.instance.isEmpty() && current!!.instance.isNotEmpty()) {
+                val instanceAccess = (
+                    "(?<![A-Za-z0-9_])${Regex.escape(current.instance)}[\\t \\r\\n]*\\.[\\t \\r\\n]*"
+                    ).toRegex()
+                instanceAccess.findAll(source)
+                    .filter { lexicalMap.isCode(it.range.first) && it.range.first !in declarationRange }
+                    .forEach { replacements += it.range to "" }
             }
         }
         var result = source
@@ -751,7 +785,7 @@ internal class OpenGlShaderPatcher {
         return start..semicolon
     }
 
-    private fun blockSignatureCompatible(
+    private fun blockSignatureRestorable(
         expected: ShaderBlockSignature?,
         actual: ShaderBlockSignature?,
     ): Boolean {
@@ -856,10 +890,11 @@ internal class OpenGlShaderPatcher {
         return when (declaration.key.kind) {
             ShaderAbiKind.INPUT -> LayoutNamespace.INPUT_LOCATION
             ShaderAbiKind.OUTPUT -> LayoutNamespace.OUTPUT_LOCATION
-            ShaderAbiKind.UNIFORM -> if (isOpaqueType(declaration.type)) {
-                LayoutNamespace.RESOURCE_BINDING
-            } else {
-                LayoutNamespace.UNIFORM_LOCATION
+            ShaderAbiKind.UNIFORM -> when {
+                declaration.type.contains("sampler", ignoreCase = true) -> LayoutNamespace.SAMPLER_BINDING
+                declaration.type.contains("image", ignoreCase = true) -> LayoutNamespace.IMAGE_BINDING
+                declaration.type == "atomic_uint" -> LayoutNamespace.ATOMIC_COUNTER_BINDING
+                else -> LayoutNamespace.UNIFORM_LOCATION
             }
 
             ShaderAbiKind.UNIFORM_BLOCK -> LayoutNamespace.UNIFORM_BLOCK_BINDING
@@ -1069,11 +1104,13 @@ internal class OpenGlShaderPatcher {
         return map { "${it.kind}:${it.name}" }.sorted()
     }
 
-    private enum class LayoutNamespace {
+    private enum class LayoutNamespace(val allowsGeneratedAlias: Boolean = false) {
         INPUT_LOCATION,
         OUTPUT_LOCATION,
         UNIFORM_LOCATION,
-        RESOURCE_BINDING,
+        SAMPLER_BINDING(allowsGeneratedAlias = true),
+        IMAGE_BINDING,
+        ATOMIC_COUNTER_BINDING,
         UNIFORM_BLOCK_BINDING,
         STORAGE_BLOCK_BINDING,
     }
@@ -1111,6 +1148,7 @@ internal class OpenGlShaderPatcher {
     }
 
     companion object {
+        private const val MAX_COMPILER_SAMPLER_BINDINGS = 80
         private const val QUALIFIER =
             "(?:flat|smooth|noperspective|centroid|sample|patch|invariant|precise|highp|mediump|lowp|" +
                 "coherent|volatile|restrict|readonly|writeonly)"

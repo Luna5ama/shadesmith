@@ -31,14 +31,39 @@ internal enum class ShaderStage(val glslangName: String) {
         }
 
         fun fromEntryPoint(path: Path, source: String): ShaderStage {
-            return if (path.extension.equals("glsl", ignoreCase = true) && VOXY_FRAGMENT_HOOK.containsMatchIn(source)) {
-                FRAGMENT
-            } else {
-                fromPath(path)
+            return ShaderEntryPoint.from(path, source).stage
+        }
+    }
+}
+
+internal enum class ShaderEntryPointKind {
+    STANDALONE,
+    HOST_INTEGRATION_FRAGMENT,
+}
+
+internal data class ShaderEntryPoint(
+    val stage: ShaderStage,
+    val kind: ShaderEntryPointKind,
+) {
+    companion object {
+        fun from(path: Path, source: String): ShaderEntryPoint {
+            if (!path.extension.equals("glsl", ignoreCase = true)) {
+                return ShaderEntryPoint(ShaderStage.fromPath(path), ShaderEntryPointKind.STANDALONE)
             }
+            if (!VOXY_FRAGMENT_HOOK.containsMatchIn(source)) {
+                throw IllegalArgumentException("Cannot infer shader stage from ${path.name}")
+            }
+            val kind = if (VERSION_DIRECTIVE.containsMatchIn(source) && MAIN_ENTRY_POINT.containsMatchIn(source)) {
+                ShaderEntryPointKind.STANDALONE
+            } else {
+                ShaderEntryPointKind.HOST_INTEGRATION_FRAGMENT
+            }
+            return ShaderEntryPoint(ShaderStage.FRAGMENT, kind)
         }
 
         private val VOXY_FRAGMENT_HOOK = """\bvoid\s+voxy_emitFragment\s*\(""".toRegex()
+        private val VERSION_DIRECTIVE = """(?m)^[\t ]*#version\b""".toRegex()
+        private val MAIN_ENTRY_POINT = """\bvoid\s+main\s*\(""".toRegex()
     }
 }
 

@@ -39,7 +39,7 @@ fun readAllCompositeStyleShaders() : List<ShaderFile> {
 context(ioContext: IOContext)
 fun readOtherShaders(): List<ShaderFile> {
     val validExtensions = setOf("vsh", "fsh", "gsh", "csh", "tcs", "tes")
-    return ioContext.inputPath.listDirectoryEntries().parallelStream()
+    return ioContext.inputPath.listDirectoryEntries().sortedBy { it.name }.parallelStream()
         .filter { it.extension in validExtensions || it.name.startsWith("voxy_") }
         .filter { path -> IRIS_PASS_PREFIX.none { path.name.startsWith(it.actualName) } }
         .map { ioContext.readInputRoot(it.name) }

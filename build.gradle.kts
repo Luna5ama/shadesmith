@@ -1,3 +1,11 @@
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.util.zip.Deflater
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
+import kotlin.io.path.createTempFile
+
 group = "dev.luna5ama"
 version = "0.0.1-SNAPSHOT"
 
@@ -43,6 +51,10 @@ kotlin {
 
 tasks {
     val mainClassRef = "dev.luna5ama.shadesmith.Main"
+    withType<Jar>().configureEach {
+        isPreserveFileTimestamps = false
+        isReproducibleFileOrder = true
+    }
     test {
         useJUnitPlatform()
     }
@@ -78,6 +90,43 @@ tasks {
         fatJar,
         "dev.luna5ama.shadesmith", "kotlin.reflect", "org.slf4j"
     )
+    optimizeFatJar.configure {
+        doLast {
+            val output = archiveFile.get().asFile
+            val entries = mutableListOf<Pair<String, ByteArray?>>()
+            ZipFile(output).use { zip ->
+                val enumeration = zip.entries()
+                while (enumeration.hasMoreElements()) {
+                    val entry = enumeration.nextElement()
+                    val bytes: ByteArray? = if (entry.isDirectory) {
+                        null
+                    } else {
+                        zip.getInputStream(entry).use { it.readBytes() }
+                    }
+                    entries += entry.name to bytes
+                }
+            }
+
+            val temporary = createTempFile(output.parentFile.toPath(), output.name, ".tmp").toFile()
+            try {
+                ZipOutputStream(temporary.outputStream().buffered()).use { zip ->
+                    zip.setLevel(Deflater.BEST_COMPRESSION)
+                    entries.sortedBy { it.first }.forEach { (name, bytes) ->
+                        zip.putNextEntry(ZipEntry(name).apply { time = 0L })
+                        bytes?.let { zip.write(it) }
+                        zip.closeEntry()
+                    }
+                }
+                Files.move(
+                    temporary.toPath(),
+                    output.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            } finally {
+                temporary.delete()
+            }
+        }
+    }
 
     artifacts {
         archives(optimizeFatJar)

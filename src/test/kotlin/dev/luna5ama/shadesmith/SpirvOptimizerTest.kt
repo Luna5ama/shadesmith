@@ -2,6 +2,10 @@ package dev.luna5ama.shadesmith
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.exists
 import kotlin.io.path.fileSize
 import kotlin.io.path.isRegularFile
@@ -96,7 +100,7 @@ class SpirvOptimizerTest {
         assertContains(variant.source, "exposure")
         assertContains(variant.source, "readonly buffer DataBuffer")
         assertContains(variant.source, "readonly buffer FoldedArrayBuffer")
-        assertContains(variant.source, "float foldedWeights[32];")
+        assertContains(variant.source, "float foldedWeights[8 * 4];")
         assertContains(variant.source, "uniform Params")
         assertContains(variant.source, "float weights[];")
         assertContains(variant.source, "vec4 tint;")
@@ -156,28 +160,134 @@ class SpirvOptimizerTest {
     }
 
     @Test
+    fun reusesCompilerOnlySamplerBindingsAfterPortableLimitAndSeparatesImages() = withWorkspace { workspace ->
+        val source = buildString {
+            appendLine("#version 460 compatibility")
+            appendLine("layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;")
+            repeat(81) { appendLine("uniform sampler2D sampler$it;") }
+            appendLine("layout(rgba32ui) uniform writeonly uimage2D outputImage;")
+            appendLine("void main() {")
+            appendLine("    vec4 value = texture(sampler80, vec2(0.5));")
+            appendLine("    imageStore(outputImage, ivec2(0), uvec4(value));")
+            appendLine("}")
+        }
+        val protected = PreprocessorProtection.protect(source, "binding-namespaces.csh")
+        val patch = OpenGlShaderPatcher().patch(protected, ShaderStage.COMPUTE)
+        val generated = patch.generatedLayouts.associateBy { it.key }
+
+        assertEquals(79, generated.getValue(ShaderAbiKey(ShaderAbiKind.UNIFORM, "sampler79")).value)
+        assertEquals(0, generated.getValue(ShaderAbiKey(ShaderAbiKind.UNIFORM, "sampler80")).value)
+        assertEquals(0, generated.getValue(ShaderAbiKey(ShaderAbiKind.UNIFORM, "outputImage")).value)
+
+        val result = SpirvOptimizer(workspace).optimize(
+            SpirvOptimizationRequest("binding-namespaces.csh", ShaderStage.COMPUTE, source),
+        )
+        assertTrue(result.variants.single().validationSpirv.isRegularFile())
+        assertContains(result.source, "uniform sampler2D sampler80;")
+        assertContains(result.source, "layout(rgba32ui) uniform writeonly uimage2D outputImage;")
+    }
+
+    @Test
+    fun restoresAnonymousBlocksExactlyAndLinksStagesAfterOptimization() = withWorkspace { workspace ->
+        val optimizer = SpirvOptimizer(workspace.resolve("optimizer"))
+        val vertex = optimizer.optimize(
+            SpirvOptimizationRequest(
+                "anonymous-block.vsh",
+                ShaderStage.VERTEX,
+                fixture("anonymous-block.vsh"),
+            ),
+        ).source
+        val fragment = optimizer.optimize(
+            SpirvOptimizationRequest(
+                "anonymous-block.fsh",
+                ShaderStage.FRAGMENT,
+                fixture("anonymous-block.fsh"),
+            ),
+        ).source
+
+        assertContains(vertex, "readonly buffer GlobalData")
+        assertContains(vertex, "sharedCoord = globalValue.xy;")
+        assertFalse(Regex("""\b_[0-9]+\s*\.""").containsMatchIn(vertex))
+        assertContains(fragment, "readonly buffer GlobalData")
+        assertFalse(Regex("""}\s+_[0-9]+\s*;""").containsMatchIn(fragment))
+
+        val linkDirectory = workspace.resolve("linked")
+        Files.createDirectories(linkDirectory)
+        val vertexPath = linkDirectory.resolve("anonymous-block.vert")
+        val fragmentPath = linkDirectory.resolve("anonymous-block.frag")
+        Files.writeString(vertexPath, vertex.replaceFirst("#version 460 compatibility", "#version 460 core"))
+        Files.writeString(fragmentPath, fragment.replaceFirst("#version 460 compatibility", "#version 460 core"))
+        val output = linkDirectory.resolve("anonymous-block.spv")
+        val command = listOf(
+            "glslang",
+            "--target-env",
+            "opengl",
+            "--target-env",
+            "spirv1.3",
+            "--auto-map-bindings",
+            "--auto-map-locations",
+            "-l",
+            vertexPath.toString(),
+            fragmentPath.toString(),
+            "-o",
+            output.toString(),
+        )
+        val process = ProcessBuilder(command).redirectErrorStream(true).start()
+        val log = process.inputStream.bufferedReader().use { it.readText() }
+        val exitCode = process.waitFor()
+
+        assertEquals(0, exitCode, log)
+        assertTrue(output.isRegularFile())
+    }
+
+    @Test
     fun preservesMacroHeavySourceAndOptimizesEveryExplicitBranchVariant() = withWorkspace { workspace ->
         val original = fixture("macro-heavy.fsh")
-        val optimizer = SpirvOptimizer(workspace)
-        val result = optimizer.optimize(
-            SpirvOptimizationRequest(
-                sourceName = "macro-heavy.fsh",
-                stage = ShaderStage.FRAGMENT,
-                source = original,
-                variants = listOf(
-                    SpirvShaderVariant(
-                        "tint-on",
-                        fixture("macro-heavy-on.fsh"),
-                        setOf(PreprocessorBranchSelection(0, 0)),
-                    ),
-                    SpirvShaderVariant(
-                        "tint-off",
-                        fixture("macro-heavy-off.fsh"),
-                        setOf(PreprocessorBranchSelection(0, 1)),
+        val executor = Executors.newFixedThreadPool(2)
+        val firstCompiles = CountDownLatch(2)
+        val activeProcesses = AtomicInteger()
+        val maximumProcesses = AtomicInteger()
+        val runner = SpirvProcessRunner { invocation, workingDirectory, stdoutPath, stderrPath ->
+            val active = activeProcesses.incrementAndGet()
+            maximumProcesses.accumulateAndGet(active, ::maxOf)
+            try {
+                if (invocation.tool == SpirvTool.GLSLANG && invocation.input.fileName.toString() == "compiler.glsl") {
+                    firstCompiles.countDown()
+                    check(firstCompiles.await(30, TimeUnit.SECONDS)) { "Shader variants did not compile concurrently" }
+                }
+                ProcessBuilder(invocation.command)
+                    .directory(workingDirectory.toFile())
+                    .redirectOutput(stdoutPath.toFile())
+                    .redirectError(stderrPath.toFile())
+                    .start()
+                    .waitFor()
+            } finally {
+                activeProcesses.decrementAndGet()
+            }
+        }
+        val result = try {
+            SpirvOptimizer(workspace, processRunner = runner, variantExecutor = executor).optimize(
+                SpirvOptimizationRequest(
+                    sourceName = "macro-heavy.fsh",
+                    stage = ShaderStage.FRAGMENT,
+                    source = original,
+                    variants = listOf(
+                        SpirvShaderVariant(
+                            "tint-on",
+                            fixture("macro-heavy-on.fsh"),
+                            setOf(PreprocessorBranchSelection(0, 0)),
+                        ),
+                        SpirvShaderVariant(
+                            "tint-off",
+                            fixture("macro-heavy-off.fsh"),
+                            setOf(PreprocessorBranchSelection(0, 1)),
+                        ),
                     ),
                 ),
-            ),
-        )
+            )
+        } finally {
+            executor.shutdownNow()
+        }
 
         assertEquals(SpirvEmissionMode.PRESERVED_PREPROCESSOR, result.emissionMode)
         assertEquals(original, result.source)
@@ -189,6 +299,7 @@ class SpirvOptimizerTest {
             result.requiredBranches,
         )
         assertEquals(listOf("tint-on", "tint-off"), result.variants.map { it.name })
+        assertTrue(maximumProcesses.get() >= 2)
         assertTrue(result.variants.all { it.validationSpirv.isRegularFile() && it.validationSpirv.fileSize() > 0 })
         assertTrue(result.variants.all { "APPLY_TINT" !in it.source })
     }

@@ -31,13 +31,19 @@ class SpirvToolchainTest {
         assertFailsWith<IllegalArgumentException> {
             ShaderStage.fromPath(Path.of("voxy_opaque.glsl"))
         }
-        assertEquals(
-            ShaderStage.FRAGMENT,
-            ShaderStage.fromEntryPoint(
-                Path.of("custom_voxy_hook.glsl"),
-                "void voxy_emitFragment(VoxyFragmentParameters parameters) {}",
-            ),
+        val hostFragment = ShaderEntryPoint.from(
+            Path.of("custom_voxy_hook.glsl"),
+            "void voxy_emitFragment(VoxyFragmentParameters parameters) {}",
         )
+        assertEquals(ShaderStage.FRAGMENT, hostFragment.stage)
+        assertEquals(ShaderEntryPointKind.HOST_INTEGRATION_FRAGMENT, hostFragment.kind)
+
+        val standalone = ShaderEntryPoint.from(
+            Path.of("custom_voxy_hook.glsl"),
+            "#version 460\nvoid voxy_emitFragment(VoxyFragmentParameters parameters) {}\nvoid main() {}",
+        )
+        assertEquals(ShaderStage.FRAGMENT, standalone.stage)
+        assertEquals(ShaderEntryPointKind.STANDALONE, standalone.kind)
     }
 
     @Test

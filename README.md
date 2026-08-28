@@ -43,17 +43,30 @@ come from every optimized materialized variant. Logical Textile accesses use tem
 the compiler copies so dead functions and dead branches disappear before lifetime analysis; those markers are never
 written to the emitted shader.
 
-Standard stage suffixes determine the compiler stage. A root `.glsl` Voxy hook declaring `voxy_emitFragment` is handled
-as a fragment-stage integration entry; other suffixless entry contracts fail instead of guessing. Clang-only branch
-materialization normalizes token paste before an opening delimiter, while the source-visible macro body remains exact.
-Only `SETTING_` conditionals are varied; host integration guards keep the current source macro environment, and an
-enumerated option domain does not create an impossible fallthrough variant. Original stage, uniform, resource-block,
-and dependent struct declarations are restored, including legal uniform initializers, when SPIR-V optimization removes
-them with dead code. Workgroup and stage layouts remain strict ABI checks while constant built-in references may fold.
+Standard stage suffixes determine standalone compiler stages. A suffixless `.glsl` Voxy hook declaring
+`voxy_emitFragment` is a host-integration fragment: without the host-provided parameter type, `#version`, and `main`, it
+cannot truthfully be optimized as an independent stage. Shadesmith preserves its include-expanded source, uses a
+conservative source-level lifecycle union, and records the intentional boundary in `boundaries.tsv`; other suffixless
+contracts fail instead of guessing. Clang-only branch materialization normalizes token paste before an opening
+delimiter, while the source-visible macro body remains exact. Only `SETTING_` conditionals are varied; host integration
+guards keep the current source macro environment, and an enumerated option domain does not create an impossible
+fallthrough variant.
+
+Original stage, uniform, resource-block, and dependent struct declarations are restored, including legal uniform
+initializers, when SPIR-V optimization removes them with dead code. Anonymous resource blocks are restored as anonymous
+blocks and temporary SPIRV-Cross instance prefixes are removed. Generated bindings and locations exist only in isolated
+compiler copies. Temporary bindings use OpenGL's independent sampler, image, atomic-counter, uniform-block, and
+storage-block namespaces. Samplers beyond glslang's portable 80-unit compiler limit reuse compiler-only bindings;
+linked ABI verification uses the restored stages together so compiler-only resources or
+declaration order cannot redefine the emitted interface. Workgroup and stage layouts remain strict ABI checks while
+constant built-in references may fold.
 
 ## Diagnostics
 
 Round-trip artifacts are retained beside the output directory in `.<output-name>.spirv`. Failures report the shader
 source, stage, pipeline phase, external tool, command logs, and artifact directory. Shader output is cleared only after
 all stages and variants have completed successfully, so a compile or tool failure cannot leave a partially transformed
-shader set.
+shader set. Standalone roots and their protected setting variants are processed with bounded parallelism after
+deterministic source ordering. If multiple roots fail, all submitted roots and variants finish, each keeps its own
+artifacts, and `failures.tsv` records every failure in source
+order with its stage, phase, command, and artifact path.
