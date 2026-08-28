@@ -33,29 +33,29 @@ class SpirvOptimizerTest {
             val result = SpirvOptimizer(workspace.resolve(stage.glslangName)).optimize(
                 SpirvOptimizationRequest(name, stage, fixture(name)),
             )
-            val variant = result.variants.single()
+            val module = result.modules.single()
 
             assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, name)
             assertEquals(
                 listOf(SpirvTool.GLSLANG, SpirvTool.SPIRV_OPT, SpirvTool.SPIRV_CROSS, SpirvTool.GLSLANG),
-                variant.invocations.map { it.tool },
+                module.invocations.map { it.tool },
                 name,
             )
-            assertEquals(SpirvToolchain.OPTIMIZER_PASSES, variant.invocations[1].command.drop(1).dropLast(3), name)
+            assertEquals(SpirvToolchain.OPTIMIZER_PASSES, module.invocations[1].command.drop(1).dropLast(3), name)
             assertContains(
-                variant.invocations[0].command.joinToString(" "),
+                module.invocations[0].command.joinToString(" "),
                 "--target-env opengl",
                 message = name,
             )
-            val crossCommand = variant.invocations[2].command
+            val crossCommand = module.invocations[2].command
             assertTrue(crossCommand.windowed(3).contains(listOf("--no-es", "--version", "460")), name)
             assertTrue("--glsl-force-flattened-io-blocks" in crossCommand, name)
             assertTrue("--combined-samplers-inherit-bindings" in crossCommand, name)
             assertTrue("--remove-unused-variables" in crossCommand, name)
-            assertTrue(variant.validationSpirv.isRegularFile(), name)
-            assertTrue(variant.validationSpirv.fileSize() > 0, name)
-            assertContains(variant.source, "#version 460 compatibility", message = name)
-            assertContains(variant.source, "void main()", message = name)
+            assertTrue(module.validationSpirv.isRegularFile(), name)
+            assertTrue(module.validationSpirv.fileSize() > 0, name)
+            assertContains(module.source, "#version 460 compatibility", message = name)
+            assertContains(module.source, "void main()", message = name)
         }
     }
 
@@ -64,15 +64,15 @@ class SpirvOptimizerTest {
         val result = SpirvOptimizer(workspace).optimize(
             SpirvOptimizationRequest("subgroup.csh", ShaderStage.COMPUTE, fixture("subgroup.csh")),
         )
-        val variant = result.variants.single()
+        val module = result.modules.single()
 
         assertTrue(
-            variant.invocations.first().command.windowed(4).contains(
+            module.invocations.first().command.windowed(4).contains(
                 listOf("--target-env", "opengl", "--target-env", "spirv1.3"),
             ),
         )
         assertContains(result.source, "#extension GL_KHR_shader_subgroup_arithmetic : require")
-        assertTrue(variant.validationSpirv.isRegularFile())
+        assertTrue(module.validationSpirv.isRegularFile())
     }
 
     @Test
@@ -80,40 +80,40 @@ class SpirvOptimizerTest {
         val result = SpirvOptimizer(workspace).optimize(
             SpirvOptimizationRequest("dead-code.csh", ShaderStage.COMPUTE, fixture("dead-code.csh")),
         )
-        val variant = result.variants.single()
+        val module = result.modules.single()
 
-        assertTrue(variant.optimizedSpirvSize < variant.originalSpirvSize)
-        assertFalse(variant.source.contains("deadHelper"))
-        assertFalse(variant.source.contains("if (false)"))
-        assertFalse(variant.source.contains("gl_WorkGroupSize"))
-        assertContains(variant.source, "inputTexture")
-        assertContains(variant.source, "unusedTexture")
-        assertFalse(variant.artifactDirectory.resolve("decompiled.glsl").readText().contains("unusedTexture"))
-        assertContains(variant.source, "uniform float deadReferencedUniform = 1.0;")
-        assertFalse(variant.artifactDirectory.resolve("decompiled.glsl").readText().contains("deadReferencedUniform"))
-        assertContains(variant.source, "struct DeadRecord")
-        assertContains(variant.source, "readonly buffer DeadBuffer")
-        assertContains(variant.source, "DeadRecord deadValues[];")
-        assertFalse(variant.artifactDirectory.resolve("decompiled.glsl").readText().contains("DeadRecord"))
-        assertFalse(variant.artifactDirectory.resolve("decompiled.glsl").readText().contains("DeadBuffer"))
-        assertContains(variant.source, "outputImage")
-        assertContains(variant.source, "exposure")
-        assertContains(variant.source, "readonly buffer DataBuffer")
-        assertContains(variant.source, "readonly buffer FoldedArrayBuffer")
-        assertContains(variant.source, "float foldedWeights[8 * 4];")
-        assertContains(variant.source, "uniform Params")
-        assertContains(variant.source, "float weights[];")
-        assertContains(variant.source, "vec4 tint;")
-        assertContains(variant.source, "layout(local_size_x = 8, local_size_y = 4, local_size_z = 1) in;")
+        assertTrue(module.optimizedSpirvSize < module.originalSpirvSize)
+        assertFalse(module.source.contains("deadHelper"))
+        assertFalse(module.source.contains("if (false)"))
+        assertFalse(module.source.contains("gl_WorkGroupSize"))
+        assertContains(module.source, "inputTexture")
+        assertContains(module.source, "unusedTexture")
+        assertFalse(module.artifactDirectory.resolve("decompiled.glsl").readText().contains("unusedTexture"))
+        assertContains(module.source, "uniform float deadReferencedUniform = 1.0;")
+        assertFalse(module.artifactDirectory.resolve("decompiled.glsl").readText().contains("deadReferencedUniform"))
+        assertContains(module.source, "struct DeadRecord")
+        assertContains(module.source, "readonly buffer DeadBuffer")
+        assertContains(module.source, "DeadRecord deadValues[];")
+        assertFalse(module.artifactDirectory.resolve("decompiled.glsl").readText().contains("DeadRecord"))
+        assertFalse(module.artifactDirectory.resolve("decompiled.glsl").readText().contains("DeadBuffer"))
+        assertContains(module.source, "outputImage")
+        assertContains(module.source, "exposure")
+        assertContains(module.source, "readonly buffer DataBuffer")
+        assertContains(module.source, "readonly buffer FoldedArrayBuffer")
+        assertContains(module.source, "float foldedWeights[8 * 4];")
+        assertContains(module.source, "uniform Params")
+        assertContains(module.source, "float weights[];")
+        assertContains(module.source, "vec4 tint;")
+        assertContains(module.source, "layout(local_size_x = 8, local_size_y = 4, local_size_z = 1) in;")
         assertContains(
-            variant.source,
+            module.source,
             "const ivec3 workGroups = ivec3(32, 18, 1); // Iris dispatch contract",
         )
-        assertContains(variant.source, "#extension GL_ARB_shader_image_load_store : require")
-        assertContains(variant.source, "#pragma optimize(on)")
-        assertContains(variant.source, "//#define FIXTURE_DEBUG")
-        assertFalse(variant.source.contains("binding ="))
-        assertFalse(variant.source.contains("location ="))
+        assertContains(module.source, "#extension GL_ARB_shader_image_load_store : require")
+        assertContains(module.source, "#pragma optimize(on)")
+        assertContains(module.source, "//#define FIXTURE_DEBUG")
+        assertFalse(module.source.contains("binding ="))
+        assertFalse(module.source.contains("location ="))
     }
 
     @Test
@@ -123,12 +123,12 @@ class SpirvOptimizerTest {
 
         val first = optimizer.optimize(request)
         val restored = first.source
-        val firstVariant = first.variants.single()
-        val firstSpirv = firstVariant.optimizedSpirv.readBytes()
+        val firstModule = first.modules.single()
+        val firstSpirv = firstModule.optimizedSpirv.readBytes()
         val second = optimizer.optimize(request)
 
-        assertContains(firstVariant.artifactDirectory.resolve("compiler.glsl").readText(), "colortex3Format = 0;")
-        assertContains(firstVariant.artifactDirectory.resolve("validation.glsl").readText(), "colortex3Format = 0;")
+        assertContains(firstModule.artifactDirectory.resolve("compiler.glsl").readText(), "colortex3Format = 0;")
+        assertContains(firstModule.artifactDirectory.resolve("validation.glsl").readText(), "colortex3Format = 0;")
         assertContains(restored, "/* RENDERTARGETS:3 */")
         assertContains(restored, "const int noiseTextureResolution = 256;")
         assertContains(restored, "const float sunPathRotation = -20.0; //[-90.0 -20.0 0.0 20.0 90.0]")
@@ -138,8 +138,8 @@ class SpirvOptimizerTest {
         assertFalse(restored.contains("colortex4Format"))
         assertEquals(first.source, second.source)
         assertEquals(first.artifactDirectory, second.artifactDirectory)
-        assertEquals(first.variants.single().artifactDirectory, second.variants.single().artifactDirectory)
-        assertTrue(firstSpirv.contentEquals(second.variants.single().optimizedSpirv.readBytes()))
+        assertEquals(first.modules.single().artifactDirectory, second.modules.single().artifactDirectory)
+        assertTrue(firstSpirv.contentEquals(second.modules.single().optimizedSpirv.readBytes()))
     }
 
     @Test
@@ -156,7 +156,7 @@ class SpirvOptimizerTest {
         assertContains(source, "layout(location = 3) flat in highp vec2 texCoord;")
         assertContains(source, "layout(location = 1) out vec4 fragColor;")
         assertContains(source, "layout(binding = 5) uniform sampler2D colorTexture;")
-        assertTrue(result.variants.single().validationSpirv.isRegularFile())
+        assertTrue(result.modules.single().validationSpirv.isRegularFile())
     }
 
     @Test
@@ -182,7 +182,7 @@ class SpirvOptimizerTest {
         val result = SpirvOptimizer(workspace).optimize(
             SpirvOptimizationRequest("binding-namespaces.csh", ShaderStage.COMPUTE, source),
         )
-        assertTrue(result.variants.single().validationSpirv.isRegularFile())
+        assertTrue(result.modules.single().validationSpirv.isRegularFile())
         assertContains(result.source, "uniform sampler2D sampler80;")
         assertContains(result.source, "layout(rgba32ui) uniform writeonly uimage2D outputImage;")
     }
@@ -241,7 +241,7 @@ class SpirvOptimizerTest {
     }
 
     @Test
-    fun preservesMacroHeavySourceAndOptimizesEveryExplicitBranchVariant() = withWorkspace { workspace ->
+    fun preservesSourceAndOptimizesExplicitCompilerModulesConcurrently() = withWorkspace { workspace ->
         val original = fixture("macro-heavy.fsh")
         val executor = Executors.newFixedThreadPool(2)
         val firstCompiles = CountDownLatch(2)
@@ -253,7 +253,7 @@ class SpirvOptimizerTest {
             try {
                 if (invocation.tool == SpirvTool.GLSLANG && invocation.input.fileName.toString() == "compiler.glsl") {
                     firstCompiles.countDown()
-                    check(firstCompiles.await(30, TimeUnit.SECONDS)) { "Shader variants did not compile concurrently" }
+                    check(firstCompiles.await(30, TimeUnit.SECONDS)) { "Shader compiler modules did not compile concurrently" }
                 }
                 ProcessBuilder(invocation.command)
                     .directory(workingDirectory.toFile())
@@ -266,21 +266,19 @@ class SpirvOptimizerTest {
             }
         }
         val result = try {
-            SpirvOptimizer(workspace, processRunner = runner, variantExecutor = executor).optimize(
+            SpirvOptimizer(workspace, processRunner = runner, moduleExecutor = executor).optimize(
                 SpirvOptimizationRequest(
                     sourceName = "macro-heavy.fsh",
                     stage = ShaderStage.FRAGMENT,
                     source = original,
-                    variants = listOf(
-                        SpirvShaderVariant(
+                    compilerModules = listOf(
+                        SpirvCompilerModule(
                             "tint-on",
                             fixture("macro-heavy-on.fsh"),
-                            setOf(PreprocessorBranchSelection(0, 0)),
                         ),
-                        SpirvShaderVariant(
+                        SpirvCompilerModule(
                             "tint-off",
                             fixture("macro-heavy-off.fsh"),
-                            setOf(PreprocessorBranchSelection(0, 1)),
                         ),
                     ),
                 ),
@@ -289,23 +287,19 @@ class SpirvOptimizerTest {
             executor.shutdownNow()
         }
 
-        assertEquals(SpirvEmissionMode.PRESERVED_PREPROCESSOR, result.emissionMode)
+        assertEquals(SpirvEmissionMode.PRESERVED_COMPILER_COPY, result.emissionMode)
         assertEquals(original, result.source)
         assertContains(result.source, "#if defined(SETTING_TINT)")
         assertContains(result.source, "#define APPLY_TINT(value)")
         assertContains(result.source, "//#define SETTING_TINT")
-        assertEquals(
-            setOf(PreprocessorBranchSelection(0, 0), PreprocessorBranchSelection(0, 1)),
-            result.requiredBranches,
-        )
-        assertEquals(listOf("tint-on", "tint-off"), result.variants.map { it.name })
+        assertEquals(listOf("tint-on", "tint-off"), result.modules.map { it.name })
         assertTrue(maximumProcesses.get() >= 2)
-        assertTrue(result.variants.all { it.validationSpirv.isRegularFile() && it.validationSpirv.fileSize() > 0 })
-        assertTrue(result.variants.all { "APPLY_TINT" !in it.source })
+        assertTrue(result.modules.all { it.validationSpirv.isRegularFile() && it.validationSpirv.fileSize() > 0 })
+        assertTrue(result.modules.all { "APPLY_TINT" !in it.source })
     }
 
     @Test
-    fun refusesDefaultOnlyCompilationBeforeInvokingAnyTool() = withWorkspace { workspace ->
+    fun refusesBlockedSourceWithoutACompilerCopyBeforeInvokingAnyTool() = withWorkspace { workspace ->
         var invoked = false
         val optimizer = SpirvOptimizer(
             workspace,
@@ -325,56 +319,46 @@ class SpirvOptimizerTest {
             )
         }
 
-        assertEquals(SpirvRoundTripPhase.MATERIALIZE, exception.phase)
-        assertContains(exception.message.orEmpty(), "no explicit variants")
+        assertEquals(SpirvRoundTripPhase.COMPILER_COPY, exception.phase)
+        assertContains(exception.message.orEmpty(), "no compiler-copy module")
         assertFalse(invoked)
         assertTrue(exception.artifactDirectory.resolve("original.glsl").isRegularFile())
         assertTrue(exception.artifactDirectory.listDirectoryEntries("*.spv").isEmpty())
     }
 
     @Test
-    fun refusesIncompleteOrContradictoryVariantCoverage() = withWorkspace { workspace ->
+    fun refusesBlankOrDuplicateCompilerModuleNames() = withWorkspace { workspace ->
         val optimizer = SpirvOptimizer(workspace)
-        val incomplete = assertFailsWith<SpirvRoundTripException> {
+        val duplicate = assertFailsWith<SpirvRoundTripException> {
             optimizer.optimize(
                 SpirvOptimizationRequest(
                     "macro-heavy.fsh",
                     ShaderStage.FRAGMENT,
                     fixture("macro-heavy.fsh"),
-                    variants = listOf(
-                        SpirvShaderVariant(
-                            "only-default",
-                            fixture("macro-heavy-off.fsh"),
-                            setOf(PreprocessorBranchSelection(0, 1)),
-                        ),
+                    compilerModules = listOf(
+                        SpirvCompilerModule("same", fixture("macro-heavy-off.fsh")),
+                        SpirvCompilerModule("same", fixture("macro-heavy-on.fsh")),
                     ),
                 ),
             )
         }
-        assertEquals(SpirvRoundTripPhase.MATERIALIZE, incomplete.phase)
-        assertContains(incomplete.message.orEmpty(), "0:0")
+        assertEquals(SpirvRoundTripPhase.COMPILER_COPY, duplicate.phase)
+        assertContains(duplicate.message.orEmpty(), "duplicates=[same]")
 
-        val contradictory = assertFailsWith<SpirvRoundTripException> {
+        val blank = assertFailsWith<SpirvRoundTripException> {
             optimizer.optimize(
                 SpirvOptimizationRequest(
                     "macro-heavy.fsh",
                     ShaderStage.FRAGMENT,
                     fixture("macro-heavy.fsh"),
-                    variants = listOf(
-                        SpirvShaderVariant(
-                            "both",
-                            fixture("macro-heavy-off.fsh"),
-                            setOf(
-                                PreprocessorBranchSelection(0, 0),
-                                PreprocessorBranchSelection(0, 1),
-                            ),
-                        ),
+                    compilerModules = listOf(
+                        SpirvCompilerModule("", fixture("macro-heavy-off.fsh")),
                     ),
                 ),
             )
         }
-        assertEquals(SpirvRoundTripPhase.MATERIALIZE, contradictory.phase)
-        assertContains(contradictory.message.orEmpty(), "multiple branches")
+        assertEquals(SpirvRoundTripPhase.COMPILER_COPY, blank.phase)
+        assertContains(blank.message.orEmpty(), "non-blank")
     }
 
     @Test

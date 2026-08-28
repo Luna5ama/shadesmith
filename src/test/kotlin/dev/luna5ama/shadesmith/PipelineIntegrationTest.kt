@@ -21,7 +21,7 @@ import kotlin.test.assertTrue
 
 class PipelineIntegrationTest {
     @Test
-    fun optimizedVariantSemanticsDriveDeterministicLifecycleOutputs() = withWorkspace { workspace ->
+    fun compilerCopySemanticsDriveDeterministicLifecycleOutputs() = withWorkspace { workspace ->
         val input = workspace.resolve("input")
         val output = workspace.resolve("output")
         val artifacts = workspace.resolve("artifacts")
@@ -32,6 +32,7 @@ class PipelineIntegrationTest {
         val firstSnapshot = snapshot(output, properties, input.resolve("base/Textile.glsl"))
         val secondResult = Main.runShaderPipeline(input, output, artifacts, properties)
         val secondSnapshot = snapshot(output, properties, input.resolve("base/Textile.glsl"))
+        val performance = performance(artifacts)
 
         assertEquals(firstSnapshot, secondSnapshot)
         assertEquals(firstResult.map { it.textureAccess }, secondResult.map { it.textureAccess })
@@ -39,7 +40,9 @@ class PipelineIntegrationTest {
         assertEquals(setOf("transient_a"), access(firstResult, "composite.csh").reads)
         assertEquals(emptySet(), access(firstResult, "composite1.csh").reads)
         assertEquals(setOf("transient_b"), access(firstResult, "composite1.csh").writes)
-        assertEquals(setOf("transient_branch"), access(firstResult, "composite2.csh").reads)
+        val branchShader = firstResult.single { it.file.path.name == "composite2.csh" }
+        assertEquals(ShaderProcessingMode.SPIRV_ROUND_TRIP, branchShader.processingMode, branchShader.fallbackReason)
+        assertEquals(setOf("transient_branch"), branchShader.textureAccess.reads)
         assertFalse("transient_a" in access(firstResult, "composite2.csh").reads)
 
         val emittedBranchShader = output.resolve("composite2.csh").readText()
@@ -47,6 +50,9 @@ class PipelineIntegrationTest {
         assertContains(emittedBranchShader, "#define transient_branch_sample(x)")
         assertFalse("shadesmith_resource_" in emittedBranchShader)
         assertContains(properties.readText(), "image.uimg_rgba16f=usam_rgba16f RGBA RGBA16F HALF_FLOAT false true 1.0 1.0")
+        assertEquals("3", performance.getValue("validated_modules"))
+        assertEquals("3", performance.getValue("materialized_compiler_modules"))
+        assertTrue(performance.getValue("external_processes").toInt() > 0)
         val hostFragment = firstResult.single { it.file.path.name == "voxy_hook.glsl" }
         assertEquals(ShaderProcessingMode.PRESERVED_HOST_INTEGRATION, hostFragment.processingMode)
         assertEquals(hostFragment.file.code, output.resolve("voxy_hook.glsl").readText())
@@ -77,6 +83,12 @@ class PipelineIntegrationTest {
         assertTrue(sentinel.isRegularFile())
         assertEquals("keep", sentinel.readText())
         assertFalse(properties.exists())
+
+        copyFixture(input)
+        Main.runShaderPipeline(input, output, artifacts, properties)
+        val performance = performance(artifacts)
+        assertEquals("3", performance.getValue("validated_modules"))
+        assertTrue(performance.getValue("external_processes").toInt() > 0)
     }
 
     @Test
@@ -158,6 +170,13 @@ class PipelineIntegrationTest {
         result["../shadesmith.shaders.properties"] = properties.readBytes().toList()
         result["../input/base/Textile.glsl"] = textile.readBytes().toList()
         return result
+    }
+
+    private fun performance(artifacts: Path): Map<String, String> {
+        return artifacts.resolve("performance.tsv").readText().lineSequence().drop(1).filter { '\t' in it }.associate { line ->
+            val (name, value) = line.split('\t', limit = 2)
+            name to value
+        }
     }
 
     private fun withWorkspace(block: (Path) -> Unit) {

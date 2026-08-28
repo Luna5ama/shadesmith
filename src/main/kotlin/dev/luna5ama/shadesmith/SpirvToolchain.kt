@@ -166,6 +166,8 @@ internal class SpirvToolchain(
     workingDirectory: Path,
     private val executables: SpirvExecutables = SpirvExecutables(),
     private val processRunner: SpirvProcessRunner = SystemSpirvProcessRunner,
+    private val processGate: ExternalProcessGate? = null,
+    private val metrics: PipelineMetrics? = null,
 ) {
     val workingDirectory: Path = workingDirectory.toAbsolutePath().normalize()
 
@@ -257,7 +259,14 @@ internal class SpirvToolchain(
         Files.writeString(stderrPath, "")
 
         val exitCode = try {
-            processRunner.execute(invocation, workingDirectory, stdoutPath, stderrPath)
+            metrics?.recordToolProcess(invocation.tool)
+            if (processGate == null) {
+                processRunner.execute(invocation, workingDirectory, stdoutPath, stderrPath)
+            } else {
+                processGate.run {
+                    processRunner.execute(invocation, workingDirectory, stdoutPath, stderrPath)
+                }
+            }
         } catch (e: IOException) {
             throw SpirvToolException(
                 invocation,

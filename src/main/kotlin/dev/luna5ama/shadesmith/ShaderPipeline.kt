@@ -11,6 +11,7 @@ import kotlin.io.path.writeText
 internal enum class ShaderProcessingMode {
     SPIRV_ROUND_TRIP,
     PRESERVED_HOST_INTEGRATION,
+    PRESERVED_STRUCTURAL,
 }
 
 internal data class OptimizedShaderFile(
@@ -18,6 +19,8 @@ internal data class OptimizedShaderFile(
     val stage: ShaderStage,
     val processingMode: ShaderProcessingMode,
     val textureAccess: TextureAccess,
+    val moduleCount: Int,
+    val fallbackReason: String? = null,
 )
 
 internal data class ShaderPipelineFailure(
@@ -54,30 +57,39 @@ internal class ShaderPipeline(
     private val parallelism: Int = DEFAULT_PARALLELISM,
 ) {
     val artifactDirectory: Path = artifactDirectory.toAbsolutePath().normalize()
-    private val materializer by lazy { ShaderVariantMaterializer(this.artifactDirectory.resolve("materialized")) }
+    private val metrics = PipelineMetrics()
+    private val processGate = ExternalProcessGate(parallelism)
+    private val materializer by lazy {
+        ShaderCompilerCopyMaterializer(
+            this.artifactDirectory.resolve("compiler-copies"),
+            processGate = processGate,
+            metrics = metrics,
+        )
+    }
 
     init {
         require(parallelism > 0) { "Shader pipeline parallelism must be positive" }
-        if (Files.exists(this.artifactDirectory)) {
-            check(this.artifactDirectory.toFile().deleteRecursively()) {
-                "Failed to clear shader pipeline artifacts: ${this.artifactDirectory}"
-            }
-        }
         this.artifactDirectory.createDirectories()
+        Files.deleteIfExists(this.artifactDirectory.resolve("failures.tsv"))
+        Files.deleteIfExists(this.artifactDirectory.resolve("boundaries.tsv"))
+        Files.deleteIfExists(this.artifactDirectory.resolve("performance.tsv"))
     }
 
     context(ioContext: IOContext)
     fun optimize(inputFiles: List<ShaderFile>): List<OptimizedShaderFile> {
+        val startedAt = System.nanoTime()
         val orderedFiles = inputFiles.sortedBy(::sourceName)
         val duplicateNames = orderedFiles.groupingBy(::sourceName).eachCount().filterValues { it > 1 }.keys
         require(duplicateNames.isEmpty()) { "Duplicate shader source names: ${duplicateNames.sorted()}" }
         if (orderedFiles.isEmpty()) return emptyList()
 
         val executor = Executors.newFixedThreadPool(minOf(parallelism, orderedFiles.size))
-        val variantExecutor = Executors.newFixedThreadPool(parallelism)
+        val moduleExecutor = Executors.newFixedThreadPool(parallelism)
         val optimizer = SpirvOptimizer(
             artifactDirectory.resolve("round-trip"),
-            variantExecutor = variantExecutor,
+            moduleExecutor = moduleExecutor,
+            processGate = processGate,
+            metrics = metrics,
         )
         val work = try {
             executor.invokeAll(
@@ -96,24 +108,29 @@ internal class ShaderPipeline(
             throw IllegalStateException("Shader pipeline interrupted", e)
         } finally {
             executor.shutdown()
-            variantExecutor.shutdown()
+            moduleExecutor.shutdown()
         }
 
         val failures = work.filterIsInstance<ShaderWork.Failure>()
         if (failures.isNotEmpty()) {
             val diagnostics = failures.map { describeFailure(it.file, it.exception) }
             writeFailureManifest(diagnostics)
+            writePerformanceManifest(orderedFiles.size, emptyList(), System.nanoTime() - startedAt)
             if (failures.size == 1) throw failures.single().exception
             throw ShaderPipelineException(diagnostics, failures.first().exception)
         }
 
         val optimized = work.filterIsInstance<ShaderWork.Success>().map { it.result }
         writeBoundaryManifest(optimized)
+        writePerformanceManifest(orderedFiles.size, optimized, System.nanoTime() - startedAt)
         return optimized
     }
 
     context(ioContext: IOContext)
-    private fun optimizeFile(file: ShaderFile, optimizer: SpirvOptimizer): OptimizedShaderFile {
+    private fun optimizeFile(
+        file: ShaderFile,
+        optimizer: SpirvOptimizer,
+    ): OptimizedShaderFile {
         val sourceName = sourceName(file)
         val entryPoint = ShaderEntryPoint.from(file.path, file.code)
         if (entryPoint.kind == ShaderEntryPointKind.HOST_INTEGRATION_FRAGMENT) {
@@ -122,45 +139,74 @@ internal class ShaderPipeline(
                 stage = entryPoint.stage,
                 processingMode = ShaderProcessingMode.PRESERVED_HOST_INTEGRATION,
                 textureAccess = TextureAccessAnalyzer.fromOptimizedSource(file.code),
+                moduleCount = 0,
+                fallbackReason = HOST_INTEGRATION_REASON,
             )
         }
 
         val protection = PreprocessorProtection.protect(file.code, sourceName)
-        val variants = if (protection.compilerBlockers.isEmpty()) {
-            emptyList()
-        } else {
-            val probe = TextureAccessAnalyzer.createProbe(file.code, ioContext.config)
-            materializer.materialize(sourceName, entryPoint.stage, protection, probe)
+        if (protection.compilerBlockers.isEmpty()) {
+            val result = optimizer.optimize(
+                SpirvOptimizationRequest(
+                    sourceName = sourceName,
+                    stage = entryPoint.stage,
+                    source = file.code,
+                ),
+            )
+            return OptimizedShaderFile(
+                file = file.copy(code = result.source),
+                stage = entryPoint.stage,
+                processingMode = ShaderProcessingMode.SPIRV_ROUND_TRIP,
+                textureAccess = result.modules
+                    .map { it.textureAccess }
+                    .fold(TextureAccess(), TextureAccess::plus),
+                moduleCount = result.modules.size,
+            )
         }
+        val probe = TextureAccessAnalyzer.createProbe(file.code, ioContext.config)
+        val plan = ShaderCompilerCopyPlanner.plan(probe.source, sourceName)
+        if (plan.structuralBlockers.isNotEmpty()) {
+            val reason = plan.structuralBlockers.joinToString("; ") { "line ${it.sourceLine}: ${it.reason}" }
+            return OptimizedShaderFile(
+                file = file,
+                stage = entryPoint.stage,
+                processingMode = ShaderProcessingMode.PRESERVED_STRUCTURAL,
+                textureAccess = TextureAccessAnalyzer.fromOptimizedSource(file.code),
+                moduleCount = 0,
+                fallbackReason = reason,
+            )
+        }
+        val module = materializer.materialize(sourceName, entryPoint.stage, plan, probe)
         val result = optimizer.optimize(
             SpirvOptimizationRequest(
                 sourceName = sourceName,
                 stage = entryPoint.stage,
                 source = file.code,
-                variants = variants,
+                compilerModules = listOf(module),
             ),
         )
         return OptimizedShaderFile(
             file = file.copy(code = result.source),
             stage = entryPoint.stage,
             processingMode = ShaderProcessingMode.SPIRV_ROUND_TRIP,
-            textureAccess = result.variants
+            textureAccess = result.modules
                 .map { it.textureAccess }
                 .fold(TextureAccess(), TextureAccess::plus),
+            moduleCount = result.modules.size,
         )
     }
 
     private fun describeFailure(file: ShaderFile, exception: Exception): ShaderPipelineFailure {
         val causes = generateSequence<Throwable>(exception) { it.cause }.toList()
         val roundTrip = causes.filterIsInstance<SpirvRoundTripException>().firstOrNull()
-        val materialization = causes.filterIsInstance<ShaderVariantMaterializationException>().firstOrNull()
+        val materialization = causes.filterIsInstance<ShaderCompilerCopyException>().firstOrNull()
         val tool = causes.filterIsInstance<SpirvToolException>().firstOrNull()
         val entryPoint = runCatching { ShaderEntryPoint.from(file.path, file.code) }.getOrNull()
         return ShaderPipelineFailure(
             sourceName = roundTrip?.sourceName ?: materialization?.sourceName ?: sourceName(file),
             stage = roundTrip?.stage?.glslangName ?: materialization?.stage?.glslangName ?: entryPoint?.stage?.glslangName.orEmpty(),
             phase = roundTrip?.phase?.displayName ?: if (materialization != null) {
-                "variant materialization"
+                "compiler-copy materialization"
             } else {
                 "pipeline"
             },
@@ -194,7 +240,7 @@ internal class ShaderPipeline(
     }
 
     private fun writeBoundaryManifest(files: List<OptimizedShaderFile>) {
-        val boundaries = files.filter { it.processingMode == ShaderProcessingMode.PRESERVED_HOST_INTEGRATION }
+        val boundaries = files.filter { it.processingMode != ShaderProcessingMode.SPIRV_ROUND_TRIP }
         if (boundaries.isEmpty()) return
         val content = buildString {
             appendLine("source\tstage\tsource_sha256\treason")
@@ -205,10 +251,33 @@ internal class ShaderPipeline(
                 append('\t')
                 append(sha256(it.file.code))
                 append('\t')
-                appendLine(HOST_INTEGRATION_REASON)
+                appendLine(requireNotNull(it.fallbackReason).asTsvField())
             }
         }
         artifactDirectory.resolve("boundaries.tsv").writeText(content)
+    }
+
+    private fun writePerformanceManifest(
+        requestedRoots: Int,
+        files: List<OptimizedShaderFile>,
+        durationNanos: Long,
+    ) {
+        val snapshot = metrics.snapshot()
+        val content = buildString {
+            appendLine("metric\tvalue")
+            appendLine("parallelism\t$parallelism")
+            appendLine("requested_roots\t$requestedRoots")
+            appendLine("completed_roots\t${files.size}")
+            appendLine("validated_modules\t${files.sumOf { it.moduleCount }}")
+            appendLine("materialized_compiler_modules\t${snapshot.compilerModules}")
+            appendLine("clang_processes\t${snapshot.clangProcesses}")
+            appendLine("glslang_processes\t${snapshot.glslangProcesses}")
+            appendLine("spirv_opt_processes\t${snapshot.spirvOptProcesses}")
+            appendLine("spirv_cross_processes\t${snapshot.spirvCrossProcesses}")
+            appendLine("external_processes\t${snapshot.externalProcesses}")
+            appendLine("duration_ms\t${durationNanos / 1_000_000}")
+        }
+        artifactDirectory.resolve("performance.tsv").writeText(content)
     }
 
     private fun sourceName(file: ShaderFile): String = file.path.toString().replace('\\', '/')
@@ -225,7 +294,7 @@ internal class ShaderPipeline(
     }
 
     companion object {
-        private val DEFAULT_PARALLELISM = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(1, 16)
+        private const val DEFAULT_PARALLELISM = 10
         private const val HOST_INTEGRATION_REASON =
             "host integration fragment has no standalone #version/main contract; source preserved and lifecycle access is conservative"
     }

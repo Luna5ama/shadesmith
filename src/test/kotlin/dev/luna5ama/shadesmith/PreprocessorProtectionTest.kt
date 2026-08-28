@@ -59,7 +59,7 @@ class PreprocessorProtectionTest {
         assertEquals("structural-contracts.glsl", exception.sourceName)
         assertEquals(5, exception.sourceLine)
         assertContains(exception.reason, "declaration shape")
-        assertContains(exception.reason, "materialize a variant explicitly")
+        assertContains(exception.reason, "structural compiler planning")
         assertTrue(protected.compilerBlockers.any { it.sourceLine == 13 })
     }
 

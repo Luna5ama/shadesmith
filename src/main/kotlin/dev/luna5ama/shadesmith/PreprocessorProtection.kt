@@ -57,6 +57,9 @@ internal data class PreprocessorDirective(
     val exactText: String,
     val macroName: String?,
     val macroBody: String?,
+    val macroFunctionLike: Boolean,
+    val expression: String?,
+    val braceDepth: Int,
     val features: Set<PreprocessorFeature>,
 )
 
@@ -85,7 +88,7 @@ internal class PreprocessorProtectionException(
  *
  * [compilerRepresentation] masks configurable directives while retaining every branch body. Call
  * [compilerSource] before passing it to a compiler: it rejects contracts which still require an
- * explicit variant/materialization step.
+ * explicit compiler-copy or structural-planning step.
  */
 internal data class ProtectedPreprocessorSource(
     val sourceName: String,
@@ -237,6 +240,9 @@ internal object PreprocessorProtection {
                 exactText = exactText,
                 macroName = parsed.macro?.name,
                 macroBody = parsed.macro?.body,
+                macroFunctionLike = parsed.macro?.functionLike == true,
+                expression = parsed.expression,
+                braceDepth = line.braceDepth,
                 features = features.toMutableSet(),
             )
             drafts += draft
@@ -553,10 +559,10 @@ internal object PreprocessorProtection {
             val reason = when {
                 directive.kind in CONDITIONAL_OPENERS &&
                     PreprocessorFeature.DECLARATION_SHAPE in directive.features ->
-                    "top-level conditional can change GLSL declaration shape; materialize a variant explicitly"
+                    "top-level conditional can change GLSL declaration shape; structural compiler planning is required"
 
                 directive.kind in CONDITIONAL_OPENERS ->
-                    "conditional branch inside GLSL code requires explicit variant materialization"
+                    "conditional branch inside GLSL code requires compiler-copy control-flow lowering"
 
                 PreprocessorFeature.TOKEN_PASTE in directive.features ->
                     "token-paste macro ${directive.macroName} cannot be replaced by a const variable"
@@ -575,7 +581,7 @@ internal object PreprocessorProtection {
 
                 directive.kind == PreprocessorDirectiveKind.ERROR ||
                     directive.kind == PreprocessorDirectiveKind.WARNING ->
-                    "diagnostic directive requires explicit branch materialization"
+                    "diagnostic directive requires explicit compiler-copy planning"
 
                 else -> null
             }
@@ -812,6 +818,9 @@ internal object PreprocessorProtection {
         val exactText: String,
         val macroName: String?,
         val macroBody: String?,
+        val macroFunctionLike: Boolean,
+        val expression: String?,
+        val braceDepth: Int,
         val features: MutableSet<PreprocessorFeature>,
     ) {
         fun freeze(): PreprocessorDirective {
@@ -826,6 +835,9 @@ internal object PreprocessorProtection {
                 exactText,
                 macroName,
                 macroBody,
+                macroFunctionLike,
+                expression,
+                braceDepth,
                 features.toSet(),
             )
         }

@@ -10,15 +10,9 @@ import kotlin.io.path.createDirectories
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 
-internal data class PreprocessorBranchSelection(
-    val conditionalId: Int,
-    val branchIndex: Int,
-)
-
-internal data class SpirvShaderVariant(
+internal data class SpirvCompilerModule(
     val name: String,
     val source: String,
-    val coveredBranches: Set<PreprocessorBranchSelection> = emptySet(),
     val resourceMarkers: List<TextureResourceMarker> = emptyList(),
     val conservativeAccess: TextureAccess = TextureAccess(),
 )
@@ -27,15 +21,15 @@ internal data class SpirvOptimizationRequest(
     val sourceName: String,
     val stage: ShaderStage,
     val source: String,
-    val variants: List<SpirvShaderVariant> = emptyList(),
+    val compilerModules: List<SpirvCompilerModule> = emptyList(),
 )
 
 internal enum class SpirvEmissionMode {
     OPTIMIZED,
-    PRESERVED_PREPROCESSOR,
+    PRESERVED_COMPILER_COPY,
 }
 
-internal data class SpirvVariantResult(
+internal data class SpirvModuleResult(
     val name: String,
     val source: String,
     val semanticSource: String,
@@ -57,13 +51,12 @@ internal data class SpirvOptimizationResult(
     val source: String,
     val emissionMode: SpirvEmissionMode,
     val artifactDirectory: Path,
-    val variants: List<SpirvVariantResult>,
-    val requiredBranches: Set<PreprocessorBranchSelection>,
+    val modules: List<SpirvModuleResult>,
 )
 
 internal enum class SpirvRoundTripPhase(val displayName: String) {
     PROTECT("preprocessor protection"),
-    MATERIALIZE("variant materialization"),
+    COMPILER_COPY("compiler-copy materialization"),
     PATCH_INPUT("OpenGL input patching"),
     COMPILE("OpenGL SPIR-V compilation"),
     OPTIMIZE("SPIR-V optimization"),
@@ -101,7 +94,9 @@ internal class SpirvOptimizer(
     private val executables: SpirvExecutables = SpirvExecutables(),
     private val processRunner: SpirvProcessRunner? = null,
     private val patcher: OpenGlShaderPatcher = OpenGlShaderPatcher(),
-    private val variantExecutor: ExecutorService? = null,
+    private val moduleExecutor: ExecutorService? = null,
+    private val processGate: ExternalProcessGate? = null,
+    private val metrics: PipelineMetrics? = null,
 ) {
     val workingDirectory: Path = workingDirectory.toAbsolutePath().normalize()
 
@@ -118,50 +113,50 @@ internal class SpirvOptimizer(
         val protection = phase(request, SpirvRoundTripPhase.PROTECT, requestDirectory) {
             PreprocessorProtection.protect(request.source, request.sourceName)
         }
-        if (protection.compilerBlockers.isEmpty()) {
-            if (request.variants.isNotEmpty()) {
+        val explicitModules = request.compilerModules.isNotEmpty()
+        val modules = if (explicitModules) {
+            validateModules(request, requestDirectory)
+            request.compilerModules
+        } else {
+            if (protection.compilerBlockers.isNotEmpty()) {
+                val blocker = protection.compilerBlockers.first()
                 fail(
                     request,
-                    SpirvRoundTripPhase.MATERIALIZE,
+                    SpirvRoundTripPhase.COMPILER_COPY,
                     requestDirectory,
-                    "explicit variants were supplied for a directly compilable shader",
+                    "${blocker.reason} at line ${blocker.sourceLine}; no compiler-copy module was supplied",
                 )
             }
-            val result = optimizeVariant(request, SpirvShaderVariant("main", request.source), requestDirectory)
-            return SpirvOptimizationResult(
-                source = result.source,
-                emissionMode = SpirvEmissionMode.OPTIMIZED,
-                artifactDirectory = requestDirectory,
-                variants = listOf(result),
-                requiredBranches = emptySet(),
-            )
+            listOf(SpirvCompilerModule("main", request.source))
         }
-
-        val requiredBranches = requiredPreprocessorBranches(protection)
-        validateVariants(request, protection, requiredBranches, requestDirectory)
-        val results = optimizeVariants(request, requestDirectory)
-        requestDirectory.resolve("preserved.glsl").writeText(request.source)
-
+        val results = optimizeModules(request, modules, requestDirectory, explicitModules)
+        val emittedSource = if (explicitModules) request.source else results.single().source
+        requestDirectory.resolve(if (explicitModules) "preserved.glsl" else "optimized.glsl").writeText(emittedSource)
         return SpirvOptimizationResult(
-            source = request.source,
-            emissionMode = SpirvEmissionMode.PRESERVED_PREPROCESSOR,
+            source = emittedSource,
+            emissionMode = if (explicitModules) {
+                SpirvEmissionMode.PRESERVED_COMPILER_COPY
+            } else {
+                SpirvEmissionMode.OPTIMIZED
+            },
             artifactDirectory = requestDirectory,
-            variants = results,
-            requiredBranches = requiredBranches,
+            modules = results,
         )
     }
 
-    private fun optimizeVariants(
+    private fun optimizeModules(
         request: SpirvOptimizationRequest,
+        modules: List<SpirvCompilerModule>,
         requestDirectory: Path,
-    ): List<SpirvVariantResult> {
-        val executor = variantExecutor ?: return request.variants.map { variant ->
-            optimizeVariant(request, variant, requestDirectory)
+        generatedCompilerSource: Boolean,
+    ): List<SpirvModuleResult> {
+        val executor = moduleExecutor ?: return modules.map { module ->
+            optimizeModule(request, module, requestDirectory, generatedCompilerSource)
         }
         return try {
             executor.invokeAll(
-                request.variants.map { variant ->
-                    Callable { optimizeVariant(request, variant, requestDirectory) }
+                modules.map { module ->
+                    Callable { optimizeModule(request, module, requestDirectory, generatedCompilerSource) }
                 },
             ).map { future ->
                 try {
@@ -171,74 +166,79 @@ internal class SpirvOptimizer(
                     when (cause) {
                         is RuntimeException -> throw cause
                         is Error -> throw cause
-                        else -> throw IllegalStateException("Shader variant task failed", cause)
+                        else -> throw IllegalStateException("Shader compiler-module task failed", cause)
                     }
                 }
             }
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
-            throw IllegalStateException("Shader variant processing interrupted", e)
+            throw IllegalStateException("Shader compiler-module processing interrupted", e)
         }
     }
 
-    private fun optimizeVariant(
+    private fun optimizeModule(
         request: SpirvOptimizationRequest,
-        variant: SpirvShaderVariant,
+        module: SpirvCompilerModule,
         requestDirectory: Path,
-    ): SpirvVariantResult {
-        val variantDirectory = requestDirectory.resolve(
-            "${safeName(variant.name)}-${shortHash("${variant.name}\u0000${variant.source}")}",
+        generatedCompilerSource: Boolean,
+    ): SpirvModuleResult {
+        val moduleDirectory = requestDirectory.resolve(
+            "${safeName(module.name)}-${shortHash("${module.name}\u0000${module.source}")}",
         )
-        variantDirectory.createDirectories()
-        VARIANT_ARTIFACT_NAMES.forEach { Files.deleteIfExists(variantDirectory.resolve(it)) }
-        val originalPath = variantDirectory.resolve("input.glsl")
-        originalPath.writeText(variant.source)
+        moduleDirectory.createDirectories()
+        MODULE_ARTIFACT_NAMES.forEach { Files.deleteIfExists(moduleDirectory.resolve(it)) }
+        val originalPath = moduleDirectory.resolve("input.glsl")
+        originalPath.writeText(module.source)
 
-        val variantSourceName = if (variant.name == "main") request.sourceName else "${request.sourceName}#${variant.name}"
-        val protection = phase(request, SpirvRoundTripPhase.PROTECT, variantDirectory, variantSourceName) {
-            PreprocessorProtection.protect(variant.source, variantSourceName)
+        val moduleSourceName = if (module.name == "main") request.sourceName else "${request.sourceName}#${module.name}"
+        val moduleProtection = phase(request, SpirvRoundTripPhase.PROTECT, moduleDirectory, moduleSourceName) {
+            if (generatedCompilerSource) {
+                PreprocessorProtection.protectGeneratedCompilerSource(module.source, moduleSourceName)
+            } else {
+                PreprocessorProtection.protect(module.source, moduleSourceName)
+            }
         }
-        val patch = phase(request, SpirvRoundTripPhase.PATCH_INPUT, variantDirectory, variantSourceName) {
+        val patch = phase(request, SpirvRoundTripPhase.PATCH_INPUT, moduleDirectory, moduleSourceName) {
             patcher.patch(
-                protection,
+                moduleProtection,
                 request.stage,
             )
         }
-        val compilerPath = variantDirectory.resolve("compiler.glsl")
+        val compilerPath = moduleDirectory.resolve("compiler.glsl")
         compilerPath.writeText(patch.compilerSource)
 
         val toolchain = if (processRunner == null) {
-            SpirvToolchain(variantDirectory, executables)
+            SpirvToolchain(moduleDirectory, executables, processGate = processGate, metrics = metrics)
         } else {
-            SpirvToolchain(variantDirectory, executables, processRunner)
+            SpirvToolchain(moduleDirectory, executables, processRunner, processGate, metrics)
         }
-        val originalSpirv = variantDirectory.resolve("input.spv")
+        val originalSpirv = moduleDirectory.resolve("input.spv")
         val compileInvocation = toolchain.compileInvocation(request.stage, compilerPath, originalSpirv)
-        phase(request, SpirvRoundTripPhase.COMPILE, variantDirectory, variantSourceName) {
+        phase(request, SpirvRoundTripPhase.COMPILE, moduleDirectory, moduleSourceName) {
             toolchain.execute(compileInvocation)
         }
 
-        val optimizedSpirv = variantDirectory.resolve("optimized.spv")
+        val optimizedSpirv = moduleDirectory.resolve("optimized.spv")
         val optimizeInvocation = toolchain.optimizeInvocation(request.stage, originalSpirv, optimizedSpirv)
-        phase(request, SpirvRoundTripPhase.OPTIMIZE, variantDirectory, variantSourceName) {
+        phase(request, SpirvRoundTripPhase.OPTIMIZE, moduleDirectory, moduleSourceName) {
             toolchain.execute(optimizeInvocation)
         }
 
-        val decompiledPath = variantDirectory.resolve("decompiled.glsl")
+        val decompiledPath = moduleDirectory.resolve("decompiled.glsl")
         val decompileInvocation = toolchain.decompileInvocation(request.stage, optimizedSpirv, decompiledPath)
-        phase(request, SpirvRoundTripPhase.DECOMPILE, variantDirectory, variantSourceName) {
+        phase(request, SpirvRoundTripPhase.DECOMPILE, moduleDirectory, moduleSourceName) {
             toolchain.execute(decompileInvocation)
         }
 
         val semanticSource = decompiledPath.readText()
-        val restored = phase(request, SpirvRoundTripPhase.RESTORE, variantDirectory, variantSourceName) {
+        val restored = phase(request, SpirvRoundTripPhase.RESTORE, moduleDirectory, moduleSourceName) {
             patcher.restore(semanticSource, patch)
         }
-        val restoredPath = variantDirectory.resolve("restored.glsl")
+        val restoredPath = moduleDirectory.resolve("restored.glsl")
         restoredPath.writeText(restored)
 
-        val validationPatch = phase(request, SpirvRoundTripPhase.VALIDATE, variantDirectory, variantSourceName) {
-            val restoredProtection = PreprocessorProtection.protectGeneratedCompilerSource(restored, variantSourceName)
+        val validationPatch = phase(request, SpirvRoundTripPhase.VALIDATE, moduleDirectory, moduleSourceName) {
+            val restoredProtection = PreprocessorProtection.protectGeneratedCompilerSource(restored, moduleSourceName)
             patcher.patch(
                 restoredProtection,
                 request.stage,
@@ -249,28 +249,28 @@ internal class SpirvOptimizer(
             fail(
                 request,
                 SpirvRoundTripPhase.VALIDATE,
-                variantDirectory,
+                moduleDirectory,
                 "generated OpenGL layout mapping changed after restoration",
-                variantSourceName,
+                moduleSourceName,
             )
         }
-        val validationSource = variantDirectory.resolve("validation.glsl")
+        val validationSource = moduleDirectory.resolve("validation.glsl")
         validationSource.writeText(validationPatch.compilerSource)
-        val validationSpirv = variantDirectory.resolve("validation.spv")
+        val validationSpirv = moduleDirectory.resolve("validation.spv")
         val validationInvocation = toolchain.compileInvocation(request.stage, validationSource, validationSpirv)
-        phase(request, SpirvRoundTripPhase.RECOMPILE, variantDirectory, variantSourceName) {
+        phase(request, SpirvRoundTripPhase.RECOMPILE, moduleDirectory, moduleSourceName) {
             toolchain.execute(validationInvocation)
         }
 
-        return SpirvVariantResult(
-            name = variant.name,
+        return SpirvModuleResult(
+            name = module.name,
             source = restored,
             semanticSource = semanticSource,
             textureAccess = TextureAccessAnalyzer.fromOptimizedSource(
                 semanticSource,
-                variant.resourceMarkers,
-            ) + variant.conservativeAccess,
-            artifactDirectory = variantDirectory,
+                module.resourceMarkers,
+            ) + module.conservativeAccess,
+            artifactDirectory = moduleDirectory,
             originalSpirv = originalSpirv,
             optimizedSpirv = optimizedSpirv,
             validationSpirv = validationSpirv,
@@ -283,60 +283,17 @@ internal class SpirvOptimizer(
         )
     }
 
-    private fun validateVariants(
+    private fun validateModules(
         request: SpirvOptimizationRequest,
-        protection: ProtectedPreprocessorSource,
-        requiredBranches: Set<PreprocessorBranchSelection>,
         artifactDirectory: Path,
     ) {
-        if (request.variants.isEmpty()) {
-            val blocker = protection.compilerBlockers.first()
+        val duplicateNames = request.compilerModules.groupingBy { it.name }.eachCount().filterValues { it > 1 }.keys
+        if (duplicateNames.isNotEmpty() || request.compilerModules.any { it.name.isBlank() }) {
             fail(
                 request,
-                SpirvRoundTripPhase.MATERIALIZE,
+                SpirvRoundTripPhase.COMPILER_COPY,
                 artifactDirectory,
-                "${blocker.reason} at line ${blocker.sourceLine}; no explicit variants were supplied",
-            )
-        }
-        val duplicateNames = request.variants.groupingBy { it.name }.eachCount().filterValues { it > 1 }.keys
-        if (duplicateNames.isNotEmpty() || request.variants.any { it.name.isBlank() }) {
-            fail(
-                request,
-                SpirvRoundTripPhase.MATERIALIZE,
-                artifactDirectory,
-                "variant names must be non-blank and unique; duplicates=${duplicateNames.sorted()}",
-            )
-        }
-
-        request.variants.forEach { variant ->
-            val duplicates = variant.coveredBranches.groupBy { it.conditionalId }.filterValues { it.size > 1 }
-            if (duplicates.isNotEmpty()) {
-                fail(
-                    request,
-                    SpirvRoundTripPhase.MATERIALIZE,
-                    artifactDirectory,
-                    "variant ${variant.name} selects multiple branches for conditionals ${duplicates.keys.sorted()}",
-                )
-            }
-            val unknown = variant.coveredBranches - requiredBranches
-            if (unknown.isNotEmpty()) {
-                fail(
-                    request,
-                    SpirvRoundTripPhase.MATERIALIZE,
-                    artifactDirectory,
-                    "variant ${variant.name} reports unknown branch selections ${unknown.sortedForDiagnostic()}",
-                )
-            }
-        }
-
-        val covered = request.variants.flatMapTo(mutableSetOf()) { it.coveredBranches }
-        val missing = requiredBranches - covered
-        if (missing.isNotEmpty()) {
-            fail(
-                request,
-                SpirvRoundTripPhase.MATERIALIZE,
-                artifactDirectory,
-                "explicit variants do not cover configurable branches ${missing.sortedForDiagnostic()}",
+                "compiler-module names must be non-blank and unique; duplicates=${duplicateNames.sorted()}",
             )
         }
     }
@@ -344,10 +301,10 @@ internal class SpirvOptimizer(
     private fun artifactDirectory(
         sourceName: String,
         stage: ShaderStage,
-        variantName: String,
+        moduleName: String,
         source: String,
     ): Path {
-        val hash = shortHash("$sourceName\u0000${stage.name}\u0000$variantName\u0000$source")
+        val hash = shortHash("$sourceName\u0000${stage.name}\u0000$moduleName\u0000$source")
         return workingDirectory.resolve("${safeName(sourceName)}-${stage.glslangName}-$hash")
     }
 
@@ -396,14 +353,9 @@ internal class SpirvOptimizer(
         throw SpirvRoundTripException(sourceName, request.stage, phase, artifactDirectory, detail)
     }
 
-    private fun Set<PreprocessorBranchSelection>.sortedForDiagnostic(): List<String> {
-        return sortedWith(compareBy(PreprocessorBranchSelection::conditionalId, PreprocessorBranchSelection::branchIndex))
-            .map { "${it.conditionalId}:${it.branchIndex}" }
-    }
-
     companion object {
         private val INVALID_PATH_CHAR = """[^A-Za-z0-9._-]""".toRegex()
-        private val VARIANT_ARTIFACT_NAMES = listOf(
+        private val MODULE_ARTIFACT_NAMES = listOf(
             "input.glsl",
             "compiler.glsl",
             "input.spv",
