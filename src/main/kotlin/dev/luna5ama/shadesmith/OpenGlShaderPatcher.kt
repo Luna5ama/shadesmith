@@ -658,8 +658,13 @@ internal class OpenGlShaderPatcher {
         actual: ShaderBlockSignature?,
     ): Boolean {
         if (expected == actual) return true
+        val actualBody = if (expected != null && !BLOCK_MEMBER_OFFSET_LAYOUT.containsMatchIn(expected.body)) {
+            actual?.body?.let { BLOCK_MEMBER_OFFSET_LAYOUT.replace(it, "") }
+        } else {
+            actual?.body
+        }
         return expected != null && actual != null &&
-            expected.body == actual.body &&
+            expected.body == actualBody &&
             expected.instance.isEmpty() &&
             BLOCK_INSTANCE_NAME_REGEX.matches(actual.instance)
     }
@@ -1036,6 +1041,7 @@ internal class OpenGlShaderPatcher {
         private val ARRAY_SIZE_REGEX = """\[\s*(\d+)\s*]""".toRegex()
         private val SIZED_ARRAY_SUFFIX = """\[\d+]""".toRegex()
         private val BLOCK_INSTANCE_NAME_REGEX = """[A-Za-z_][A-Za-z0-9_]*""".toRegex()
+        private val BLOCK_MEMBER_OFFSET_LAYOUT = """layout\(offset=[^)]+\)""".toRegex()
         private val WHITESPACE_REGEX = """\s+""".toRegex()
         private val LINE_COMMENT_REGEX = """//[^\r\n]*""".toRegex()
         private val BLOCK_COMMENT_REGEX = """/\*[\s\S]*?\*/""".toRegex()

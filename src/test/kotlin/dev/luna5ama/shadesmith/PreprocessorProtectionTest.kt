@@ -49,6 +49,20 @@ class PreprocessorProtectionTest {
     }
 
     @Test
+    fun disabledQualifierDocumentationDoesNotBlockGeneratedCompilerSource() {
+        val source = """
+            #version 460 core
+            //#define FFX_PARAMETER_UNIFORM const //[placeholder]
+            void main() {}
+        """.trimIndent()
+
+        val protected = PreprocessorProtection.protectGeneratedCompilerSource(source, "disabled-qualifier.comp")
+
+        assertTrue(protected.compilerBlockers.isEmpty())
+        assertContains(protected.compilerSource(), "//#define FFX_PARAMETER_UNIFORM const")
+    }
+
+    @Test
     fun refusesToCompileStructuralBranchesUsingTheCurrentSettingValue() {
         val protected = protectFixture("structural-contracts.glsl")
 
@@ -164,6 +178,32 @@ class PreprocessorProtectionTest {
         val alias = protected.directives.single { it.macroName == "usam_main" }
         assertEquals(PreprocessorDisposition.EVALUATED, alias.disposition)
         assertTrue(PreprocessorFeature.CONST_SPECIALIZATION in alias.features)
+        assertEquals(source, protected.restore())
+    }
+
+    @Test
+    fun allowsNestedConstRegionIntroducedByExpandedConditionalInclude() {
+        val source = """
+            /*const*/
+            #ifdef OUTER_FEATURE
+            #define OUTER_VALUE 1
+            /*const*/
+            #if INNER_MODE == 0
+            #define INNER_VALUE 2
+            #else
+            #define INNER_VALUE 3
+            #endif
+            /*const*/
+            #undef OUTER_VALUE
+            #endif
+            /*const*/
+            void main() {}
+        """.trimIndent()
+
+        val protected = PreprocessorProtection.protect(source, "nested-expanded-const.glsl")
+
+        assertTrue(protected.compilerBlockers.isEmpty(), protected.compilerBlockers.toString())
+        assertTrue(protected.directives.all { it.disposition == PreprocessorDisposition.EVALUATED })
         assertEquals(source, protected.restore())
     }
 

@@ -126,6 +126,40 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
+    fun settingSizedStorageBlockMembersUseFiniteStructuralModules() = withWorkspace { workspace ->
+        val source = """
+            #version 460 compatibility
+            #define SETTING_SIZE 2 //[2 4]
+            #define DATA_QUALIFIER buffer
+            #define DATA_SIZE SETTING_SIZE
+            layout(std430, binding = 0) DATA_QUALIFIER Data {
+                uint head;
+                uint values[DATA_SIZE];
+                uint tail;
+            };
+            layout(local_size_x = 1) in;
+            void main() { values[0] = tail; }
+        """.trimIndent()
+        val base = ShaderCompilerCopyPlanner.plan(source, "storage-array.csh")
+        assertContains(base.structuralBlockers.single().reason, "resource block member")
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE),
+        ).plan
+
+        assertEquals(2, planned.materializationRows().size)
+        val arraySizes = planned.materializationRows().map { row ->
+            val compilerSource = requireNotNull(row.compilerPlan.compilerSource)
+            requireNotNull("uint values\\[([0-9]+)".toRegex().find(compilerSource)).groupValues[1]
+        }.toSet()
+        assertEquals(setOf("2", "4"), arraySizes)
+        val modules = assertIs<ShaderStructuralMaterializationResult.Materialized>(
+            planned.deduplicate(materialize(workspace, source, planned)),
+        ).modules
+        assertEquals(2, modules.size)
+        optimizeAll(workspace, source, ShaderStage.COMPUTE, modules.map { it.module })
+    }
+
+    @Test
     fun settingMutationFailsClosedInsteadOfBeingMaterialized() {
         val source = """
             #version 460 compatibility
@@ -163,6 +197,7 @@ class ShaderStructuralPlannerTest {
         ).plan
 
         assertEquals(4, planned.rows.size)
+        assertEquals(2, planned.materializationRows().size)
         assertEquals(1, planned.graph.components.size)
         val materialized = materialize(workspace, source, planned)
         val finalized = assertIs<ShaderStructuralMaterializationResult.Materialized>(
@@ -234,6 +269,26 @@ class ShaderStructuralPlannerTest {
         assertContains(result.source, "if (SM_SETTING_WIDE)")
         assertFalse("int weight = 0;\n#ifdef SETTING_WIDE" in result.source)
         assertEquals(2, result.finalValidationInvocations.size)
+    }
+
+    @Test
+    fun coupledAbiControlFlowDoesNotMakeIndependentStructuralValuesPlanSensitive() {
+        val source = coupledAbiAndIndependentStructuralUses()
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(
+                ShaderCompilerCopyPlanner.plan(source, "coupled.csh"),
+                ShaderStage.COMPUTE,
+            ),
+        ).plan
+
+        assertEquals(2, planned.graph.components.size)
+        assertEquals(5, planned.rows.size)
+        assertEquals(3, planned.materializationRows().size)
+        planned.rows.forEach { row ->
+            val compiler = requireNotNull(row.compilerPlan.compilerSource)
+            assertContains(compiler, "SM_SETTING_SHAPE")
+            assertFalse("SM_SETTING_FORMAT" in compiler)
+        }
     }
 
     @Test
@@ -349,6 +404,7 @@ class ShaderStructuralPlannerTest {
             ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE),
         ).plan
         assertEquals(64, planned.rows.size)
+        assertEquals(2, planned.materializationRows().size)
 
         val fakeModules = planned.rows.mapIndexed { index, row ->
             SpirvCompilerModule(
@@ -375,6 +431,37 @@ class ShaderStructuralPlannerTest {
         repeat(6) { assertContains(first, "SETTING_$it") }
     }
 
+    @Test
+    fun predictedCompilerModuleCapFailsClosedBeforeMaterialization() {
+        val domain = (0..32).joinToString(" ")
+        val source = buildString {
+            appendLine("#version 460 compatibility")
+            appendLine("#define SETTING_MODE 0 //[$domain]")
+            repeat(33) { appendLine("#define TYPE_$it float") }
+            appendLine("#define CAT_IMPL(a, b) a ## b")
+            appendLine("#define CAT(a, b) CAT_IMPL(a, b)")
+            appendLine("#define TYPE(value) CAT(TYPE_, value)")
+            appendLine("TYPE(SETTING_MODE) evaluate(TYPE(SETTING_MODE) value) { return value; }")
+            appendLine("layout(local_size_x = 1) in;")
+            appendLine("void main() {}")
+        }
+
+        val result = assertIs<ShaderStructuralPlanningResult.Preserved>(
+            ShaderStructuralPlanner.plan(
+                ShaderCompilerCopyPlanner.plan(source, "predicted-cap.csh"),
+                ShaderStage.COMPUTE,
+            ),
+        )
+
+        assertContains(result.reason, "structural compiler-module cap exceeded before materialization: 33 > 32")
+        assertContains(result.reason, "components:")
+        assertContains(result.reason, "SETTING_MODE=[0, 1, 2")
+        assertContains(result.reason, "coverage_rows=33")
+        assertContains(result.reason, "predicted compiler shapes:")
+        assertContains(result.reason, "shape-032")
+        assertContains(result.reason, "compiler_sha256=")
+    }
+
     private fun materialize(
         workspace: Path,
         source: String,
@@ -382,7 +469,7 @@ class ShaderStructuralPlannerTest {
     ): List<SpirvCompilerModule> {
         val materializer = ShaderCompilerCopyMaterializer(workspace.resolve("compiler-copies"))
         val probe = TextureAccessProbe(source, emptyList(), TextureAccess())
-        return plan.rows.map { row ->
+        return plan.materializationRows().map { row ->
             materializer.materialize(plan.sourceName, plan.stage, row.compilerPlan, probe, row.name)
         }
     }
@@ -491,6 +578,37 @@ class ShaderStructuralPlannerTest {
             weight += 2;
         #endif
             imageStore(target, ivec2(0), vec4(weight));
+        }
+    """.trimIndent()
+
+    private fun coupledAbiAndIndependentStructuralUses(): String = """
+        #version 460 compatibility
+        #define SETTING_FORMAT 0 //[0 1]
+        #define SETTING_SHAPE 0 //[0 1 2 3]
+        #if SETTING_FORMAT == 0
+        layout(rgba16f, binding = 0) uniform image2D target;
+        #else
+        layout(r32ui, binding = 0) uniform uimage2D target;
+        #endif
+        #if SETTING_SHAPE < 2
+        layout(rgba16f, binding = 1) uniform image2D auxiliary;
+        #else
+        layout(r32f, binding = 1) uniform image2D auxiliary;
+        #endif
+        layout(local_size_x = 1) in;
+        void main() {
+        #if SETTING_FORMAT == 0
+            imageStore(target, ivec2(0), vec4(1.0));
+        #else
+            imageStore(target, ivec2(0), uvec4(1u));
+        #endif
+            int weight = 0;
+        #if SETTING_SHAPE == 3
+            weight += 3;
+        #else
+            weight += 1;
+        #endif
+            imageStore(auxiliary, ivec2(0), vec4(weight));
         }
     """.trimIndent()
 
@@ -605,7 +723,9 @@ class ShaderStructuralPlannerTest {
         #define CAT_IMPL(a, b) a ## b
         #define CAT(a, b) CAT_IMPL(a, b)
         #define TYPE(value) CAT(TYPE_, value)
-        TYPE(SETTING_MODE) evaluate(TYPE(SETTING_MODE) value) { return value; }
+        #define SELECTED_TYPE SETTING_MODE
+        #define SELECTED_TYPE_VALUE() TYPE(SELECTED_TYPE)
+        SELECTED_TYPE_VALUE() evaluate(SELECTED_TYPE_VALUE() value) { return value; }
         layout(local_size_x = 1) in;
         void main() {}
     """.trimIndent()

@@ -124,6 +124,28 @@ internal object SpirvSettingBridge {
         return insertAfterVersion(result, declarations).trimEnd() + "\n"
     }
 
+    fun completeRestoredSettings(
+        source: String,
+        restoredSettings: List<ShaderSetting>,
+        candidates: List<ShaderSetting>,
+    ): SpirvSettingBridgeRestoration {
+        val required = (restoredSettings + candidates.filter { setting ->
+            identifierRegex(setting.compilerName).containsMatchIn(source)
+        }).distinctBy { it.name }.sortedBy { it.name }
+        val missing = mutableListOf<ShaderSetting>()
+        required.forEach { setting ->
+            when (occurrences(source, renderBridge(setting)).size) {
+                0 -> missing += setting
+                1 -> Unit
+                else -> return SpirvSettingBridgeRestoration.Preserved(
+                    "setting bridge ${setting.compilerName} is ambiguous after contract restoration",
+                )
+            }
+        }
+        val completed = insertAfterVersion(source, missing.joinToString("") { renderBridge(it) })
+        return SpirvSettingBridgeRestoration.Restored(completed, required)
+    }
+
     fun placeAfterDefinitions(
         source: String,
         settings: List<ShaderSetting>,

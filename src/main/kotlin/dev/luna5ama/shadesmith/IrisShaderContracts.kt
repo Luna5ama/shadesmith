@@ -87,6 +87,7 @@ internal data class IrisShaderContractPlan(
     val structuralIssues: List<IrisStructuralIssue>,
     private val compilerPrelude: String,
     private val compilerSettings: List<ShaderSetting>,
+    private val compilerHostNames: List<String>,
 ) {
     val localSizeSpecializationIds: Set<Int>
         get() = localSize?.specializationIds?.values.orEmpty().toSet()
@@ -103,6 +104,9 @@ internal data class IrisShaderContractPlan(
         if (localSize != null) result = LOCAL_SIZE_LAYOUT.replace(result, "")
         if (contracts.any { it.kind == IrisSourceContractKind.EXTENSION }) {
             result = EXTENSION_LINE.replace(result, "")
+        }
+        compilerHostNames.forEach { name ->
+            result = compilerHostDeclaration(name).replace(result, "")
         }
         return normalizeCompilerText(result)
     }
@@ -207,11 +211,23 @@ internal data class IrisShaderContractPlan(
             ?: throw IllegalArgumentException("$sourceName: restored source has no #version directive")
         result = result.replaceRange(version.range, "#version 460 core")
         if (!alreadyCompilerSource) {
-            val missingSettings = compilerSettings.filterNot { setting ->
-                identifierRegex(setting.compilerName).containsMatchIn(result)
+            val existingDeclarations = compilerSettings.associateWith { setting ->
+                val matches = compilerSettingDeclaration(setting.compilerName).findAll(result).toList()
+                require(matches.size <= 1) {
+                    "$sourceName: compiler setting ${setting.compilerName} has ${matches.size} declarations"
+                }
+                matches.singleOrNull()
             }
-            val settingDeclarations = renderSettingDeclarations(missingSettings)
-            val validationPrelude = if (settingDeclarations.isEmpty()) {
+            existingDeclarations.values.filterNotNull().sortedByDescending { it.range.first }.forEach { declaration ->
+                result = result.removeRange(declaration.range)
+            }
+            val settingDeclarations = buildString {
+                compilerSettings.forEach { setting ->
+                    val existing = existingDeclarations.getValue(setting)?.value?.trimEnd('\r', '\n')
+                    if (existing == null) append(renderSettingDeclarations(listOf(setting))) else appendLine(existing)
+                }
+            }
+            val validationPrelude = if (compilerSettings.isEmpty()) {
                 compilerPrelude
             } else {
                 compilerPrelude.replace(
@@ -266,7 +282,7 @@ internal object IrisShaderContractExtractor {
                 )
             }
             .toList()
-        val hostDeclarations = HOST_CONST_START.findAll(source)
+        val discoveredHostDeclarations = HOST_CONST_START.findAll(source)
             .filter { lexical.isTopLevelCode(it.range.first) && isHostDeclarationName(it.groupValues[1]) }
             .map { match ->
                 val semicolon = lexical.findCodeCharacter(';', match.range.last + 1)
@@ -274,17 +290,44 @@ internal object IrisShaderContractExtractor {
                         "$sourceName:${lines.lineAt(match.range.first)}: unterminated Iris host declaration ${match.groupValues[1]}",
                     )
                 val range = lines.fullLineRange(match.range.first..semicolon)
-                HostDeclaration(match.groupValues[1], range, source.substring(match.range.first, semicolon + 1))
+                val declaration = source.substring(match.range.first, semicolon + 1)
+                val parsed = HOST_CONST_DECLARATION.matchEntire(declaration.trim())
+                    ?: throw IllegalArgumentException(
+                        "$sourceName:${lines.lineAt(match.range.first)}: Iris host declaration " +
+                            "${match.groupValues[1]} is not a scalar compiler expression",
+                    )
+                HostDeclaration(
+                    name = match.groupValues[1],
+                    type = parsed.groupValues[1],
+                    initializer = parsed.groupValues[3].trim(),
+                    range = range,
+                    declaration = declaration,
+                    predicate = predicateAt(range.first, conditionalGroups, settingsByName),
+                )
             }
             .toList()
-        val hostDeclarationRanges = hostDeclarations.map { it.range }
-        hostDeclarations.forEach { declaration ->
-            val references = identifierOccurrences(source, declaration.name, lexical)
+        val hostDeclarationRanges = discoveredHostDeclarations.map { it.range }
+        val identifierOffsets = indexIdentifierOccurrences(
+            source,
+            macroDefinitions.keys + discoveredHostDeclarations.map { it.name },
+            lexical,
+        )
+        val hostCompilerNames = discoveredHostDeclarations.groupBy { it.name }.mapNotNull { (name, declarations) ->
+            val references = identifierOffsets[name].orEmpty()
                 .filterNot { offset -> hostDeclarationRanges.any { offset in it } }
                 .filterNot { offset -> directives.any { offset in it.range } }
-            require(references.isEmpty()) {
-                "$sourceName:${lines.lineAt(declaration.range.first)}: Iris host declaration ${declaration.name} is referenced by shader code"
+            if (references.isEmpty()) {
+                null
+            } else {
+                require(name in COMPILER_READABLE_IRIS_HOST_NAMES) {
+                    "$sourceName:${lines.lineAt(declarations.first().range.first)}: Iris host declaration " +
+                        "$name is referenced by shader code"
+                }
+                name to uniqueHostCompilerName(source, name)
             }
+        }.toMap()
+        val hostDeclarations = discoveredHostDeclarations.map { declaration ->
+            declaration.copy(compilerName = hostCompilerNames[declaration.name])
         }
 
         val atoms = mutableListOf<ContractAtom>()
@@ -323,9 +366,27 @@ internal object IrisShaderContractExtractor {
         }
         localExpressionIdentifiers.forEach(::collectHelperMacros)
         hostExpressionIdentifiers.forEach(::collectHelperMacros)
+        val hostAndLocalRanges = localLayouts.map { it.range } + hostDeclarations.map { it.range }
+        val hostAndLocalGroups = hostAndLocalRanges.mapNotNull { range ->
+            conditionalGroups.filter { range.first in it.range }.maxByOrNull { it.depth }
+        }.toSet()
+        macroDefinitions.forEach { (name, definitions) ->
+            if (definitions.none { it.group in hostAndLocalGroups }) return@forEach
+            val ownRanges = definitions.map { it.range }
+            val hasNonContractUse = identifierOffsets[name].orEmpty().any { offset ->
+                ownRanges.none { offset in it } && hostAndLocalRanges.none { offset in it }
+            }
+            if (!hasNonContractUse) collectHelperMacros(name)
+        }
         while (true) {
             val selectedGroups = helperMacroNames.flatMap { macroDefinitions[it].orEmpty() }
-                .mapNotNullTo(linkedSetOf()) { it.group }
+                .mapNotNullTo(linkedSetOf()) { definition ->
+                    definition.group?.takeIf { group ->
+                        group.delimiters.any { delimiter ->
+                            SETTING_IDENTIFIER.containsMatchIn(directiveCondition(delimiter.directive))
+                        }
+                    }
+                }
             val before = helperMacroNames.size
             macroDefinitions.filterValues { definitions -> definitions.any { it.group in selectedGroups } }
                 .keys
@@ -345,17 +406,23 @@ internal object IrisShaderContractExtractor {
         )
         val derivedAnalysis = buildDerivedMacros(
             sourceName,
-            source,
             helperMacroNames,
             macroDefinitions,
             localLayouts,
             hostDeclarations,
             settingsByName,
             localAnalysis?.axisMacros.orEmpty(),
-            lexical,
             directives,
+            identifierOffsets,
         )
         val derivedMacros = derivedAnalysis.contracts
+        val hostCompilerAnalysis = buildHostCompilerDeclarations(
+            sourceName,
+            hostDeclarations,
+            settingsByName,
+            derivedMacros,
+            localAnalysis?.axisMacros.orEmpty(),
+        )
 
         val contractDrafts = mutableListOf<ContractDraft>()
         val consumedAtoms = linkedSetOf<ContractAtom>()
@@ -381,6 +448,20 @@ internal object IrisShaderContractExtractor {
                 if (isContractOnlyConditional(source, group, groupedAtoms, conditionalGroups)) {
                     maskRanges += group.range
                 } else {
+                    conditionalGroups.filter { candidate ->
+                        candidate.id != group.id && candidate.range.first >= group.range.first &&
+                            candidate.range.last <= group.range.last
+                    }.forEach { candidate ->
+                        val candidateAtoms = groupedAtoms.filter { atom ->
+                            atom.range.first >= candidate.range.first && atom.range.last <= candidate.range.last
+                        }
+                        if (
+                            candidateAtoms.isNotEmpty() &&
+                            isContractOnlyConditional(source, candidate, candidateAtoms, conditionalGroups)
+                        ) {
+                            maskRanges += candidate.range
+                        }
+                    }
                     groupedAtoms.filter { it.mask }.forEach { maskRanges += it.range }
                 }
             }
@@ -405,7 +486,8 @@ internal object IrisShaderContractExtractor {
             extensionLines.forEach { appendLine(it) }
             if (
                 extensionLines.isNotEmpty() || settings.isNotEmpty() ||
-                derivedMacros.isNotEmpty() || localAnalysis?.contract != null
+                derivedMacros.isNotEmpty() || hostCompilerAnalysis.declarations.isNotEmpty() ||
+                localAnalysis?.contract != null
             ) {
                 appendLine(COMPILER_MARKER)
             }
@@ -416,8 +498,23 @@ internal object IrisShaderContractExtractor {
                 append(it.compilerExpression)
                 appendLine(";")
             }
+            hostCompilerAnalysis.declarations.forEach(::appendLine)
             localAnalysis?.contract?.let { append(it.compilerLayout) }
         }
+        hostCompilerNames.forEach { (name, compilerName) ->
+            compilerSource = replaceCodeIdentifier(
+                compilerSource,
+                name,
+                compilerName,
+            )
+        }
+        compilerSource = lowerDynamicTopLevelConstants(
+            compilerSource,
+            settings.mapTo(linkedSetOf()) { it.name } +
+                derivedMacros.map { it.compilerName } +
+                hostCompilerNames.values +
+                "gl_WorkGroupSize",
+        )
         compilerSource = insertAfterVersion(compilerSource, compilerPrelude)
 
         val anchors = findStableAnchors(source)
@@ -472,6 +569,7 @@ internal object IrisShaderContractExtractor {
             extractionErrors.forEach { add(IrisStructuralIssue(IrisStructuralIssueKind.UNSUPPORTED, it)) }
             localAnalysis?.error?.let { add(IrisStructuralIssue(IrisStructuralIssueKind.UNSUPPORTED, it)) }
             derivedAnalysis.error?.let { add(IrisStructuralIssue(IrisStructuralIssueKind.UNSUPPORTED, it)) }
+            hostCompilerAnalysis.error?.let { add(IrisStructuralIssue(IrisStructuralIssueKind.UNSUPPORTED, it)) }
             if (localAnalysis?.contract?.fallbackRequired == true) add(
                 IrisStructuralIssue(
                     IrisStructuralIssueKind.LOCAL_SIZE_FALLBACK,
@@ -493,27 +591,31 @@ internal object IrisShaderContractExtractor {
             structuralIssues,
             compilerPrelude,
             settings,
+            hostCompilerNames.values.toList(),
         )
     }
 
     private fun buildDerivedMacros(
         sourceName: String,
-        source: String,
         helperMacroNames: Set<String>,
         macroDefinitions: Map<String, List<ContractMacroDefinition>>,
         localLayouts: List<LocalLayout>,
         hostDeclarations: List<HostDeclaration>,
         settings: Map<String, ShaderSetting>,
         axisMacros: Map<String, Char>,
-        lexical: ContractLexicalMap,
         directives: List<ContractDirective>,
+        identifierOffsets: Map<String, List<Int>>,
     ): DerivedMacroAnalysis {
         val helperRanges = helperMacroNames.flatMap { macroDefinitions[it].orEmpty() }.map { it.range }
         val excluded = helperRanges + localLayouts.map { it.range } + hostDeclarations.map { it.range }
-        val directlyUsed = helperMacroNames.filter { name ->
-            name !in axisMacros && identifierOccurrences(source, name, lexical).any { offset ->
-                excluded.none { offset in it } && directives.none { offset in it.range }
-            }
+        val directlyUsed = helperMacroNames.filterTo(linkedSetOf()) { name ->
+            name !in axisMacros && (
+                identifierOffsets[name].orEmpty().any { offset ->
+                    excluded.none { offset in it } && directives.none { offset in it.range }
+                } || hostDeclarations.any { declaration ->
+                    declaration.compilerName != null && name in identifiers(declaration.initializer)
+                }
+                )
         }
         val required = linkedSetOf<String>()
         fun collect(name: String) {
@@ -584,6 +686,58 @@ internal object IrisShaderContractExtractor {
             contracts += IrisDerivedMacroContract(name, compilerNames.getValue(name), expression)
         }
         return DerivedMacroAnalysis(contracts)
+    }
+
+    private fun buildHostCompilerDeclarations(
+        sourceName: String,
+        declarations: List<HostDeclaration>,
+        settings: Map<String, ShaderSetting>,
+        derivedMacros: List<IrisDerivedMacroContract>,
+        axisMacros: Map<String, Char>,
+    ): HostCompilerAnalysis {
+        val compilerGroups = declarations.filter { it.compilerName != null }.groupBy { it.name }
+        if (compilerGroups.isEmpty()) return HostCompilerAnalysis()
+        val derivedNames = derivedMacros.associate { it.sourceName to it.compilerName }
+        val compilerDeclarations = mutableListOf<String>()
+        compilerGroups.values.sortedBy { group -> group.minOf { it.range.first } }.forEach { group ->
+            val name = group.first().name
+            val types = group.map { it.type }.distinct()
+            if (types.size != 1) {
+                return HostCompilerAnalysis(error = "$sourceName: Iris host declaration $name changes type across settings: $types")
+            }
+            val compilerNames = group.mapNotNull { it.compilerName }.distinct()
+            check(compilerNames.size == 1)
+            val unsupportedPredicateNames = group.flatMapTo(linkedSetOf()) { it.predicate.identifierNames() }
+                .filterNot { it in settings || it == "defined" || it == "true" || it == "false" }
+            if (unsupportedPredicateNames.isNotEmpty()) {
+                return HostCompilerAnalysis(
+                    error = "$sourceName: Iris host declaration $name has unsupported predicate identifiers " +
+                        unsupportedPredicateNames.sorted(),
+                )
+            }
+            val relevantSettings = settings.values.filter { setting ->
+                group.any { setting.name in it.predicate.settingNames() }
+            }
+            val assignments = enumerateAssignments(relevantSettings, MAX_LOCAL_SIZE_ASSIGNMENTS)
+                ?: return HostCompilerAnalysis(
+                    error = "$sourceName: Iris host declaration $name exceeds $MAX_LOCAL_SIZE_ASSIGNMENTS assignments",
+                )
+            val ambiguous = assignments.firstOrNull { assignment ->
+                group.count { it.predicate.evaluate(assignment, settings) == true } != 1
+            }
+            if (ambiguous != null) {
+                return HostCompilerAnalysis(
+                    error = "$sourceName: Iris host declaration $name is not uniquely defined for $ambiguous",
+                )
+            }
+            val bodies = assignments.associateWith { assignment ->
+                val declaration = group.single { it.predicate.evaluate(assignment, settings) == true }
+                convertMacroBody(declaration.initializer, settings, axisMacros, derivedNames)
+            }
+            val expression = renderDerivedDecision(relevantSettings, assignments, bodies)
+            compilerDeclarations += "const ${types.single()} ${compilerNames.single()} = $expression;"
+        }
+        return HostCompilerAnalysis(compilerDeclarations)
     }
 
     private fun analyzeLocalSize(
@@ -710,7 +864,15 @@ internal object IrisShaderContractExtractor {
 private data class ContractAtom(val kind: IrisSourceContractKind, val range: IntRange, val mask: Boolean)
 private data class ContractDraft(val kind: IrisSourceContractKind, val range: IntRange, val exactText: String)
 private data class ContractDirective(val directive: PreprocessorDirective, val range: IntRange)
-private data class HostDeclaration(val name: String, val range: IntRange, val declaration: String)
+private data class HostDeclaration(
+    val name: String,
+    val type: String,
+    val initializer: String,
+    val range: IntRange,
+    val declaration: String,
+    val predicate: ContractPredicate,
+    val compilerName: String? = null,
+)
 private data class LocalLayout(
     val range: IntRange,
     val items: Map<Char, String>,
@@ -726,6 +888,18 @@ private data class LocalSizeAnalysis(
 private data class DerivedMacroAnalysis(
     val contracts: List<IrisDerivedMacroContract> = emptyList(),
     val error: String? = null,
+)
+
+private data class HostCompilerAnalysis(
+    val declarations: List<String> = emptyList(),
+    val error: String? = null,
+)
+
+private data class DynamicTopLevelConstant(
+    val range: IntRange,
+    val name: String,
+    val initializer: String,
+    val indent: String,
 )
 
 private data class ContractMacroDefinition(
@@ -1146,8 +1320,59 @@ private fun replaceCodeIdentifier(source: String, name: String, replacement: Str
     return matches.asReversed().fold(source) { value, match -> value.replaceRange(match.range, replacement) }
 }
 
-private fun identifierOccurrences(source: String, name: String, lexical: ContractLexicalMap): List<Int> {
-    return identifierRegex(name).findAll(source).filter { lexical.isCode(it.range.first) }.map { it.range.first }.toList()
+private fun lowerDynamicTopLevelConstants(source: String, initialDynamicNames: Set<String>): String {
+    if (initialDynamicNames.isEmpty()) return source
+    val lexical = ContractLexicalMap(source)
+    val constants = DYNAMIC_TOP_LEVEL_CONST_START.findAll(source).mapNotNull { match ->
+        if (!lexical.isTopLevelCode(match.range.first)) return@mapNotNull null
+        val semicolon = lexical.findCodeCharacter(';', match.range.last + 1)
+            ?.takeIf(lexical::isTopLevelCode)
+            ?: return@mapNotNull null
+        DynamicTopLevelConstant(
+            match.range.first..semicolon,
+            match.groupValues[2],
+            source.substring(match.range.last + 1, semicolon).trim(),
+            match.groupValues[1],
+        )
+    }.toList()
+    if (constants.isEmpty()) return source
+
+    val dynamicNames = initialDynamicNames.toMutableSet()
+    val lowered = linkedSetOf<DynamicTopLevelConstant>()
+    var changed: Boolean
+    do {
+        changed = false
+        constants.filterNot(lowered::contains).forEach { constant ->
+            if (identifiers(constant.initializer).none(dynamicNames::contains)) return@forEach
+            lowered += constant
+            dynamicNames += constant.name
+            changed = true
+        }
+    } while (changed)
+    if (lowered.isEmpty()) return source
+
+    return lowered.sortedByDescending { it.range.first }.fold(source) { result, constant ->
+        val expression = stripComments(constant.initializer).replace(WHITESPACE, " ").trim()
+        result.replaceRange(
+            constant.range,
+            "${constant.indent}#define ${constant.name} ($expression)",
+        )
+    }
+}
+
+private fun indexIdentifierOccurrences(
+    source: String,
+    targetNames: Set<String>,
+    lexical: ContractLexicalMap,
+): Map<String, List<Int>> {
+    if (targetNames.isEmpty()) return emptyMap()
+    val result = linkedMapOf<String, MutableList<Int>>()
+    IDENTIFIER.findAll(source).forEach { match ->
+        if (match.value in targetNames && lexical.isCode(match.range.first)) {
+            result.getOrPut(match.value, ::mutableListOf) += match.range.first
+        }
+    }
+    return result
 }
 
 internal fun findStableAnchors(source: String): List<LocatedAnchor> {
@@ -1211,6 +1436,27 @@ private fun stripComments(source: String): String = BLOCK_COMMENT.replace(LINE_C
 
 private fun isHostDeclarationName(name: String): Boolean {
     return name in IRIS_HOST_NAMES || IRIS_HOST_NAME_PATTERNS.any { it.matches(name) }
+}
+
+private fun uniqueHostCompilerName(source: String, name: String): String {
+    var candidate = "SM_IRIS_HOST_$name"
+    while (identifierRegex(candidate).containsMatchIn(source)) candidate += '_'
+    return candidate
+}
+
+private fun compilerHostDeclaration(name: String): Regex {
+    return (
+        "(?m)^[\\t ]*const[\\t ]+(?:int|float|bool|vec[234]|ivec3)[\\t ]+" +
+            Regex.escape(name) + "\\b[^;\\r\\n]*;[^\\r\\n]*(?:\\r\\n|\\n|\\r|$)"
+        ).toRegex()
+}
+
+private fun compilerSettingDeclaration(name: String): Regex {
+    return Regex(
+        "(?m)^[\\t ]*(?:layout[\\t ]*\\([\\t ]*constant_id[\\t ]*=[^)]*\\)[\\t ]*)?" +
+            "const[\\t ]+(?:bool|int|float)[\\t ]+${Regex.escape(name)}\\b[^;\\r\\n]*;" +
+            "[^\\r\\n]*(?:\\r\\n|\\n|\\r|$)",
+    )
 }
 
 private fun LocalSizeAbiSignature.axis(axis: Char): Int = when (axis) {
@@ -1384,6 +1630,11 @@ private val LOCAL_SIZE_ITEM = "local_size_([xyz])\\s*=\\s*(.+)".toRegex()
 private val LOCAL_SIZE_ID_ITEM = "\\blocal_size_[xyz]_id\\s*=".toRegex()
 private val HOST_CONST_START =
     "(?m)^[\\t ]*const[\\t ]+(?:int|float|bool|vec[234]|ivec3)[\\t ]+([A-Za-z_][A-Za-z0-9_]*)".toRegex()
+private val HOST_CONST_DECLARATION =
+    "const[\\t ]+(int|float|bool|vec[234]|ivec3)[\\t ]+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*([\\s\\S]+?)\\s*;".toRegex()
+private val DYNAMIC_TOP_LEVEL_CONST_START =
+    ("(?m)^([\\t ]*)const[\\t ]+(?:lowp[\\t ]+|mediump[\\t ]+|highp[\\t ]+)?" +
+        "[A-Za-z_][A-Za-z0-9_]*[\\t ]+([A-Za-z_][A-Za-z0-9_]*)[\\t ]*=").toRegex()
 private val IRIS_COMMENT_DIRECTIVE =
     "/\\*[\\t ]*(?:DRAWBUFFERS|RENDERTARGETS|SHADOWRES|SHADOWFOV|SHADOWHPL|GAUX4FORMAT):[\\s\\S]*?\\*/".toRegex()
 private val EXTENSION_DECLARATION =
@@ -1404,6 +1655,7 @@ private val INTEGER_MACRO_BODY = "[-+*/%() A-Za-z0-9_]+".toRegex()
 private val LINE_ENDING = "\\r\\n|\\n|\\r".toRegex()
 private val LINE_COMMENT = "//[^\\r\\n]*".toRegex()
 private val BLOCK_COMMENT = "/\\*[\\s\\S]*?\\*/".toRegex()
+private val WHITESPACE = "\\s+".toRegex()
 private val IRIS_HOST_NAMES = setOf(
     "noiseTextureResolution",
     "sunPathRotation",
@@ -1429,6 +1681,7 @@ private val IRIS_HOST_NAMES = setOf(
     "workGroups",
     "workGroupsRender",
 )
+private val COMPILER_READABLE_IRIS_HOST_NAMES = IRIS_HOST_NAMES - setOf("workGroups", "workGroupsRender")
 private val IRIS_HOST_NAME_PATTERNS = listOf(
     "(?:colortex\\d+|gcolor|gdepth|gnormal|composite|gaux[1-4])(?:Format|Clear|ClearColor|MipmapEnabled)".toRegex(),
     "shadowHardwareFiltering\\d+".toRegex(),

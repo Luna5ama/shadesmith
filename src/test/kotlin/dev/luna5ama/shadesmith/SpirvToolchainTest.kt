@@ -148,6 +148,49 @@ class SpirvToolchainTest {
     }
 
     @Test
+    fun reusesIdenticalToolInputAcrossArtifactDirectories() = withWorkspace { workspace ->
+        val cache = SpirvToolResultCache()
+        val metrics = PipelineMetrics()
+        var executions = 0
+        val runner = SpirvProcessRunner { invocation, _, stdoutPath, stderrPath ->
+            executions++
+            stdoutPath.writeText("stdout")
+            stderrPath.writeText("")
+            invocation.output.parent.createDirectories()
+            invocation.output.writeText("SPIR-V:${invocation.input.readText()}")
+            0
+        }
+        val firstDirectory = workspace.resolve("first")
+        val secondDirectory = workspace.resolve("second")
+        firstDirectory.createDirectories()
+        secondDirectory.createDirectories()
+        val firstInput = firstDirectory.resolve("input.glsl").apply { writeText("same shader") }
+        val secondInput = secondDirectory.resolve("input.glsl").apply { writeText("same shader") }
+        val firstOutput = firstDirectory.resolve("output.spv")
+        val secondOutput = secondDirectory.resolve("output.spv")
+        val first = SpirvToolchain(
+            firstDirectory,
+            processRunner = runner,
+            metrics = metrics,
+            resultCache = cache,
+        )
+        val second = SpirvToolchain(
+            secondDirectory,
+            processRunner = runner,
+            metrics = metrics,
+            resultCache = cache,
+        )
+
+        first.execute(first.compileInvocation(ShaderStage.COMPUTE, firstInput, firstOutput))
+        second.execute(second.compileInvocation(ShaderStage.COMPUTE, secondInput, secondOutput))
+
+        assertEquals(firstOutput.readText(), secondOutput.readText())
+        assertEquals(1, executions)
+        assertEquals(1, metrics.snapshot().glslangProcesses)
+        assertEquals(1, metrics.snapshot().toolCacheHits)
+    }
+
+    @Test
     fun reportsNonzeroExitWithDurableEvidencePaths() = withWorkspace { workspace ->
         val input = workspace.resolve("input.spv")
         input.writeText("SPIR-V")

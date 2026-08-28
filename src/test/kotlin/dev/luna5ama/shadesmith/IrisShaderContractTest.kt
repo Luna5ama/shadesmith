@@ -49,6 +49,141 @@ class IrisShaderContractTest {
     }
 
     @Test
+    fun referencedIrisHostConstantUsesCompilerSurrogateAndRestoresExactDeclaration() {
+        val declaration = "const int shadowMapResolution = 2048; // Iris host contract\n"
+        val source = buildString {
+            appendLine("#version 460 compatibility")
+            append(declaration)
+            appendLine("layout(local_size_x = 1) in;")
+            appendLine("void main() { int value = shadowMapResolution; }")
+        }
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "referenced-host.csh")
+
+        assertTrue(plan.structuralBlockers.isEmpty(), plan.structuralBlockers.toString())
+        val compiler = assertNotNull(plan.compilerSource)
+        assertContains(compiler, "const int SM_IRIS_HOST_shadowMapResolution = 2048;")
+        assertContains(compiler, "int value = SM_IRIS_HOST_shadowMapResolution;")
+        assertFalse("const int shadowMapResolution" in compiler)
+        val restored = assertIs<IrisContractRestoration.Restored>(
+            plan.irisContracts.restore(
+                "#version 460 core\nconst int SM_IRIS_HOST_shadowMapResolution = 2048;\nvoid main() {}\n",
+            ),
+        ).source
+        assertContains(restored, declaration)
+        assertFalse("SM_IRIS_HOST_" in restored)
+    }
+
+    @Test
+    fun settingControlledReferencedHostConstantUsesOneSpecializedSurrogate() {
+        val source = """
+            #version 460 compatibility
+            #ifndef INCLUDE_BASE
+            #define INCLUDE_BASE
+            #define SETTING_SHADOW_MAP_RESOLUTION 2048 //[1024 2048 3072 4096]
+            #define usam_main colortex0
+            #if SETTING_SHADOW_MAP_RESOLUTION == 1024
+            #define SHADOW_MAP_SIZE_D16 64
+            const int shadowMapResolution = 1024;
+            #elif SETTING_SHADOW_MAP_RESOLUTION == 2048
+            #define SHADOW_MAP_SIZE_D16 128
+            const int shadowMapResolution = 2048;
+            #elif SETTING_SHADOW_MAP_RESOLUTION == 3072
+            #define SHADOW_MAP_SIZE_D16 192
+            const int shadowMapResolution = 3072;
+            #else
+            #define SHADOW_MAP_SIZE_D16 256
+            const int shadowMapResolution = 4096;
+            #endif
+            uniform sampler2D usam_main;
+            layout(local_size_x = 1) in;
+            void main() { int value = shadowMapResolution + textureSize(usam_main, 0).x; }
+            #endif
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "conditional-host.csh")
+
+        assertTrue(plan.structuralBlockers.isEmpty(), plan.structuralBlockers.toString())
+        val compiler = assertNotNull(plan.compilerSource)
+        assertEquals(1, "const int SM_IRIS_HOST_shadowMapResolution".toRegex().findAll(compiler).count())
+        assertContains(compiler, "SM_SETTING_SHADOW_MAP_RESOLUTION == 1024")
+        assertContains(compiler, "SM_SETTING_SHADOW_MAP_RESOLUTION == 3072")
+        assertContains(compiler, "#define usam_main colortex0")
+        assertFalse("SM_DERIVED_usam_main" in compiler)
+        assertContains(compiler, "int value = SM_IRIS_HOST_shadowMapResolution + textureSize(usam_main, 0).x;")
+        assertFalse("SHADOW_MAP_SIZE_D16" in compiler)
+        assertFalse("#if SETTING_SHADOW_MAP_RESOLUTION" in compiler)
+        assertFalse("const int shadowMapResolution" in compiler)
+    }
+
+    @Test
+    fun restoredSettingDeclarationsPrecedeDependentHostSurrogates() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_SHADOW_MAP_RESOLUTION 2048 //[1024 2048]
+            #if SETTING_SHADOW_MAP_RESOLUTION == 1024
+            const int shadowMapResolution = 1024;
+            #else
+            const int shadowMapResolution = 2048;
+            #endif
+            layout(local_size_x = 1) in;
+            void main() { int value = shadowMapResolution; }
+        """.trimIndent()
+        val plan = ShaderCompilerCopyPlanner.plan(source, "shadow-validation.csh")
+        val setting = plan.settings.single()
+        val restored = source
+            .replace(
+                "#version 460 compatibility\n",
+                "#version 460 compatibility\n" +
+                    "layout(constant_id = ${setting.specializationId}) const int ${setting.compilerName} = 2048;\n",
+            )
+            .replace(
+                "void main() { int value = shadowMapResolution; }",
+                "void main() { int value = SM_IRIS_HOST_shadowMapResolution; }",
+            )
+
+        val compiler = plan.irisContracts.prepareCompilerSource(restored)
+        val settingOffset = compiler.indexOf("layout(constant_id = ${setting.specializationId})")
+        val hostOffset = compiler.indexOf("const int SM_IRIS_HOST_shadowMapResolution")
+
+        assertTrue(settingOffset >= 0)
+        assertTrue(hostOffset > settingOffset, compiler)
+        assertEquals(1, "const int ${setting.compilerName}".toRegex().findAll(compiler).count())
+    }
+
+    @Test
+    fun specializationDependentTopLevelConstantsBecomeCompilerOnlyMacros() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_SHADOW_MAP_RESOLUTION 2048 //[1024 2048]
+            #if SETTING_SHADOW_MAP_RESOLUTION == 1024
+            const int shadowMapResolution = 1024;
+            #else
+            const int shadowMapResolution = 2048;
+            #endif
+            const float SHADOW_TEXEL_SIZE = 1.0 / float(shadowMapResolution);
+            const vec2 SHADOW_MAP_SIZE = vec2(float(shadowMapResolution), SHADOW_TEXEL_SIZE);
+            layout(local_size_x = 1) in;
+            void main() { float value = SHADOW_MAP_SIZE.x + SHADOW_TEXEL_SIZE; }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "dynamic-top-level-const.csh")
+
+        assertTrue(plan.structuralBlockers.isEmpty(), plan.structuralBlockers.toString())
+        val compiler = assertNotNull(plan.compilerSource)
+        assertContains(
+            compiler,
+            "#define SHADOW_TEXEL_SIZE (1.0 / float(SM_IRIS_HOST_shadowMapResolution))",
+        )
+        assertContains(
+            compiler,
+            "#define SHADOW_MAP_SIZE (vec2(float(SM_IRIS_HOST_shadowMapResolution), SHADOW_TEXEL_SIZE))",
+        )
+        assertFalse("const float SHADOW_TEXEL_SIZE" in compiler)
+        assertFalse("const vec2 SHADOW_MAP_SIZE" in compiler)
+    }
+
+    @Test
     fun epipolarUsesOneLocalSizeIdModuleAndKeepsLoopCountSpecialized() {
         val source = epipolarSource()
 

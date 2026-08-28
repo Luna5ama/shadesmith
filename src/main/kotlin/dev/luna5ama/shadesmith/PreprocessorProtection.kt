@@ -161,25 +161,29 @@ internal object PreprocessorProtection {
         val representation = StringBuilder(source.length)
         val placeholderNamespace = findPlaceholderNamespace(source)
         var nextConditionalId = 0
-        var constRegion: ConstRegion? = null
+        val constRegions = mutableListOf<ConstRegion>()
         var index = 0
 
         while (index < lines.size) {
             val line = lines[index]
             if (line.directiveStart == null && line.content.trim() == CONST_MARKER) {
-                val openRegion = constRegion
+                val openRegion = constRegions.lastOrNull()
+                val currentPath = conditionals.map { it.id }
                 if (openRegion == null) {
-                    constRegion = ConstRegion(line.number, conditionals.map { it.id })
+                    constRegions += ConstRegion(line.number, currentPath)
+                } else if (currentPath == openRegion.conditionalPath) {
+                    constRegions.removeAt(constRegions.lastIndex)
+                } else if (
+                    currentPath.size > openRegion.conditionalPath.size &&
+                    currentPath.take(openRegion.conditionalPath.size) == openRegion.conditionalPath
+                ) {
+                    constRegions += ConstRegion(line.number, currentPath)
                 } else {
-                    val currentPath = conditionals.map { it.id }
-                    if (currentPath != openRegion.conditionalPath) {
-                        reject(
-                            sourceName,
-                            line.number,
-                            "/*const*/ region from line ${openRegion.sourceLine} crosses a conditional boundary",
-                        )
-                    }
-                    constRegion = null
+                    reject(
+                        sourceName,
+                        line.number,
+                        "/*const*/ region from line ${openRegion.sourceLine} crosses a conditional boundary",
+                    )
                 }
                 representation.append(line.fullText)
                 index++
@@ -203,7 +207,7 @@ internal object PreprocessorProtection {
             val directiveLines = lines.subList(index, endIndex + 1)
             val exactText = directiveLines.joinToString("") { it.fullText }
             val parsed = parseDirective(exactText, directiveStart, sourceName, line.number)
-            val inConstRegion = constRegion != null
+            val inConstRegion = constRegions.isNotEmpty()
             val disposition = if (
                 (inConstRegion || evaluateCompilerDirectives) &&
                 parsed.kind != PreprocessorDirectiveKind.DISABLED_DEFINE
@@ -266,7 +270,7 @@ internal object PreprocessorProtection {
         conditionals.lastOrNull()?.let {
             reject(sourceName, it.sourceLine, "conditional directive has no matching #endif")
         }
-        constRegion?.let {
+        constRegions.lastOrNull()?.let {
             reject(sourceName, it.sourceLine, "/*const*/ region has no closing marker")
         }
 
@@ -556,6 +560,7 @@ internal object PreprocessorProtection {
     ): List<PreprocessorCompilerBlocker> {
         return directives.mapNotNull { directive ->
             if (directive.disposition != PreprocessorDisposition.RESTORED) return@mapNotNull null
+            if (directive.kind == PreprocessorDirectiveKind.DISABLED_DEFINE) return@mapNotNull null
             val reason = when {
                 directive.kind in CONDITIONAL_OPENERS &&
                     PreprocessorFeature.DECLARATION_SHAPE in directive.features ->

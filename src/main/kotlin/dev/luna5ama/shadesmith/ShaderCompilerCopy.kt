@@ -52,6 +52,7 @@ internal data class ShaderSourceRegion(
 )
 
 internal enum class ShaderConditionalDisposition {
+    COMPILER_NO_OP,
     CONTROL_FLOW_STATEMENT,
     CONTROL_FLOW_EXPRESSION,
     CONTROL_FLOW_FUNCTION,
@@ -443,7 +444,15 @@ internal object ShaderCompilerCopyPlanner {
             group.structural("setting conditional contains structural conditional ${structuralChild.id}")
             return
         }
-        val branches = branchSlices(group, source, sourceMap).map { branch ->
+        val rawBranches = branchSlices(group, source, sourceMap)
+        if (rawBranches.all { branch ->
+                branch.bodyRange.isEmpty() || source.substring(branch.bodyRange).isBlank()
+            }
+        ) {
+            group.disposition = ShaderConditionalDisposition.COMPILER_NO_OP
+            return
+        }
+        val branches = rawBranches.map { branch ->
             val rendered = renderRange(
                 branch.bodyRange.first,
                 branch.bodyRange.last + 1,
@@ -541,29 +550,34 @@ internal object ShaderCompilerCopyPlanner {
         macros: List<ShaderMacroDependency>,
     ): String {
         val groupsById = groups.associateBy { it.id }
-        val safe = groups.filter { it.disposition in CONTROL_FLOW_DISPOSITIONS }
-        val rootSafe = safe.filter { group -> groupsById[group.parentId]?.disposition !in CONTROL_FLOW_DISPOSITIONS }
+        val settingsByName = settings.associateBy { it.name }
+        val transformed = groups.filter { it.disposition in COMPILER_TRANSFORM_DISPOSITIONS }
+        val rootTransformed = transformed.filter { candidate ->
+            transformed.none { enclosing ->
+                enclosing !== candidate &&
+                    enclosing.range.first <= candidate.range.first &&
+                    enclosing.range.last >= candidate.range.last
+            }
+        }
         val replacements = mutableListOf<Replacement>()
-        rootSafe.forEach { group ->
+        rootTransformed.forEach { group ->
             replacements += Replacement(
                 group.range.first,
                 group.range.last + 1,
-                renderGroup(group, source, sourceMap, groupsById, settings.associateBy { it.name }, macros),
+                renderGroup(group, source, sourceMap, groupsById, settingsByName, macros),
             )
         }
         directives.filter {
             it.kind in SETTING_DEFINITION_DIRECTIVES &&
-                it.macroName in settings.mapTo(hashSetOf()) { setting -> setting.name }
+                it.macroName in settingsByName
         }.forEach {
             val range = sourceMap.directiveRange(it)
-            if (rootSafe.none { group -> range.first >= group.range.first && range.last <= group.range.last }) {
+            if (rootTransformed.none { group -> range.first >= group.range.first && range.last <= group.range.last }) {
                 replacements += Replacement(range.first, range.last + 1, maskSource(source.substring(range)))
             }
         }
         var result = applyReplacements(source, replacements)
-        settings.forEach { setting ->
-            result = IDENTIFIER_TOKEN(setting.name).replace(result, setting.compilerName)
-        }
+        result = replaceIdentifierTokens(result, settings.associate { it.name to it.compilerName })
         if (settings.isEmpty()) return result
 
         val newline = when {
@@ -636,6 +650,8 @@ internal object ShaderCompilerCopyPlanner {
             )
         }
         return when (group.disposition) {
+            ShaderConditionalDisposition.COMPILER_NO_OP -> maskSource(source.substring(group.range))
+
             ShaderConditionalDisposition.CONTROL_FLOW_STATEMENT -> buildString {
                 branches.forEachIndexed { index, branch ->
                     if (branch.directive.kind == PreprocessorDirectiveKind.ELSE) {
@@ -697,10 +713,17 @@ internal object ShaderCompilerCopyPlanner {
         settings: Map<String, ShaderSetting>,
         macros: List<ShaderMacroDependency>,
     ): String {
-        val direct = groups.values.filter {
-            it.parentId == parentId &&
+        val transformed = groups.values.filter {
+            it.id != parentId &&
                 it.range.first >= start && it.range.last < end &&
-                it.disposition in CONTROL_FLOW_DISPOSITIONS
+                it.disposition in COMPILER_TRANSFORM_DISPOSITIONS
+        }
+        val direct = transformed.filter { candidate ->
+            transformed.none { enclosing ->
+                enclosing !== candidate &&
+                    enclosing.range.first <= candidate.range.first &&
+                    enclosing.range.last >= candidate.range.last
+            }
         }.sortedBy { it.range.first }
         if (direct.isEmpty()) return source.substring(start, end)
         return buildString {
@@ -764,9 +787,10 @@ internal object ShaderCompilerCopyPlanner {
                         token
                     } else {
                         val body = stripComments(macro.sourceSlices.single().substringAfter(macro.name)).trim()
-                        val expanded = settings.entries.fold(body) { expandedBody, (name, setting) ->
-                            IDENTIFIER_TOKEN(name).replace(expandedBody, setting.compilerName)
-                        }
+                        val expanded = replaceIdentifierTokens(
+                            body,
+                            settings.mapValues { it.value.compilerName },
+                        )
                         "($expanded)"
                     }
                 }
@@ -838,6 +862,17 @@ internal object ShaderCompilerCopyPlanner {
     ): List<ShaderCompilerCopyBlocker> {
         if (settingNames.isEmpty()) return emptyList()
         val directiveLines = directives.flatMapTo(hashSetOf()) { it.sourceLine..it.endLine }
+        val maskedSource = maskCommentsAndStrings(source)
+        val abiBlockLines = hashSetOf<Int>()
+        var inAbiBlock = false
+        sourceMap.lines.forEach { line ->
+            val lexical = maskCommentsAndStrings(line.text)
+            val opensDeclarationBlock = line.braceDepth == 0 && '{' in lexical &&
+                !FUNCTION_WITH_OPEN.containsMatchIn(lexical)
+            if (!inAbiBlock && opensDeclarationBlock) inAbiBlock = true
+            if (inAbiBlock) abiBlockLines += line.number
+            if (inAbiBlock && line.braceDepth <= 1 && '}' in lexical) inAbiBlock = false
+        }
         val macrosByName = macros.associateBy { it.name }
         val tokenPasteMemo = mutableMapOf<String, Boolean>()
         fun usesTokenPaste(name: String, visiting: MutableSet<String>): Boolean {
@@ -865,6 +900,11 @@ internal object ShaderCompilerCopyPlanner {
                 LAYOUT_USE.containsMatchIn(line.text) -> ShaderCompilerCopyBlocker(
                     line.number,
                     "setting affects a layout or execution-mode directive",
+                )
+
+                line.number in abiBlockLines -> ShaderCompilerCopyBlocker(
+                    line.number,
+                    "setting affects a resource block member or layout",
                 )
 
                 line.braceDepth == 0 && ABI_DECLARATION.containsMatchIn(line.text) -> ShaderCompilerCopyBlocker(
@@ -1124,12 +1164,44 @@ internal object ShaderCompilerCopyPlanner {
     }
 
     private fun applyReplacements(source: String, replacements: List<Replacement>): String {
-        var result = source
-        replacements.sortedByDescending { it.start }.forEach { replacement ->
-            result = result.replaceRange(replacement.start, replacement.end, replacement.text)
+        if (replacements.isEmpty()) return source
+        val ordered = replacements.sortedBy { it.start }
+        return buildString(source.length) {
+            var cursor = 0
+            ordered.forEach { replacement ->
+                require(replacement.start >= cursor && replacement.end in replacement.start..source.length) {
+                    "Compiler-copy replacements overlap or exceed the source: $replacement after offset $cursor"
+                }
+                append(source, cursor, replacement.start)
+                append(replacement.text)
+                cursor = replacement.end
+            }
+            append(source, cursor, source.length)
         }
-        return result
     }
+
+    private fun replaceIdentifierTokens(source: String, replacements: Map<String, String>): String {
+        if (replacements.isEmpty()) return source
+        return buildString(source.length) {
+            var cursor = 0
+            while (cursor < source.length) {
+                val char = source[cursor]
+                if (!char.isAsciiIdentifierStart()) {
+                    append(char)
+                    cursor++
+                    continue
+                }
+                val start = cursor++
+                while (cursor < source.length && source[cursor].isAsciiIdentifierPart()) cursor++
+                val token = source.substring(start, cursor)
+                append(replacements[token] ?: token)
+            }
+        }
+    }
+
+    private fun Char.isAsciiIdentifierStart(): Boolean = this == '_' || this in 'A'..'Z' || this in 'a'..'z'
+
+    private fun Char.isAsciiIdentifierPart(): Boolean = isAsciiIdentifierStart() || this in '0'..'9'
 
     private data class SettingCandidate(
         val name: String,
@@ -1253,6 +1325,8 @@ internal object ShaderCompilerCopyPlanner {
         ShaderConditionalDisposition.CONTROL_FLOW_EXPRESSION,
         ShaderConditionalDisposition.CONTROL_FLOW_FUNCTION,
     )
+    private val COMPILER_TRANSFORM_DISPOSITIONS =
+        CONTROL_FLOW_DISPOSITIONS + ShaderConditionalDisposition.COMPILER_NO_OP
     private val CONDITIONAL_OPENERS = setOf(
         PreprocessorDirectiveKind.IF,
         PreprocessorDirectiveKind.IFDEF,
@@ -1293,6 +1367,7 @@ internal object ShaderCompilerCopyPlanner {
     private val FUNCTION_WITH_OPEN = "(?m)^[ \\t]*(?:[A-Za-z_][A-Za-z0-9_]*[ \\t]+)+([A-Za-z_][A-Za-z0-9_]*)[ \\t]*\\([^;{}]*\\)[ \\t]*\\{".toRegex()
     private val LAYOUT_USE = "\\blayout\\s*\\(".toRegex()
     private val ABI_DECLARATION = "\\b(?:uniform|buffer|in|out|attribute|varying|shared)\\b".toRegex()
+    private val ABI_BLOCK_DECLARATION = "\\b(?:uniform|buffer)\\b[^{;]*\\{".toRegex()
     private val VERSION_LINE = "(?m)^[ \\t]*#version\\b[^\\r\\n]*".toRegex()
     private val LINE_ENDING = "\\r\\n|\\n|\\r".toRegex()
 }
@@ -1336,6 +1411,19 @@ private object SystemClangProcessRunner : ClangProcessRunner {
     }
 }
 
+internal data class ShaderCompilerCopyMaterializationRequest(
+    val sourceName: String,
+    val stage: ShaderStage,
+    val plan: ShaderCompilerCopyPlan,
+    val probe: TextureAccessProbe,
+    val moduleName: String = "compiler-copy",
+)
+
+internal sealed interface ShaderCompilerCopyMaterialization {
+    data class Success(val module: SpirvCompilerModule) : ShaderCompilerCopyMaterialization
+    data class Failure(val exception: ShaderCompilerCopyException) : ShaderCompilerCopyMaterialization
+}
+
 internal class ShaderCompilerCopyMaterializer(
     workingDirectory: Path,
     private val clangExecutable: String = "clang",
@@ -1344,6 +1432,7 @@ internal class ShaderCompilerCopyMaterializer(
     private val metrics: PipelineMetrics? = null,
 ) {
     val workingDirectory: Path = workingDirectory.toAbsolutePath().normalize()
+    private val materializedSourceCache = mutableMapOf<SourceMaterializationKey, String>()
 
     init {
         require(clangExecutable.isNotBlank()) { "clang executable cannot be blank" }
@@ -1357,19 +1446,47 @@ internal class ShaderCompilerCopyMaterializer(
         probe: TextureAccessProbe,
         moduleName: String = "compiler-copy",
     ): SpirvCompilerModule {
-        require(moduleName.isNotBlank()) { "compiler module name cannot be blank" }
-        val source = requireNotNull(plan.compilerSource) {
-            "$sourceName has structural compiler-copy blockers: ${plan.structuralBlockers.joinToString { it.reason }}"
+        return when (
+            val result = materializeBatch(
+                listOf(ShaderCompilerCopyMaterializationRequest(sourceName, stage, plan, probe, moduleName)),
+            ).single()
+        ) {
+            is ShaderCompilerCopyMaterialization.Success -> result.module
+            is ShaderCompilerCopyMaterialization.Failure -> throw result.exception
         }
-        val materialized = materializeSource(sourceName, stage, source, moduleName)
-        return SpirvCompilerModule(
-            name = moduleName,
-            source = materialized,
-            resourceMarkers = probe.markers,
-            conservativeAccess = probe.conservativeAccess,
-            irisContracts = plan.irisContracts,
-            settings = plan.settings,
-        )
+    }
+
+    fun materializeBatch(
+        requests: List<ShaderCompilerCopyMaterializationRequest>,
+    ): List<ShaderCompilerCopyMaterialization> {
+        val sources = requests.map { request ->
+            require(request.moduleName.isNotBlank()) { "compiler module name cannot be blank" }
+            val source = requireNotNull(request.plan.compilerSource) {
+                "${request.sourceName} has structural compiler-copy blockers: " +
+                    request.plan.structuralBlockers.joinToString { it.reason }
+            }
+            SourceMaterializationRequest(
+                request.sourceName,
+                request.stage,
+                source,
+                request.moduleName,
+            )
+        }
+        return materializeSources(sources).zip(requests).map { (result, request) ->
+            when (result) {
+                is SourceMaterialization.Success -> ShaderCompilerCopyMaterialization.Success(
+                    SpirvCompilerModule(
+                        name = request.moduleName,
+                        source = result.source,
+                        resourceMarkers = request.probe.markers,
+                        conservativeAccess = request.probe.conservativeAccess,
+                        irisContracts = request.plan.irisContracts,
+                        settings = request.plan.settings,
+                    ),
+                )
+                is SourceMaterialization.Failure -> ShaderCompilerCopyMaterialization.Failure(result.exception)
+            }
+        }
     }
 
     fun materializeSource(
@@ -1379,6 +1496,63 @@ internal class ShaderCompilerCopyMaterializer(
         moduleName: String,
     ): String {
         require(moduleName.isNotBlank()) { "compiler module name cannot be blank" }
+        return when (
+            val result = materializeSources(
+                listOf(SourceMaterializationRequest(sourceName, stage, source, moduleName)),
+            ).single()
+        ) {
+            is SourceMaterialization.Success -> result.source
+            is SourceMaterialization.Failure -> throw result.exception
+        }
+    }
+
+    @Synchronized
+    private fun materializeSources(
+        requests: List<SourceMaterializationRequest>,
+    ): List<SourceMaterialization> {
+        if (requests.isEmpty()) return emptyList()
+        val results = arrayOfNulls<SourceMaterialization>(requests.size)
+        val pending = mutableListOf<Pair<Int, SourceMaterializationRequest>>()
+        requests.forEachIndexed { index, request ->
+            val cached = materializedSourceCache[request.cacheKey()]
+            if (cached == null) {
+                pending += index to request
+            } else {
+                results[index] = SourceMaterialization.Success(cached)
+            }
+        }
+        val materialized = pending.map { it.second }.chunked(CLANG_BATCH_SIZE).flatMap { chunk ->
+            val prepared = chunk.map(::prepare)
+            if (prepared.size == 1) {
+                listOf(runSingle(prepared.single()))
+            } else {
+                runBatch(prepared) ?: prepared.map(::runSingle)
+            }
+        }
+        pending.zip(materialized).forEach { (indexed, result) ->
+            val (index, request) = indexed
+            if (result is SourceMaterialization.Success) {
+                materializedSourceCache.putIfAbsent(request.cacheKey(), result.source)
+            }
+            results[index] = result
+        }
+        return results.map { requireNotNull(it) }
+    }
+
+    private fun SourceMaterializationRequest.cacheKey(): SourceMaterializationKey {
+        val pathIdentity = if (PATH_SENSITIVE_PREPROCESSOR_BUILTIN.containsMatchIn(source)) {
+            "$sourceName\u0000$moduleName"
+        } else {
+            null
+        }
+        return SourceMaterializationKey(stage, source, pathIdentity)
+    }
+
+    private fun prepare(request: SourceMaterializationRequest): PreparedCompilerCopy {
+        val sourceName = request.sourceName
+        val stage = request.stage
+        val source = request.source
+        val moduleName = request.moduleName
         val artifactDirectory = workingDirectory.resolve(
             "${safeName(sourceName)}-${stage.glslangName}-${safeName(moduleName)}-${shortHash(source)}",
         )
@@ -1390,45 +1564,159 @@ internal class ShaderCompilerCopyMaterializer(
         val stderrPath = artifactDirectory.resolve("clang.stderr.log")
         inputPath.writeText(source)
         val protected = protectGlslDirectives(normalizePunctuationTokenPaste(source))
-        val marker = "__SHADESMITH_COMPILER_COPY_${shortHash(source)}__"
+        var marker = "__SHADESMITH_COMPILER_COPY_${shortHash("$sourceName\u0000$moduleName\u0000$source")}__"
+        while (marker in protected.source) marker += '_'
         clangInputPath.writeText("${marker}BEGIN\n${protected.source}\n${marker}END\n")
         Files.deleteIfExists(outputPath)
         Files.writeString(stdoutPath, "")
         Files.writeString(stderrPath, "")
-        val command = listOf(clangExecutable) + CLANG_ARGUMENTS + clangInputPath.absolutePathString()
-        val exitCode = try {
-            metrics?.recordClangProcess()
-            if (processGate == null) {
-                processRunner.execute(command, artifactDirectory, stdoutPath, stderrPath)
-            } else {
-                processGate.run { processRunner.execute(command, artifactDirectory, stdoutPath, stderrPath) }
+        return PreparedCompilerCopy(
+            request,
+            artifactDirectory,
+            clangInputPath,
+            outputPath,
+            stdoutPath,
+            stderrPath,
+            protected.namespace,
+            marker,
+        )
+    }
+
+    private fun runBatch(prepared: List<PreparedCompilerCopy>): List<SourceMaterialization>? {
+        val batchIdentity = prepared.joinToString("\u0000") {
+            "${it.request.sourceName}\u0000${it.request.stage.name}\u0000${it.request.moduleName}\u0000${it.marker}"
+        }
+        val batchDirectory = workingDirectory.resolve("batches").resolve("batch-${shortHash(batchIdentity)}")
+        batchDirectory.createDirectories()
+        val stdoutPath = batchDirectory.resolve("clang.stdout.log")
+        val stderrPath = batchDirectory.resolve("clang.stderr.log")
+        Files.writeString(stdoutPath, "")
+        Files.writeString(stderrPath, "")
+        val command = listOf(clangExecutable) + CLANG_ARGUMENTS + prepared.map { it.clangInputPath.absolutePathString() }
+        val exitCode = execute(command, batchDirectory, stdoutPath, stderrPath) ?: return null
+        if (exitCode != 0) return null
+        val output = stdoutPath.readText()
+        val stderr = stderrPath.readText()
+        val parsed = prepared.map { compilerCopy ->
+            parseMaterialized(output, compilerCopy)?.also { source ->
+                compilerCopy.outputPath.writeText(source)
+                compilerCopy.stdoutPath.writeText(source)
+                compilerCopy.stderrPath.writeText(stderr)
             }
+        }
+        if (parsed.any { it == null }) return null
+        metrics?.recordCompilerModules(prepared.size)
+        return parsed.map { SourceMaterialization.Success(requireNotNull(it)) }
+    }
+
+    private fun runSingle(prepared: PreparedCompilerCopy): SourceMaterialization {
+        Files.writeString(prepared.stdoutPath, "")
+        Files.writeString(prepared.stderrPath, "")
+        val command = listOf(clangExecutable) + CLANG_ARGUMENTS + prepared.clangInputPath.absolutePathString()
+        val exitCode = try {
+            execute(command, prepared.artifactDirectory, prepared.stdoutPath, prepared.stderrPath)
         } catch (e: IOException) {
-            throw failure(sourceName, stage, artifactDirectory, command, "unable to start clang", e)
+            return SourceMaterialization.Failure(
+                failure(
+                    prepared.request.sourceName,
+                    prepared.request.stage,
+                    prepared.artifactDirectory,
+                    command,
+                    "unable to start clang",
+                    e,
+                ),
+            )
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
-            throw failure(sourceName, stage, artifactDirectory, command, "interrupted while running clang", e)
+            return SourceMaterialization.Failure(
+                failure(
+                    prepared.request.sourceName,
+                    prepared.request.stage,
+                    prepared.artifactDirectory,
+                    command,
+                    "interrupted while running clang",
+                    e,
+                ),
+            )
+        }
+        if (exitCode == null) {
+            return SourceMaterialization.Failure(
+                failure(
+                    prepared.request.sourceName,
+                    prepared.request.stage,
+                    prepared.artifactDirectory,
+                    command,
+                    "unable to start clang",
+                ),
+            )
         }
         if (exitCode != 0) {
-            throw failure(sourceName, stage, artifactDirectory, command, "clang exited with code $exitCode")
+            return SourceMaterialization.Failure(
+                failure(
+                    prepared.request.sourceName,
+                    prepared.request.stage,
+                    prepared.artifactDirectory,
+                    command,
+                    "clang exited with code $exitCode",
+                ),
+            )
         }
-        if (!stdoutPath.isRegularFile()) {
-            throw failure(sourceName, stage, artifactDirectory, command, "clang produced no output")
+        if (!prepared.stdoutPath.isRegularFile()) {
+            return SourceMaterialization.Failure(
+                failure(
+                    prepared.request.sourceName,
+                    prepared.request.stage,
+                    prepared.artifactDirectory,
+                    command,
+                    "clang produced no output",
+                ),
+            )
         }
-        val output = stdoutPath.readText()
+        val materialized = parseMaterialized(prepared.stdoutPath.readText(), prepared)
+        if (materialized == null) {
+            return SourceMaterialization.Failure(
+                failure(
+                    prepared.request.sourceName,
+                    prepared.request.stage,
+                    prepared.artifactDirectory,
+                    command,
+                    "clang output is missing compiler-copy markers",
+                ),
+            )
+        }
+        prepared.outputPath.writeText(materialized)
+        metrics?.recordCompilerModules(1)
+        return SourceMaterialization.Success(materialized)
+    }
+
+    private fun execute(
+        command: List<String>,
+        workingDirectory: Path,
+        stdoutPath: Path,
+        stderrPath: Path,
+    ): Int? {
+        return try {
+            metrics?.recordClangProcess()
+            if (processGate == null) {
+                processRunner.execute(command, workingDirectory, stdoutPath, stderrPath)
+            } else {
+                processGate.run { processRunner.execute(command, workingDirectory, stdoutPath, stderrPath) }
+            }
+        } catch (_: IOException) {
+            null
+        }
+    }
+
+    private fun parseMaterialized(output: String, prepared: PreparedCompilerCopy): String? {
+        val marker = prepared.marker
         val begin = output.indexOf("${marker}BEGIN")
         val end = output.indexOf("${marker}END", begin + marker.length)
-        if (begin < 0 || end < 0) {
-            throw failure(sourceName, stage, artifactDirectory, command, "clang output is missing compiler-copy markers")
-        }
+        if (begin < 0 || end < 0) return null
         var contentStart = begin + marker.length + "BEGIN".length
         while (contentStart < end && output[contentStart] in "\r\n") contentStart++
         var contentEnd = end
         while (contentEnd > contentStart && output[contentEnd - 1] in "\r\n") contentEnd--
-        val materialized = restoreGlslDirectives(output.substring(contentStart, contentEnd), protected.namespace)
-        outputPath.writeText(materialized)
-        metrics?.recordCompilerModules(1)
-        return materialized
+        return restoreGlslDirectives(output.substring(contentStart, contentEnd), prepared.directiveNamespace)
     }
 
     private fun failure(
@@ -1477,16 +1765,49 @@ internal class ShaderCompilerCopyMaterializer(
 
     private data class ProtectedCompilerCopySource(val source: String, val namespace: String)
 
+    private data class SourceMaterializationRequest(
+        val sourceName: String,
+        val stage: ShaderStage,
+        val source: String,
+        val moduleName: String,
+    )
+
+    private data class SourceMaterializationKey(
+        val stage: ShaderStage,
+        val source: String,
+        val pathIdentity: String?,
+    )
+
+    private data class PreparedCompilerCopy(
+        val request: SourceMaterializationRequest,
+        val artifactDirectory: Path,
+        val clangInputPath: Path,
+        val outputPath: Path,
+        val stdoutPath: Path,
+        val stderrPath: Path,
+        val directiveNamespace: String,
+        val marker: String,
+    )
+
+    private sealed interface SourceMaterialization {
+        data class Success(val source: String) : SourceMaterialization
+        data class Failure(val exception: ShaderCompilerCopyException) : SourceMaterialization
+    }
+
     companion object {
+        internal const val CLANG_BATCH_SIZE = 20
         private val CLANG_ARGUMENTS = listOf("-C", "-E", "-P", "-Wno-microsoft-include", "-x", "c")
 
         internal fun cacheContract(clangExecutable: String): String {
-            return (listOf(clangExecutable) + CLANG_ARGUMENTS).joinToString("\u0000")
+            return (listOf(clangExecutable, "batch-size=$CLANG_BATCH_SIZE") + CLANG_ARGUMENTS + "<inputs...>")
+                .joinToString("\u0000")
         }
 
         private val INVALID_PATH_CHAR = "[^A-Za-z0-9._-]".toRegex()
         private val PROTECTED_GLSL_DIRECTIVE = "(?m)^([ \\t]*)(#(?:version|extension|pragma|line)\\b)".toRegex()
         private val TOKEN_PASTE_BEFORE_OPENING_DELIMITER = "##(?=[ \\t]*[({\\[])".toRegex()
+        private val PATH_SENSITIVE_PREPROCESSOR_BUILTIN =
+            "\\b__(?:FILE|BASE_FILE)__\\b".toRegex()
     }
 }
 

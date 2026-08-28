@@ -51,13 +51,15 @@ object Main {
         context(ioContext) {
             val inputFiles = readAllCompositeStyleShaders() + readOtherShaders()
             val included = resolveIncludes(inputFiles)
-            val optimized = ShaderPipeline(artifactDirectory).optimize(included)
+            val pipeline = ShaderPipeline(artifactDirectory)
+            val optimized = pipeline.optimize(included)
 
             clearOutput(outputPath)
             resolveTextures(optimized, propertiesPath)
             optimized.forEach {
                 it.file.copy(path = it.file.path.toOutputPath()).writeOutput()
             }
+            pipeline.publishCache()
             return optimized
         }
     }

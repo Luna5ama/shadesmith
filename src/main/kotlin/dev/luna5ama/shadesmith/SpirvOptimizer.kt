@@ -5,6 +5,7 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorCompletionService
 import java.util.concurrent.ExecutorService
 import kotlin.io.path.createDirectories
 import kotlin.io.path.readText
@@ -119,6 +120,7 @@ internal class SpirvOptimizer(
     private val metrics: PipelineMetrics? = null,
 ) {
     val workingDirectory: Path = workingDirectory.toAbsolutePath().normalize()
+    private val toolResultCache = SpirvToolResultCache()
 
     init {
         this.workingDirectory.createDirectories()
@@ -191,15 +193,23 @@ internal class SpirvOptimizer(
         val executor = moduleExecutor ?: return modules.map { module ->
             optimizeModule(request, module, requestDirectory, generatedCompilerSource)
         }
-        return try {
-            executor.invokeAll(
-                modules.map { module ->
-                    Callable { optimizeModule(request, module, requestDirectory, generatedCompilerSource) }
+        val completion = ExecutorCompletionService<IndexedValue<SpirvModuleResult>>(executor)
+        val futures = modules.mapIndexed { index, module ->
+            completion.submit(
+                Callable {
+                    IndexedValue(index, optimizeModule(request, module, requestDirectory, generatedCompilerSource))
                 },
-            ).map { future ->
+            )
+        }
+        val results = MutableList<SpirvModuleResult?>(modules.size) { null }
+        return try {
+            repeat(modules.size) {
+                val future = completion.take()
                 try {
-                    future.get()
+                    val result = future.get()
+                    results[result.index] = result.value
                 } catch (e: ExecutionException) {
+                    futures.filterNot { it.isDone }.forEach { it.cancel(true) }
                     val cause = e.cause
                     when (cause) {
                         is RuntimeException -> throw cause
@@ -208,7 +218,9 @@ internal class SpirvOptimizer(
                     }
                 }
             }
+            results.map { requireNotNull(it) }
         } catch (e: InterruptedException) {
+            futures.filterNot { it.isDone }.forEach { it.cancel(true) }
             Thread.currentThread().interrupt()
             throw IllegalStateException("Shader compiler-module processing interrupted", e)
         }
@@ -247,9 +259,15 @@ internal class SpirvOptimizer(
         compilerPath.writeText(patch.compilerSource)
 
         val toolchain = if (processRunner == null) {
-            SpirvToolchain(moduleDirectory, executables, processGate = processGate, metrics = metrics)
+            SpirvToolchain(
+                moduleDirectory,
+                executables,
+                processGate = processGate,
+                metrics = metrics,
+                resultCache = toolResultCache,
+            )
         } else {
-            SpirvToolchain(moduleDirectory, executables, processRunner, processGate, metrics)
+            SpirvToolchain(moduleDirectory, executables, processRunner, processGate, metrics, toolResultCache)
         }
         val originalSpirv = moduleDirectory.resolve("input.spv")
         val compileInvocation = toolchain.compileInvocation(request.stage, compilerPath, originalSpirv)
@@ -281,16 +299,16 @@ internal class SpirvOptimizer(
             )
         }
         val internalCoreSource: String
-        val bridgeSettings: List<ShaderSetting>
+        val crossBridgeSettings: List<ShaderSetting>
         var restorationFailure: String? = null
         when (bridge) {
             is SpirvSettingBridgeRestoration.Restored -> {
                 internalCoreSource = bridge.source
-                bridgeSettings = bridge.settings
+                crossBridgeSettings = bridge.settings
             }
             is SpirvSettingBridgeRestoration.Preserved -> {
                 internalCoreSource = compilerCore
-                bridgeSettings = emptyList()
+                crossBridgeSettings = emptyList()
                 restorationFailure = bridge.reason
             }
         }
@@ -307,10 +325,32 @@ internal class SpirvOptimizer(
         } else {
             internalCoreSource
         }
+        val bridgeCompletion = if (restorationFailure == null) {
+            SpirvSettingBridge.completeRestoredSettings(
+                contractSource,
+                crossBridgeSettings,
+                module.settings,
+            )
+        } else {
+            SpirvSettingBridgeRestoration.Restored(contractSource, crossBridgeSettings)
+        }
+        val bridgeSettings: List<ShaderSetting>
+        val bridgeSource: String
+        when (bridgeCompletion) {
+            is SpirvSettingBridgeRestoration.Restored -> {
+                bridgeSource = bridgeCompletion.source
+                bridgeSettings = bridgeCompletion.settings
+            }
+            is SpirvSettingBridgeRestoration.Preserved -> {
+                bridgeSource = contractSource
+                bridgeSettings = crossBridgeSettings
+                restorationFailure = bridgeCompletion.reason
+            }
+        }
         val restored = if (restorationFailure == null) {
             when (
                 val bridges = SpirvSettingBridge.placeAfterDefinitions(
-                    contractSource,
+                    bridgeSource,
                     bridgeSettings,
                     patch.irisContracts.contracts,
                 )
@@ -322,7 +362,7 @@ internal class SpirvOptimizer(
                 }
             }
         } else {
-            contractSource
+            bridgeSource
         }
         val restoredPath = moduleDirectory.resolve("restored.glsl")
         restoredPath.writeText(restored)
@@ -528,9 +568,15 @@ internal class SpirvOptimizer(
             val spirvPath = moduleDirectory.resolve("final.spv")
             compilerPath.writeText(finalPatch.compilerSource)
             val toolchain = if (processRunner == null) {
-                SpirvToolchain(moduleDirectory, executables, processGate = processGate, metrics = metrics)
+                SpirvToolchain(
+                    moduleDirectory,
+                    executables,
+                    processGate = processGate,
+                    metrics = metrics,
+                    resultCache = toolResultCache,
+                )
             } else {
-                SpirvToolchain(moduleDirectory, executables, processRunner, processGate, metrics)
+                SpirvToolchain(moduleDirectory, executables, processRunner, processGate, metrics, toolResultCache)
             }
             val invocation = toolchain.compileInvocation(request.stage, compilerPath, spirvPath)
             phase(

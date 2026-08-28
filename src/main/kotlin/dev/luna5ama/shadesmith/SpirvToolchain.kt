@@ -3,6 +3,10 @@ package dev.luna5ama.shadesmith
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutionException
 import kotlin.io.path.absolutePathString
 import kotlin.io.path.createDirectories
 import kotlin.io.path.extension
@@ -137,6 +141,69 @@ internal class SpirvToolException(
     cause,
 )
 
+internal class SpirvToolResultCache {
+    private val entries = ConcurrentHashMap<SpirvToolCacheKey, CompletableFuture<CachedSpirvToolOutput>>()
+
+    fun execute(
+        invocation: SpirvInvocation,
+        action: () -> CachedSpirvToolOutput,
+    ): CachedSpirvToolExecution {
+        val key = invocation.cacheKey()
+        val created = CompletableFuture<CachedSpirvToolOutput>()
+        val existing = entries.putIfAbsent(key, created)
+        if (existing != null) {
+            return try {
+                CachedSpirvToolExecution(await(existing), cacheHit = true)
+            } catch (e: SpirvToolException) {
+                entries.remove(key, existing)
+                execute(invocation, action)
+            }
+        }
+        return try {
+            val output = action()
+            created.complete(output)
+            CachedSpirvToolExecution(output, cacheHit = false)
+        } catch (t: Throwable) {
+            created.completeExceptionally(t)
+            entries.remove(key, created)
+            throw t
+        }
+    }
+
+    private fun await(future: CompletableFuture<CachedSpirvToolOutput>): CachedSpirvToolOutput {
+        return try {
+            future.get()
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw e
+        } catch (e: ExecutionException) {
+            when (val cause = e.cause ?: e) {
+                is RuntimeException -> throw cause
+                is Error -> throw cause
+                else -> throw IllegalStateException("cached SPIR-V tool execution failed", cause)
+            }
+        }
+    }
+}
+
+internal data class CachedSpirvToolExecution(
+    val output: CachedSpirvToolOutput,
+    val cacheHit: Boolean,
+)
+
+internal data class CachedSpirvToolOutput(
+    val output: ByteArray,
+    val stdout: ByteArray,
+    val stderr: ByteArray,
+)
+
+private data class SpirvToolCacheKey(
+    val tool: SpirvTool,
+    val stage: ShaderStage?,
+    val command: List<String>,
+    val inputSha256: String,
+)
+
 internal fun interface SpirvProcessRunner {
     fun execute(
         invocation: SpirvInvocation,
@@ -168,6 +235,7 @@ internal class SpirvToolchain(
     private val processRunner: SpirvProcessRunner = SystemSpirvProcessRunner,
     private val processGate: ExternalProcessGate? = null,
     private val metrics: PipelineMetrics? = null,
+    private val resultCache: SpirvToolResultCache? = null,
 ) {
     val workingDirectory: Path = workingDirectory.toAbsolutePath().normalize()
 
@@ -258,6 +326,25 @@ internal class SpirvToolchain(
         Files.writeString(stdoutPath, "")
         Files.writeString(stderrPath, "")
 
+        val cacheExecution = resultCache?.execute(invocation) {
+            executeUncached(invocation, stdoutPath, stderrPath)
+        }
+        if (cacheExecution == null) {
+            executeUncached(invocation, stdoutPath, stderrPath)
+        } else if (cacheExecution.cacheHit) {
+            Files.write(invocation.output, cacheExecution.output.output)
+            Files.write(stdoutPath, cacheExecution.output.stdout)
+            Files.write(stderrPath, cacheExecution.output.stderr)
+            metrics?.recordToolCacheHit()
+        }
+        return SpirvToolResult(invocation, 0, stdoutPath, stderrPath)
+    }
+
+    private fun executeUncached(
+        invocation: SpirvInvocation,
+        stdoutPath: Path,
+        stderrPath: Path,
+    ): CachedSpirvToolOutput {
         val exitCode = try {
             metrics?.recordToolProcess(invocation.tool)
             if (processGate == null) {
@@ -287,7 +374,6 @@ internal class SpirvToolchain(
                 e,
             )
         }
-
         if (exitCode != 0) {
             throw SpirvToolException(
                 invocation,
@@ -306,8 +392,11 @@ internal class SpirvToolchain(
                 "process did not create the expected output",
             )
         }
-
-        return SpirvToolResult(invocation, exitCode, stdoutPath, stderrPath)
+        return CachedSpirvToolOutput(
+            Files.readAllBytes(invocation.output),
+            Files.readAllBytes(stdoutPath),
+            Files.readAllBytes(stderrPath),
+        )
     }
 
     private fun ownedOutput(path: Path): Path {
@@ -340,6 +429,36 @@ internal class SpirvToolchain(
 
         private val LOG_NAME_INVALID_CHAR = "[^A-Za-z0-9._-]".toRegex()
     }
+}
+
+private fun SpirvInvocation.cacheKey(): SpirvToolCacheKey {
+    val inputPath = input.absolutePathString()
+    val outputPath = output.absolutePathString()
+    return SpirvToolCacheKey(
+        tool,
+        stage,
+        command.map { argument ->
+            when (argument) {
+                inputPath -> "<input>"
+                outputPath -> "<output>"
+                else -> argument
+            }
+        },
+        sha256(input),
+    )
+}
+
+private fun sha256(path: Path): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    Files.newInputStream(path).use { input ->
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            digest.update(buffer, 0, read)
+        }
+    }
+    return digest.digest().joinToString("") { "%02X".format(it.toInt() and 0xff) }
 }
 
 private fun String.asDiagnosticArgument(): String {

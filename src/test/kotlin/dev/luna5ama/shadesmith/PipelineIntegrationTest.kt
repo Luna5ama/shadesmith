@@ -30,11 +30,16 @@ class PipelineIntegrationTest {
 
         val firstResult = Main.runShaderPipeline(input, output, artifacts, properties)
         val firstSnapshot = snapshot(output, properties, input.resolve("base/Textile.glsl"))
+        val firstPerformance = performance(artifacts)
+        val firstOutputs = artifacts.resolve("outputs.tsv").readText()
+        val firstBoundaries = artifacts.resolve("boundaries.tsv").readText()
         val secondResult = Main.runShaderPipeline(input, output, artifacts, properties)
         val secondSnapshot = snapshot(output, properties, input.resolve("base/Textile.glsl"))
         val performance = performance(artifacts)
 
         assertEquals(firstSnapshot, secondSnapshot)
+        assertEquals(firstOutputs, artifacts.resolve("outputs.tsv").readText())
+        assertEquals(firstBoundaries, artifacts.resolve("boundaries.tsv").readText())
         assertEquals(firstResult.map { it.textureAccess }, secondResult.map { it.textureAccess })
         assertEquals(firstResult.map { it.file.path.name }.sorted(), firstResult.map { it.file.path.name })
         assertEquals(setOf("transient_a"), access(firstResult, "composite.csh").reads)
@@ -55,8 +60,18 @@ class PipelineIntegrationTest {
         assertFalse("shadesmith_resource_" in emittedBranchShader)
         assertContains(properties.readText(), "image.uimg_rgba16f=usam_rgba16f RGBA RGBA16F HALF_FLOAT false true 1.0 1.0")
         assertEquals("3", performance.getValue("validated_modules"))
-        assertEquals("3", performance.getValue("materialized_compiler_modules"))
-        assertTrue(performance.getValue("external_processes").toInt() > 0)
+        assertEquals("3", firstPerformance.getValue("cache_misses"))
+        assertEquals("3", firstPerformance.getValue("cache_publications"))
+        assertTrue(firstPerformance.getValue("external_processes").toInt() > 0)
+        assertEquals("3", performance.getValue("cache_hits"))
+        assertEquals("0", performance.getValue("cache_misses"))
+        assertEquals("0", performance.getValue("cache_publications"))
+        assertEquals("0", performance.getValue("materialized_compiler_modules"))
+        assertEquals("0", performance.getValue("clang_processes"))
+        assertEquals("0", performance.getValue("glslang_processes"))
+        assertEquals("0", performance.getValue("spirv_opt_processes"))
+        assertEquals("0", performance.getValue("spirv_cross_processes"))
+        assertEquals("0", performance.getValue("external_processes"))
         val hostFragment = firstResult.single { it.file.path.name == "voxy_hook.glsl" }
         assertEquals(ShaderProcessingMode.PRESERVED_HOST_INTEGRATION, hostFragment.processingMode)
         assertEquals(hostFragment.file.code, output.resolve("voxy_hook.glsl").readText())
@@ -65,6 +80,14 @@ class PipelineIntegrationTest {
         assertContains(outputs, "composite2.csh\tcomp\tSPIRV_ROUND_TRIP")
         assertContains(outputs, "SETTING_BRANCH")
         assertContains(outputs, "transient_branch")
+
+        input.resolve("composite1.csh").writeText(input.resolve("composite1.csh").readText() + "\n// cache invalidation\n")
+        Main.runShaderPipeline(input, output, artifacts, properties)
+        val invalidated = performance(artifacts)
+        assertEquals("2", invalidated.getValue("cache_hits"))
+        assertEquals("1", invalidated.getValue("cache_misses"))
+        assertEquals("1", invalidated.getValue("cache_publications"))
+        assertTrue(invalidated.getValue("external_processes").toInt() > 0)
     }
 
     @Test
@@ -91,12 +114,74 @@ class PipelineIntegrationTest {
         assertTrue(sentinel.isRegularFile())
         assertEquals("keep", sentinel.readText())
         assertFalse(properties.exists())
+        assertEquals(0, cacheEntries(artifacts))
 
         copyFixture(input)
         Main.runShaderPipeline(input, output, artifacts, properties)
         val performance = performance(artifacts)
         assertEquals("3", performance.getValue("validated_modules"))
         assertTrue(performance.getValue("external_processes").toInt() > 0)
+        assertEquals(3, cacheEntries(artifacts))
+    }
+
+    @Test
+    fun invalidStructuralSignatureFailsClosedToExactSource() = withWorkspace { workspace ->
+        val input = workspace.resolve("input")
+        val output = workspace.resolve("output")
+        val artifacts = workspace.resolve("artifacts")
+        input.createDirectories()
+        val source = """
+            #version 460 compatibility
+            #define SETTING_FORMAT 0 //[0 1]
+            #if SETTING_FORMAT == 0
+            layout(r32ui) uniform uimage2D target;
+            #else
+            layout(rgba16f) uniform image2D target;
+            #endif
+            layout(local_size_x = 1) in;
+            void main() { uint value = imageAtomicAdd(target, ivec2(0), 1u); }
+        """.trimIndent()
+        input.resolve("composite.csh").writeText(source)
+        val ioContext = IOContext(input, output)
+
+        val result = context(ioContext) {
+            ShaderPipeline(
+                artifacts,
+                capabilityProvider = {
+                    OpenGlSpirvCapabilities("test", true, artifacts.resolve("capabilities"))
+                },
+                cacheIdentityProvider = { null },
+            ).optimize(listOf(requireNotNull(ioContext.readInputRoot("composite.csh"))))
+        }.single()
+
+        assertEquals(ShaderProcessingMode.PRESERVED_STRUCTURAL, result.processingMode)
+        assertEquals(source, result.file.code)
+        assertContains(result.fallbackReason.orEmpty(), "structural module round-trip failed closed")
+        assertContains(result.fallbackReason.orEmpty(), "OpenGL SPIR-V compilation")
+        assertContains(artifacts.resolve("boundaries.tsv").readText(), "composite.csh")
+    }
+
+    @Test
+    fun lifecycleResolutionFailureDoesNotPublishDeferredCacheEntries() = withWorkspace { workspace ->
+        val input = workspace.resolve("input")
+        val output = workspace.resolve("output")
+        val artifacts = workspace.resolve("artifacts")
+        val properties = workspace.resolve("shadesmith.shaders.properties")
+        copyFixture(input)
+        input.resolve("shadesmith.json").writeText(
+            input.resolve("shadesmith.json").readText().replace(
+                "\"transient_branch\": \"RGBA16F\"",
+                "\"transient_branch\": \"RGBA16F\",\n    \"transient_unused\": \"RGBA16F\"",
+            ),
+        )
+
+        val exception = assertFailsWith<IllegalStateException> {
+            Main.runShaderPipeline(input, output, artifacts, properties)
+        }
+
+        assertContains(exception.message.orEmpty(), "transient_unused must be read/written")
+        assertEquals(0, cacheEntries(artifacts))
+        assertEquals("0", performance(artifacts).getValue("cache_publications"))
     }
 
     @Test
@@ -185,6 +270,12 @@ class PipelineIntegrationTest {
             val (name, value) = line.split('\t', limit = 2)
             name to value
         }
+    }
+
+    private fun cacheEntries(artifacts: Path): Int {
+        val cache = artifacts.resolve("cache")
+        if (!cache.exists()) return 0
+        return Files.walk(cache).use { paths -> paths.filter { it.isRegularFile() && it.fileName.toString().endsWith(".cache") }.count().toInt() }
     }
 
     private fun withWorkspace(block: (Path) -> Unit) {

@@ -396,6 +396,40 @@ class SpirvOptimizerTest {
         }
         assertContains(blockException.reason, "DataBuffer")
         assertContains(blockException.reason, "block declaration changed")
+
+        val crossStyleBlock = computePatch.compilerSource.replace(
+            "    float weights[];\n};",
+            "    layout(offset = 0) float weights[];\n} _123;",
+        )
+        val restoredBlock = patcher.restore(crossStyleBlock, computePatch)
+        assertContains(restoredBlock, "layout(std430) readonly buffer DataBuffer {\n    float weights[];\n};")
+        assertFalse("layout(offset = 0)" in restoredBlock)
+        assertFalse("_123" in restoredBlock)
+    }
+
+    @Test
+    fun restoresBridgeForSettingReintroducedByAnIrisContract() {
+        val setting = ShaderSetting(
+            name = "SETTING_SHADOW_MAP_RESOLUTION",
+            type = ShaderSettingType.INT,
+            defaultValue = "2048",
+            domain = listOf("1024", "2048", "3072"),
+            presenceToggle = false,
+            specializationId = 7,
+            sourceSlices = listOf("#define SETTING_SHADOW_MAP_RESOLUTION 2048 //[1024 2048 3072]\n"),
+        )
+        val source = """
+            #version 460 compatibility
+            #define SETTING_SHADOW_MAP_RESOLUTION 2048 //[1024 2048 3072]
+            const int shadowMapResolution = SM_SETTING_SHADOW_MAP_RESOLUTION;
+            void main() {}
+        """.trimIndent() + "\n"
+
+        val restoration = SpirvSettingBridge.completeRestoredSettings(source, emptyList(), listOf(setting))
+        val restored = restoration as SpirvSettingBridgeRestoration.Restored
+
+        assertEquals(listOf(setting), restored.settings)
+        assertContains(restored.source, "#define SM_SETTING_SHADOW_MAP_RESOLUTION SETTING_SHADOW_MAP_RESOLUTION")
     }
 
     @Test

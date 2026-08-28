@@ -9,6 +9,7 @@ import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -46,6 +47,30 @@ class ShaderCompilerCopyTest {
         assertFalse("#ifdef SETTING_" in compiler)
         assertFalse("#define SETTING_" in compiler)
         assertContains(compiler, "if (SM_SETTING_0)")
+    }
+
+    @Test
+    fun removesEmptySettingRecognitionConditionalsFromCompilerCopy() {
+        val source = buildString {
+            appendLine("#version 460 compatibility")
+            repeat(25) { index ->
+                appendLine("//#define SETTING_$index")
+                appendLine("#ifdef SETTING_$index")
+                appendLine("#endif")
+            }
+            appendLine("void main() {}")
+        }
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "empty-settings.csh")
+
+        assertTrue(plan.structuralBlockers.isEmpty())
+        assertEquals(
+            25,
+            plan.conditionals.count { it.disposition == ShaderConditionalDisposition.COMPILER_NO_OP },
+        )
+        val compiler = assertNotNull(plan.compilerSource)
+        assertFalse("#ifdef SETTING_" in compiler)
+        assertEquals(25, "layout\\(constant_id".toRegex().findAll(compiler).count())
     }
 
     @Test
@@ -170,6 +195,37 @@ class ShaderCompilerCopyTest {
         assertEquals(plan.conditionals.first().id, plan.conditionals.last().parentId)
         assertTrue(plan.conditionals.all { it.exactSlice.startsWith("#if") || it.exactSlice.startsWith("    #if") })
         assertTrue(plan.sourceRegions.any { it.kind == ShaderSourceRegionKind.FUNCTION && it.name == "main" })
+    }
+
+    @Test
+    fun lowersNestedSettingControlFlowAcrossAnUnrelatedHostConditional() {
+        val source = """
+            #version 460 compatibility
+            //#define SETTING_OUTER
+            //#define SETTING_INNER
+            void main() {
+                int value = 0;
+            #ifdef SETTING_OUTER
+                value += 1;
+                #if HOST_FEATURE
+                    #ifdef SETTING_INNER
+                    value += 2;
+                    #else
+                    value -= 2;
+                    #endif
+                #endif
+            #else
+                value -= 1;
+            #endif
+            }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "nested-host.csh")
+        val compiler = assertNotNull(plan.compilerSource)
+
+        assertContains(compiler, "if (SM_SETTING_OUTER)")
+        assertContains(compiler, "if (SM_SETTING_INNER)")
+        assertContains(compiler, "#if HOST_FEATURE")
     }
 
     @Test
@@ -391,6 +447,119 @@ class ShaderCompilerCopyTest {
         assertFalse("CALL(" in module.source)
         assertEquals(1, metrics.snapshot().compilerModules)
         assertEquals(1, metrics.snapshot().clangProcesses)
+    }
+
+    @Test
+    fun batchesCompilerCopiesAcrossIndependentTranslationUnits() = withWorkspace { workspace ->
+        val metrics = PipelineMetrics()
+        val copyRunner = ClangProcessRunner { command, _, stdout, _ ->
+            val inputs = command.filter { it.endsWith("clang-input.glsl") }.map(Path::of)
+            stdout.writeText(inputs.joinToString("\n") { it.readText() })
+            0
+        }
+        val materializer = ShaderCompilerCopyMaterializer(
+            workspace,
+            processRunner = copyRunner,
+            metrics = metrics,
+        )
+        val requests = (0 until 45).map { index ->
+            val source = "#version 460 compatibility\n#define VALUE $index\nvoid main() { int value = VALUE; }\n"
+            ShaderCompilerCopyMaterializationRequest(
+                "batch-$index.csh",
+                ShaderStage.COMPUTE,
+                ShaderCompilerCopyPlanner.plan(source, "batch-$index.csh"),
+                TextureAccessProbe(source, emptyList(), TextureAccess()),
+            )
+        }
+
+        val results = materializer.materializeBatch(requests)
+
+        assertEquals(45, results.size)
+        assertTrue(results.all { it is ShaderCompilerCopyMaterialization.Success })
+        assertEquals(45, metrics.snapshot().compilerModules)
+        assertEquals(3, metrics.snapshot().clangProcesses)
+    }
+
+    @Test
+    fun reusesIdenticalCompilerCopyAcrossRootBatches() = withWorkspace { workspace ->
+        val metrics = PipelineMetrics()
+        var executions = 0
+        val copyRunner = ClangProcessRunner { command, _, stdout, _ ->
+            executions++
+            stdout.writeText(Path.of(command.last()).readText())
+            0
+        }
+        val source = "#version 460 compatibility\nvoid main() {}\n"
+        val probe = TextureAccessProbe(source, emptyList(), TextureAccess())
+        val materializer = ShaderCompilerCopyMaterializer(
+            workspace,
+            processRunner = copyRunner,
+            metrics = metrics,
+        )
+
+        val first = materializer.materialize(
+            "first.csh",
+            ShaderStage.COMPUTE,
+            ShaderCompilerCopyPlanner.plan(source, "first.csh"),
+            probe,
+        )
+        val second = materializer.materialize(
+            "second.csh",
+            ShaderStage.COMPUTE,
+            ShaderCompilerCopyPlanner.plan(source, "second.csh"),
+            probe,
+        )
+
+        assertEquals(first.source, second.source)
+        assertEquals(1, executions)
+        assertEquals(1, metrics.snapshot().compilerModules)
+        assertEquals(1, metrics.snapshot().clangProcesses)
+    }
+
+    @Test
+    fun retriesFailedBatchAsSinglesAndAttributesTheExactCompilerCopy() = withWorkspace { workspace ->
+        val metrics = PipelineMetrics()
+        val copyRunner = ClangProcessRunner { command, _, stdout, stderr ->
+            val inputs = command.filter { it.endsWith("clang-input.glsl") }.map(Path::of)
+            if (inputs.size > 1) {
+                stderr.writeText("batch failed")
+                7
+            } else {
+                val source = inputs.single().readText()
+                if ("FAIL_THIS" in source) {
+                    stdout.writeText("failed compiler copy stdout")
+                    stderr.writeText("failed compiler copy stderr")
+                    9
+                } else {
+                    stdout.writeText(source)
+                    0
+                }
+            }
+        }
+        val materializer = ShaderCompilerCopyMaterializer(
+            workspace,
+            processRunner = copyRunner,
+            metrics = metrics,
+        )
+        val requests = listOf("OK", "FAIL_THIS").mapIndexed { index, value ->
+            val source = "#version 460 compatibility\n#define VALUE $value\nvoid main() {}\n"
+            ShaderCompilerCopyMaterializationRequest(
+                "failure-$index.csh",
+                ShaderStage.COMPUTE,
+                ShaderCompilerCopyPlanner.plan(source, "failure-$index.csh"),
+                TextureAccessProbe(source, emptyList(), TextureAccess()),
+            )
+        }
+
+        val results = materializer.materializeBatch(requests)
+        val failure = assertIs<ShaderCompilerCopyMaterialization.Failure>(results[1]).exception
+
+        assertIs<ShaderCompilerCopyMaterialization.Success>(results[0])
+        assertContains(failure.message.orEmpty(), "failure-1.csh")
+        assertContains(failure.message.orEmpty(), "clang exited with code 9")
+        assertEquals("failed compiler copy stdout", failure.artifactDirectory.resolve("clang.stdout.log").readText())
+        assertEquals("failed compiler copy stderr", failure.artifactDirectory.resolve("clang.stderr.log").readText())
+        assertEquals(3, metrics.snapshot().clangProcesses)
     }
 
     @Test

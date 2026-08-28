@@ -1,15 +1,15 @@
 # Shadesmith
 
-Shadesmith expands an Iris shader pack, optimizes supported GLSL through OpenGL SPIR-V, and derives Textile texture
-lifetimes from the optimized program semantics.
+Shadesmith expands an Iris shader pack, optimizes supported GLSL through OpenGL SPIR-V, emits the optimized
+SPIRV-Cross GLSL, and derives Textile texture lifetimes from the optimized program semantics.
 
 ## Requirements
 
 Java 21 and these executables must be available on `PATH`:
 
-- `clang`, used for include expansion and explicit preprocessor-branch materialization;
-- `glslang`, used in OpenGL mode for the initial and restored-source compilations;
-- `spirv-opt`, used for the requested SPIRV-Tools optimization sequence;
+- `clang`, used for include expansion and compiler-copy preprocessing;
+- `glslang`, used in OpenGL mode for SPIR-V generation and final-GLSL validation;
+- `spirv-opt`, used for the configured SPIRV-Tools optimization sequence;
 - `spirv-cross`, used to decompile optimized modules to desktop GLSL 4.60.
 
 Run the fat JAR with an input shader directory and an output shader directory:
@@ -20,53 +20,61 @@ java -jar shadesmith.jar <input-shaders> <output-shaders>
 
 ## Shader pipeline
 
-For every discovered stage, Shadesmith performs these steps before replacing any emitted shader output:
+For each standalone shader root, Shadesmith:
 
-1. expand `#include` directives while retaining Iris settings and macro contracts;
-2. materialize every protected conditional branch needed for conservative setting coverage;
-3. patch only the compiler copy for OpenGL SPIR-V compatibility;
-4. compile with `glslang --target-env opengl --target-env spirv1.3`, retaining OpenGL semantics while supporting
-   subgroup operations;
-5. run `spirv-opt` with `--eliminate-dead-branches`, `--merge-return`,
+1. expands includes while retaining lossless source slices for Iris settings and directive contracts;
+2. infers scalar setting domains and lowers safe function-body conditionals to specialization-constant-controlled
+   compiler-copy control flow;
+3. removes host-only Iris contracts from the compiler copy and represents supported setting-dependent workgroup sizes
+   through `local_size_*_id` when the cached tool capability probe permits it;
+4. creates only the bounded structural modules required by incompatible resource, interface, capability, layout, or
+   function ABI signatures;
+5. compiles each module with `glslang --target-env opengl --target-env spirv1.3`;
+6. runs `spirv-opt` with `--eliminate-dead-branches`, `--merge-return`,
    `--inline-entry-points-exhaustive`, `--scalar-replacement=0`, `--ssa-rewrite`,
    `--simplify-instructions`, `--eliminate-dead-inserts`, `--eliminate-dead-functions`,
    `--eliminate-dead-code-aggressive`, and `--merge-blocks`, in that order;
-6. run `spirv-cross --no-es --version 460 --glsl-force-flattened-io-blocks`
+7. runs `spirv-cross --no-es --version 460 --glsl-force-flattened-io-blocks`
    `--combined-samplers-inherit-bindings --remove-unused-variables`;
-7. restore Iris/OpenGL source contracts and compile the restored result again in OpenGL mode;
-8. union optimized read/write facts from all retained setting variants for Textile allocation, then emit shaders and
-   texture properties.
+8. removes SPIRV-Cross specialization declarations, installs Iris setting bridges, restores exact directive and host
+   contract slices at stable anchors, and recompiles the final GLSL in OpenGL mode;
+9. unions optimized lifecycle access from the ordinary setting control flow and every required structural signature.
 
-A shader without protected macro structure emits the optimized round-trip GLSL. When configurable preprocessing must
-remain source-visible, the include-expanded source is emitted with those directives intact. Its lifecycle facts still
-come from every optimized materialized variant. Logical Textile accesses use temporary, per-texture resource markers in
-the compiler copies so dead functions and dead branches disappear before lifetime analysis; those markers are never
-written to the emitted shader.
+Ordinary settings never create branch variants. Presence toggles become `#ifdef`-driven boolean bridges; numeric
+options remain references to their original Iris macros, so Iris preprocessing and the final OpenGL compiler can fold
+the optimized control flow. The emitted shader is the optimized SPIRV-Cross result, not the compiler copy or the
+include-expanded input.
 
-Standard stage suffixes determine standalone compiler stages. A suffixless `.glsl` Voxy hook declaring
-`voxy_emitFragment` is a host-integration fragment: without the host-provided parameter type, `#version`, and `main`, it
-cannot truthfully be optimized as an independent stage. Shadesmith preserves its include-expanded source, uses a
-conservative source-level lifecycle union, and records the intentional boundary in `boundaries.tsv`; other suffixless
-contracts fail instead of guessing. Clang-only branch materialization normalizes token paste before an opening
-delimiter, while the source-visible macro body remains exact. Only `SETTING_` conditionals are varied; host integration
-guards keep the current source macro environment, and an enumerated option domain does not create an impossible
-fallthrough variant.
+Preprocessor regions that cannot coexist in one legal module are structural. Settings are grouped only when they share
+structural dependencies, rows are deduplicated by ABI/capability signature, and each root is limited to 32 structural
+modules. If restored structural modules do not share one optimized semantic body, or an exact contract anchor cannot be
+recovered, Shadesmith records the reason and conservatively preserves the include-expanded root instead of guessing an
+AST merge. Suffixless host fragments without a standalone `#version`/`main` contract are also preserved explicitly.
 
-Original stage, uniform, resource-block, and dependent struct declarations are restored, including legal uniform
-initializers, when SPIR-V optimization removes them with dead code. Anonymous resource blocks are restored as anonymous
-blocks and temporary SPIRV-Cross instance prefixes are removed. Generated bindings and locations exist only in isolated
-compiler copies. Temporary bindings use OpenGL's independent sampler, image, atomic-counter, uniform-block, and
-storage-block namespaces. Samplers beyond glslang's portable 80-unit compiler limit reuse compiler-only bindings;
-linked ABI verification uses the restored stages together so compiler-only resources or
-declaration order cannot redefine the emitted interface. Workgroup and stage layouts remain strict ABI checks while
-constant built-in references may fold.
+`workGroups`, `workGroupsRender`, buffer and shadow host constants, buffer-format comment directives, and
+`DRAWBUFFERS`/`RENDERTARGETS` comments are source contracts: their original bytes and ordering are restored after the
+round trip. Local-size directives are likewise restored from the original source rather than accepted from
+SPIRV-Cross. The compiler-copy surrogate and specialization declarations never appear in final output.
 
-## Diagnostics
+Logical Textile accesses use temporary, per-texture resource markers in compiler copies so dead functions and dead
+branches disappear before lifecycle analysis. Those markers, compiler-only bindings, generated locations, and
+SPIRV-Cross constant-ID macros are stripped before output. Final validation checks the restored OpenGL ABI for every
+structural signature.
 
-Round-trip artifacts are retained beside the output directory in `.<output-name>.spirv`. Failures report the shader
-source, stage, pipeline phase, external tool, command logs, and artifact directory. Shader output is cleared only after
-all stages and variants have completed successfully, so a compile or tool failure cannot leave a partially transformed
-shader set. Standalone roots and their protected setting variants are processed with bounded parallelism after
-deterministic source ordering. If multiple roots fail, all submitted roots and variants finish, each keeps its own
-artifacts, and `failures.tsv` records every failure in source
-order with its stage, phase, command, and artifact path.
+## Cache, batching, and diagnostics
+
+Round-trip artifacts are retained beside the output directory in `.<output-name>.spirv`. Every failure keeps the exact
+expanded input, command, stdout/stderr, phase, stack trace, and artifact path; `failures.tsv` reports failures in stable
+source order. `boundaries.tsv` records preserved host/structural boundaries, `outputs.tsv` records final hashes and
+lifecycle data, and `performance.tsv` records module, cache, batching, process, concurrency, and elapsed-time metrics.
+
+Successful roots are published atomically to a content-addressed cache only after lifecycle resolution and every final
+output has succeeded. Cache identity binds the complete include-expanded source, stage, configuration, packaged
+Shadesmith implementation, hashes of the resolved external tools, and their full argument contracts. Compiler-copy and
+structural planning are deterministic products of that identity; a verified hit therefore bypasses planning as well as
+all external tools. Missing, incomplete, corrupt, or mismatched entries are recomputed, and failed runs publish nothing.
+
+The cold path uses at most ten external processes concurrently. It retains at most two shader-root plans at once and
+batches up to twenty independent Clang translation units per process; a failed batch is retried per input so diagnostics
+still identify the exact source. Repeated runs reuse verified final GLSL and lifecycle/signature metadata without
+starting Clang, glslang, spirv-opt, or spirv-cross.
