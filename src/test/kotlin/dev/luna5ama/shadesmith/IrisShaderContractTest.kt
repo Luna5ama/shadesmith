@@ -277,6 +277,44 @@ class IrisShaderContractTest {
     }
 
     @Test
+    fun restoresSettingSpecializationsAsFinalMacroBridges() = withWorkspace { workspace ->
+        val source = """
+            #version 460 compatibility
+            //#define SETTING_BOOL
+            #define SETTING_MODE 2 //[1 2]
+            layout(location = 0) out vec4 color;
+            void main() {
+            #ifdef SETTING_BOOL
+                color = vec4(float(SETTING_MODE));
+            #else
+                color = vec4(0.0);
+            #endif
+            }
+        """.trimIndent()
+        val plan = ShaderCompilerCopyPlanner.plan(source, "settings.fsh")
+        val module = ShaderCompilerCopyMaterializer(workspace.resolve("compiler-copy")).materialize(
+            "settings.fsh",
+            ShaderStage.FRAGMENT,
+            plan,
+            TextureAccessProbe(source, emptyList(), TextureAccess()),
+        )
+
+        val result = SpirvOptimizer(workspace.resolve("optimizer")).optimize(
+            SpirvOptimizationRequest("settings.fsh", ShaderStage.FRAGMENT, source, listOf(module)),
+        )
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode)
+        assertContains(result.source, "//#define SETTING_BOOL")
+        assertContains(result.source, "#ifdef SETTING_BOOL")
+        assertContains(result.source, "#define SM_SETTING_BOOL true")
+        assertContains(result.source, "#define SM_SETTING_MODE SETTING_MODE")
+        assertContains(result.source, "if (SM_SETTING_BOOL)")
+        assertTrue(result.source.indexOf("//#define SETTING_BOOL") < result.source.indexOf("#ifdef SETTING_BOOL"))
+        assertFalse("SPIRV_CROSS_CONSTANT_ID_" in result.source)
+        assertFalse("constant_id" in result.source)
+    }
+
+    @Test
     fun preservesContractBytesAndReportsMissingOrAmbiguousAnchors() {
         val exactOption = "//#define SETTING_EXACT\r\n"
         val source = "#version 460 compatibility\r\n$exactOption/* RENDERTARGETS:0 */\r\nvoid main() {}\r\n"

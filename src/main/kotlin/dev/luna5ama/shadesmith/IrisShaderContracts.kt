@@ -88,8 +88,24 @@ internal data class IrisShaderContractPlan(
     private val compilerPrelude: String,
     private val compilerSettings: List<ShaderSetting>,
 ) {
+    val localSizeSpecializationIds: Set<Int>
+        get() = localSize?.specializationIds?.values.orEmpty().toSet()
+
     val structuralReason: String?
         get() = structuralIssues.takeIf { it.isNotEmpty() }?.joinToString("; ") { it.reason }
+
+    fun withRestorationContracts(restorationContracts: List<IrisSourceContractSlice>): IrisShaderContractPlan {
+        return copy(contracts = restorationContracts)
+    }
+
+    fun stripCompilerArtifacts(source: String): String {
+        var result = normalizeCompilerText(source)
+        if (localSize != null) result = LOCAL_SIZE_LAYOUT.replace(result, "")
+        if (contracts.any { it.kind == IrisSourceContractKind.EXTENSION }) {
+            result = EXTENSION_LINE.replace(result, "")
+        }
+        return normalizeCompilerText(result)
+    }
 
     fun forStructuralModule(
         source: String,
@@ -122,8 +138,7 @@ internal data class IrisShaderContractPlan(
     }
 
     fun restore(decompiledSource: String): IrisContractRestoration {
-        var result = normalizeCompilerText(decompiledSource)
-        if (localSize != null) result = LOCAL_SIZE_LAYOUT.replace(result, "")
+        var result = stripCompilerArtifacts(decompiledSource)
         val version = VERSION_LINE.find(result)
             ?: return IrisContractRestoration.StructuralPreservation(
                 "$sourceName: optimized GLSL has no #version anchor for Iris contract restoration",
@@ -744,7 +759,7 @@ private data class ContractConditionalGroup(
     var range: IntRange = IntRange.EMPTY,
 )
 
-private data class LocatedAnchor(val anchor: IrisSourceAnchor, val range: IntRange)
+internal data class LocatedAnchor(val anchor: IrisSourceAnchor, val range: IntRange)
 
 private class ContractLineMap(private val source: String) {
     private val starts = buildList {
@@ -1135,7 +1150,7 @@ private fun identifierOccurrences(source: String, name: String, lexical: Contrac
     return identifierRegex(name).findAll(source).filter { lexical.isCode(it.range.first) }.map { it.range.first }.toList()
 }
 
-private fun findStableAnchors(source: String): List<LocatedAnchor> {
+internal fun findStableAnchors(source: String): List<LocatedAnchor> {
     val lexical = ContractLexicalMap(source)
     val result = mutableListOf<LocatedAnchor>()
     VERSION_LINE.find(source)?.let { result += LocatedAnchor(IrisSourceAnchor(IrisAnchorKind.VERSION, "version"), it.range) }
@@ -1362,6 +1377,7 @@ private val CONDITIONAL_CONTRACT_KINDS = setOf(
     IrisSourceContractKind.CONDITIONAL_CONTRACT,
 )
 private val VERSION_LINE = "(?m)^[\\t ]*#version[^\\r\\n]*".toRegex()
+private val EXTENSION_LINE = "(?m)^[\\t ]*#extension\\b[^\\r\\n]*(?:\\r\\n|\\n|\\r|$)".toRegex()
 private val LOCAL_SIZE_LAYOUT =
     "(?m)^[\\t ]*layout\\s*\\(([^)]*\\blocal_size_[xyz](?:_id)?\\b[^)]*)\\)\\s*in\\s*;[^\\r\\n]*(?:\\r\\n|\\n|\\r|$)".toRegex()
 private val LOCAL_SIZE_ITEM = "local_size_([xyz])\\s*=\\s*(.+)".toRegex()

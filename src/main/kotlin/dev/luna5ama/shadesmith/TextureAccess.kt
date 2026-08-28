@@ -22,6 +22,7 @@ internal enum class TextureMarkerKind {
 
 internal data class TextureResourceMarker(
     val identifier: String,
+    val sourceIdentifier: String,
     val texture: String,
     val access: TextureMarkerAccess,
     val kind: TextureMarkerKind,
@@ -42,6 +43,7 @@ internal object TextureAccessAnalyzer {
 
         calls.sortedWith(compareBy(LogicalTextureCall::texture, LogicalTextureCall::operation)).forEach { call ->
             val format = config.screen[call.texture] ?: config.fixed[call.texture]?.format ?: return@forEach
+            val sourceIdentifier = sourceResourceIdentifier(probeSource, call) ?: return@forEach
             val access = call.operation.markerAccess
             val key = Triple(call.texture, access, call.operation.markerKind)
             val marker = markers.getOrPut(key) {
@@ -49,6 +51,7 @@ internal object TextureAccessAnalyzer {
                     "${call.operation.markerKind.name.lowercase()}_${call.texture}"
                 TextureResourceMarker(
                     identifier = uniqueIdentifier(baseIdentifier, source, markers.values),
+                    sourceIdentifier = sourceIdentifier,
                     texture = call.texture,
                     access = access,
                     kind = call.operation.markerKind,
@@ -110,6 +113,24 @@ internal object TextureAccessAnalyzer {
         return TextureAccess(reads, writes)
     }
 
+    fun restoreProbeResources(
+        source: String,
+        markers: List<TextureResourceMarker>,
+    ): String {
+        var result = source
+        markers.sortedByDescending { it.identifier.length }.forEach { marker ->
+            val declaration = Regex(
+                "(?m)^[\\t ]*(?:layout\\s*\\([^\\r\\n)]*\\)\\s*)?uniform\\b[^;\\r\\n]*" +
+                    "\\b${Regex.escape(marker.identifier)}\\b[^;\\r\\n]*;[^\\r\\n]*(?:\\r\\n|\\n|\\r|$)",
+            )
+            val declarations = declaration.findAll(result).toList()
+            require(declarations.size <= 1) { "ambiguous probe declaration ${marker.identifier}" }
+            declarations.singleOrNull()?.let { result = result.removeRange(it.range) }
+            result = identifierRegex(marker.identifier).replace(result, marker.sourceIdentifier)
+        }
+        return result.trimEnd() + "\n"
+    }
+
     private fun logicalCalls(source: String): Set<LogicalTextureCall> {
         return LOGICAL_ACCESS_REGEX.findAll(source)
             .filterNot { source.isPreprocessorLine(it.range.first) }
@@ -134,6 +155,19 @@ internal object TextureAccessAnalyzer {
         )
         val match = macro.find(source) ?: return null
         return source.replaceRange(match.range, match.groupValues[1] + markerIdentifier)
+    }
+
+    private fun sourceResourceIdentifier(source: String, call: LogicalTextureCall): String? {
+        val macro = Regex(
+            "(?m)^[ \\t]*#[ \\t]*define[ \\t]+${Regex.escape(call.texture)}_" +
+                "${Regex.escape(call.operation.sourceName)}\\([^\\r\\n]*\\)[ \\t]+" +
+                "[A-Za-z_][A-Za-z0-9_]*\\([ \\t]*([A-Za-z_][A-Za-z0-9_]*)",
+        )
+        return macro.find(source)?.groupValues?.get(1)
+    }
+
+    private fun identifierRegex(name: String): Regex {
+        return "(?<![A-Za-z0-9_])${Regex.escape(name)}(?![A-Za-z0-9_])".toRegex()
     }
 
     private fun TextureResourceMarker.declaration(config: Config): String {

@@ -47,7 +47,11 @@ class PipelineIntegrationTest {
 
         val emittedBranchShader = output.resolve("composite2.csh").readText()
         assertContains(emittedBranchShader, "#ifdef SETTING_BRANCH")
-        assertContains(emittedBranchShader, "#define transient_branch_sample(x)")
+        assertContains(emittedBranchShader, "#define SM_SETTING_BRANCH true")
+        assertContains(emittedBranchShader, "if (SM_SETTING_BRANCH)")
+        assertFalse("#define transient_branch_sample(x)" in emittedBranchShader)
+        assertFalse("SPIRV_CROSS_CONSTANT_ID_" in emittedBranchShader)
+        assertFalse("constant_id" in emittedBranchShader)
         assertFalse("shadesmith_resource_" in emittedBranchShader)
         assertContains(properties.readText(), "image.uimg_rgba16f=usam_rgba16f RGBA RGBA16F HALF_FLOAT false true 1.0 1.0")
         assertEquals("3", performance.getValue("validated_modules"))
@@ -57,6 +61,10 @@ class PipelineIntegrationTest {
         assertEquals(ShaderProcessingMode.PRESERVED_HOST_INTEGRATION, hostFragment.processingMode)
         assertEquals(hostFragment.file.code, output.resolve("voxy_hook.glsl").readText())
         assertContains(artifacts.resolve("boundaries.tsv").readText(), "voxy_hook.glsl\tfrag")
+        val outputs = artifacts.resolve("outputs.tsv").readText()
+        assertContains(outputs, "composite2.csh\tcomp\tSPIRV_ROUND_TRIP")
+        assertContains(outputs, "SETTING_BRANCH")
+        assertContains(outputs, "transient_branch")
     }
 
     @Test

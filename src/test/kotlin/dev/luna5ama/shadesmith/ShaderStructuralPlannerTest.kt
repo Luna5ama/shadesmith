@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -177,7 +178,122 @@ class ShaderStructuralPlannerTest {
             assertContains(structural.module.source, "SM_SETTING_SLICE_SAMPLES")
             assertContains(structural.module.source, "SM_DERIVED_LOOP_COUNT")
         }
-        optimizeAll(workspace, source, ShaderStage.COMPUTE, finalized.map { it.module })
+        val result = SpirvOptimizer(workspace.resolve("spirv")).optimize(
+            SpirvOptimizationRequest(
+                "EpipolarScattering.csh",
+                ShaderStage.COMPUTE,
+                source,
+                finalized.map { it.module },
+                planned,
+            ),
+        )
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertContains(result.source, "layout(local_size_x = 1, local_size_y = WORK_GROUP_SIZE) in;")
+        assertFalse("local_size_y_id" in result.source)
+        assertFalse("SPIRV_CROSS_CONSTANT_ID_" in result.source)
+        assertFalse("constant_id" in result.source)
+        assertEquals(2, result.finalValidationInvocations.size)
+    }
+
+    @Test
+    fun equalStructuralBodiesRestoreExactIslandAndRecompileEverySignature() = withWorkspace { workspace ->
+        val source = equalStructuralBodies()
+        val result = optimizeStructural(workspace, "equal.csh", source, ShaderStage.COMPUTE)
+        val exactIsland = """
+            #ifdef SETTING_WIDE
+            layout(rgba16f, binding = 0) uniform image2D target;
+            #else
+            layout(r32f, binding = 0) uniform image2D target;
+            #endif
+        """.trimIndent()
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertContains(result.source, exactIsland)
+        assertContains(result.source, "//#define SETTING_WIDE")
+        assertContains(result.source, "const ivec3 workGroups = ivec3(1, 1, 1);")
+        assertFalse("SPIRV_CROSS_CONSTANT_ID_" in result.source)
+        assertFalse("constant_id" in result.source)
+        assertEquals(2, result.structuralSignatures.size)
+        assertEquals(2, result.finalValidationInvocations.size)
+    }
+
+    @Test
+    fun mixedStructuralAndOrdinaryUsesRestoreOnlyAbiIsland() = withWorkspace { workspace ->
+        val source = mixedStructuralAndOrdinaryUses()
+        val result = optimizeStructural(workspace, "mixed.csh", source, ShaderStage.COMPUTE)
+        val exactIsland = """
+            #ifdef SETTING_WIDE
+            layout(rgba16f, binding = 0) uniform image2D target;
+            #else
+            layout(r32f, binding = 0) uniform image2D target;
+            #endif
+        """.trimIndent()
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertContains(result.source, exactIsland)
+        assertContains(result.source, "if (SM_SETTING_WIDE)")
+        assertFalse("int weight = 0;\n#ifdef SETTING_WIDE" in result.source)
+        assertEquals(2, result.finalValidationInvocations.size)
+    }
+
+    @Test
+    fun conditionalExtensionContractIsRestoredAndValidatedForEveryCapabilitySignature() = withWorkspace { workspace ->
+        val source = extensionFixture()
+        val result = optimizeStructural(workspace, "extension.csh", source, ShaderStage.COMPUTE)
+        val exactContract = """
+            #ifdef SETTING_EXTENSION
+            #extension GL_KHR_shader_subgroup_basic : require
+            #endif
+        """.trimIndent()
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertContains(result.source, exactContract)
+        assertEquals(2, result.structuralSignatures.size)
+        assertEquals(2, result.finalValidationInvocations.size)
+    }
+
+    @Test
+    fun divergentStructuralBodiesPreserveOriginalSourceWithDeterministicReason() = withWorkspace { workspace ->
+        val source = resourceFixture()
+        val first = optimizeStructural(workspace.resolve("first"), "divergent.csh", source, ShaderStage.COMPUTE)
+        val second = optimizeStructural(workspace.resolve("second"), "divergent.csh", source, ShaderStage.COMPUTE)
+
+        assertEquals(SpirvEmissionMode.PRESERVED_SOURCE, first.emissionMode)
+        assertEquals(source, first.source)
+        assertContains(first.fallbackReason.orEmpty(), "optimized structural semantic bodies diverged")
+        assertEquals(first.fallbackReason, second.fallbackReason)
+        assertTrue(first.modules.size >= 2)
+        assertTrue(first.modules.all { Files.isRegularFile(it.validationSpirv) })
+    }
+
+    @Test
+    fun nestedStructuralIslandRetainsSameAbiRowsAndUnionsLifecycleBeforeExactFallback() = withWorkspace { workspace ->
+        val source = nestedLeakedLocal()
+        val base = ShaderCompilerCopyPlanner.plan(source, "nested.csh")
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE),
+        ).plan
+        val materialized = materialize(workspace, source, planned)
+        val structural = assertIs<ShaderStructuralMaterializationResult.Materialized>(
+            planned.deduplicate(materialized),
+        ).modules
+        assertEquals(2, structural.size)
+        assertEquals(1, structural.map { it.signature }.toSet().size)
+        val modules = structural.mapIndexed { index, module ->
+            module.module.copy(conservativeAccess = TextureAccess(reads = setOf("branch_$index")))
+        }
+        val result = SpirvOptimizer(workspace.resolve("spirv")).optimize(
+            SpirvOptimizationRequest("nested.csh", ShaderStage.COMPUTE, source, modules, planned),
+        )
+
+        assertEquals(SpirvEmissionMode.PRESERVED_SOURCE, result.emissionMode)
+        assertEquals(source, result.source)
+        assertContains(result.fallbackReason.orEmpty(), "structural island is nested inside executable code")
+        assertEquals(2, result.modules.size)
+        assertEquals(
+            setOf("branch_0", "branch_1"),
+            result.modules.map { it.textureAccess }.fold(TextureAccess(), TextureAccess::plus).reads,
+        )
     }
 
     @Test
@@ -254,7 +370,8 @@ class ShaderStructuralPlannerTest {
         assertContains(first, "domains=")
         assertContains(first, "nodes:")
         assertContains(first, "coverage assignments:")
-        assertContains(first, "distinct signatures:")
+        assertContains(first, "retained structural modules:")
+        assertContains(first, "compiler_sha256=")
         repeat(6) { assertContains(first, "SETTING_$it") }
     }
 
@@ -283,6 +400,27 @@ class ShaderStructuralPlannerTest {
         assertTrue(result.modules.all { Files.isRegularFile(it.validationSpirv) })
     }
 
+    private fun optimizeStructural(
+        workspace: Path,
+        name: String,
+        source: String,
+        stage: ShaderStage,
+    ): SpirvOptimizationResult {
+        val base = ShaderCompilerCopyPlanner.plan(source, name)
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(base, stage),
+            name,
+        ).plan
+        val materialized = materialize(workspace, source, planned)
+        val modules = assertIs<ShaderStructuralMaterializationResult.Materialized>(
+            planned.deduplicate(materialized),
+            name,
+        ).modules.map { it.module }
+        return SpirvOptimizer(workspace.resolve("spirv")).optimize(
+            SpirvOptimizationRequest(name, stage, source, modules, planned),
+        )
+    }
+
     private fun independentResources(): String = """
         #version 460 compatibility
         //#define SETTING_A
@@ -305,6 +443,54 @@ class ShaderStructuralPlannerTest {
         #else
             int runtimeValue = 0;
         #endif
+        }
+    """.trimIndent()
+
+    private fun equalStructuralBodies(): String = """
+        #version 460 compatibility
+        //#define SETTING_WIDE
+        #ifdef SETTING_WIDE
+        layout(rgba16f, binding = 0) uniform image2D target;
+        #else
+        layout(r32f, binding = 0) uniform image2D target;
+        #endif
+        layout(local_size_x = 1) in;
+        const ivec3 workGroups = ivec3(1, 1, 1);
+        void main() { imageStore(target, ivec2(0), vec4(1.0)); }
+    """.trimIndent()
+
+    private fun nestedLeakedLocal(): String = """
+        #version 460 compatibility
+        //#define SETTING_LOCAL
+        layout(local_size_x = 1) in;
+        layout(std430, binding = 0) buffer Output { int value; };
+        void main() {
+        #ifdef SETTING_LOCAL
+            int selected = 1;
+        #else
+            int selected = 2;
+        #endif
+            value = selected;
+        }
+    """.trimIndent()
+
+    private fun mixedStructuralAndOrdinaryUses(): String = """
+        #version 460 compatibility
+        //#define SETTING_WIDE
+        #ifdef SETTING_WIDE
+        layout(rgba16f, binding = 0) uniform image2D target;
+        #else
+        layout(r32f, binding = 0) uniform image2D target;
+        #endif
+        layout(local_size_x = 1) in;
+        void main() {
+            int weight = 0;
+        #ifdef SETTING_WIDE
+            weight += 1;
+        #else
+            weight += 2;
+        #endif
+            imageStore(target, ivec2(0), vec4(weight));
         }
     """.trimIndent()
 

@@ -21,6 +21,11 @@ internal data class OptimizedShaderFile(
     val textureAccess: TextureAccess,
     val moduleCount: Int,
     val fallbackReason: String? = null,
+    val specializationSettings: List<String> = emptyList(),
+    val structuralSignatures: List<ShaderStructuralSignature> = emptyList(),
+    val processCount: Int = 0,
+    val finalValidationProcessCount: Int = 0,
+    val cacheHits: Int = 0,
 )
 
 internal data class ShaderPipelineFailure(
@@ -80,6 +85,7 @@ internal class ShaderPipeline(
         this.artifactDirectory.createDirectories()
         Files.deleteIfExists(this.artifactDirectory.resolve("failures.tsv"))
         Files.deleteIfExists(this.artifactDirectory.resolve("boundaries.tsv"))
+        Files.deleteIfExists(this.artifactDirectory.resolve("outputs.tsv"))
         Files.deleteIfExists(this.artifactDirectory.resolve("performance.tsv"))
     }
 
@@ -130,6 +136,7 @@ internal class ShaderPipeline(
 
         val optimized = work.filterIsInstance<ShaderWork.Success>().map { it.result }
         writeBoundaryManifest(optimized)
+        writeOutputManifest(optimized)
         writePerformanceManifest(orderedFiles.size, optimized, System.nanoTime() - startedAt)
         return optimized
     }
@@ -161,15 +168,7 @@ internal class ShaderPipeline(
                     source = file.code,
                 ),
             )
-            return OptimizedShaderFile(
-                file = file.copy(code = result.source),
-                stage = entryPoint.stage,
-                processingMode = ShaderProcessingMode.SPIRV_ROUND_TRIP,
-                textureAccess = result.modules
-                    .map { it.textureAccess }
-                    .fold(TextureAccess(), TextureAccess::plus),
-                moduleCount = result.modules.size,
-            )
+            return optimizedFile(file, entryPoint.stage, result)
         }
         val probe = TextureAccessAnalyzer.createProbe(file.code, ioContext.config)
         val toolCapabilities = capabilities
@@ -179,6 +178,7 @@ internal class ShaderPipeline(
             toolCapabilities.localSizeId,
             toolCapabilities.diagnostic,
         )
+        var structuralPlan: ShaderStructuralCoveragePlan? = null
         val modules = if (!ShaderStructuralPlanner.requiresPlanning(plan)) {
             listOf(materializer.materialize(sourceName, entryPoint.stage, plan, probe))
         } else {
@@ -201,6 +201,7 @@ internal class ShaderPipeline(
                             return preservedStructural(file, entryPoint.stage, finalized.reason)
                         }
                         is ShaderStructuralMaterializationResult.Materialized -> {
+                            structuralPlan = structural.plan
                             finalized.modules.map { it.module }
                         }
                     }
@@ -213,16 +214,35 @@ internal class ShaderPipeline(
                 stage = entryPoint.stage,
                 source = file.code,
                 compilerModules = modules,
+                structuralPlan = structuralPlan,
             ),
         )
+        return optimizedFile(file, entryPoint.stage, result)
+    }
+
+    private fun optimizedFile(
+        file: ShaderFile,
+        stage: ShaderStage,
+        result: SpirvOptimizationResult,
+    ): OptimizedShaderFile {
         return OptimizedShaderFile(
             file = file.copy(code = result.source),
-            stage = entryPoint.stage,
-            processingMode = ShaderProcessingMode.SPIRV_ROUND_TRIP,
+            stage = stage,
+            processingMode = if (result.emissionMode == SpirvEmissionMode.OPTIMIZED) {
+                ShaderProcessingMode.SPIRV_ROUND_TRIP
+            } else {
+                ShaderProcessingMode.PRESERVED_STRUCTURAL
+            },
             textureAccess = result.modules
                 .map { it.textureAccess }
                 .fold(TextureAccess(), TextureAccess::plus),
             moduleCount = result.modules.size,
+            fallbackReason = result.fallbackReason,
+            specializationSettings = result.specializationSettings,
+            structuralSignatures = result.structuralSignatures,
+            processCount = result.processCount,
+            finalValidationProcessCount = result.finalValidationInvocations.size,
+            cacheHits = result.cacheHits,
         )
     }
 
@@ -302,6 +322,41 @@ internal class ShaderPipeline(
         artifactDirectory.resolve("boundaries.tsv").writeText(content)
     }
 
+    private fun writeOutputManifest(files: List<OptimizedShaderFile>) {
+        val content = buildString {
+            appendLine(
+                "source\tstage\tdisposition\tsource_sha256\tsettings\tstructural_signatures\tfallback\t" +
+                    "modules\tprocesses\tcache_hits\tlifecycle_reads\tlifecycle_writes",
+            )
+            files.forEach { file ->
+                append(sourceName(file.file).asTsvField())
+                append('\t')
+                append(file.stage.glslangName)
+                append('\t')
+                append(file.processingMode.name)
+                append('\t')
+                append(sha256(file.file.code))
+                append('\t')
+                append(file.specializationSettings.joinToString(",").asTsvField())
+                append('\t')
+                append(file.structuralSignatures.joinToString(" || ") { it.canonical.replace('\n', ' ') }.asTsvField())
+                append('\t')
+                append(file.fallbackReason.orEmpty().asTsvField())
+                append('\t')
+                append(file.moduleCount)
+                append('\t')
+                append(file.processCount)
+                append('\t')
+                append(file.cacheHits)
+                append('\t')
+                append(file.textureAccess.reads.sorted().joinToString(",").asTsvField())
+                append('\t')
+                appendLine(file.textureAccess.writes.sorted().joinToString(",").asTsvField())
+            }
+        }
+        artifactDirectory.resolve("outputs.tsv").writeText(content)
+    }
+
     private fun writePerformanceManifest(
         requestedRoots: Int,
         files: List<OptimizedShaderFile>,
@@ -314,6 +369,10 @@ internal class ShaderPipeline(
             appendLine("requested_roots\t$requestedRoots")
             appendLine("completed_roots\t${files.size}")
             appendLine("validated_modules\t${files.sumOf { it.moduleCount }}")
+            appendLine("ordinary_setting_variants\t0")
+            appendLine("shader_processes\t${files.sumOf { it.processCount }}")
+            appendLine("final_validation_processes\t${files.sumOf { it.finalValidationProcessCount }}")
+            appendLine("cache_hits\t${files.sumOf { it.cacheHits }}")
             appendLine("materialized_compiler_modules\t${snapshot.compilerModules}")
             appendLine("clang_processes\t${snapshot.clangProcesses}")
             appendLine("glslang_processes\t${snapshot.glslangProcesses}")

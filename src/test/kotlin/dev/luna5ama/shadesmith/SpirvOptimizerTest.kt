@@ -287,8 +287,9 @@ class SpirvOptimizerTest {
             executor.shutdownNow()
         }
 
-        assertEquals(SpirvEmissionMode.PRESERVED_COMPILER_COPY, result.emissionMode)
+        assertEquals(SpirvEmissionMode.PRESERVED_SOURCE, result.emissionMode)
         assertEquals(original, result.source)
+        assertContains(result.fallbackReason.orEmpty(), "multiple compiler modules have no structural restoration plan")
         assertContains(result.source, "#if defined(SETTING_TINT)")
         assertContains(result.source, "#define APPLY_TINT(value)")
         assertContains(result.source, "//#define SETTING_TINT")

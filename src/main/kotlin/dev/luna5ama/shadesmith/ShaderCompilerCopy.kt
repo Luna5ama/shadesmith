@@ -1361,6 +1361,24 @@ internal class ShaderCompilerCopyMaterializer(
         val source = requireNotNull(plan.compilerSource) {
             "$sourceName has structural compiler-copy blockers: ${plan.structuralBlockers.joinToString { it.reason }}"
         }
+        val materialized = materializeSource(sourceName, stage, source, moduleName)
+        return SpirvCompilerModule(
+            name = moduleName,
+            source = materialized,
+            resourceMarkers = probe.markers,
+            conservativeAccess = probe.conservativeAccess,
+            irisContracts = plan.irisContracts,
+            settings = plan.settings,
+        )
+    }
+
+    fun materializeSource(
+        sourceName: String,
+        stage: ShaderStage,
+        source: String,
+        moduleName: String,
+    ): String {
+        require(moduleName.isNotBlank()) { "compiler module name cannot be blank" }
         val artifactDirectory = workingDirectory.resolve(
             "${safeName(sourceName)}-${stage.glslangName}-${safeName(moduleName)}-${shortHash(source)}",
         )
@@ -1410,13 +1428,7 @@ internal class ShaderCompilerCopyMaterializer(
         val materialized = restoreGlslDirectives(output.substring(contentStart, contentEnd), protected.namespace)
         outputPath.writeText(materialized)
         metrics?.recordCompilerModules(1)
-        return SpirvCompilerModule(
-            name = moduleName,
-            source = materialized,
-            resourceMarkers = probe.markers,
-            conservativeAccess = probe.conservativeAccess,
-            irisContracts = plan.irisContracts,
-        )
+        return materialized
     }
 
     private fun failure(

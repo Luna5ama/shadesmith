@@ -138,7 +138,22 @@ internal class OpenGlShaderPatcher {
     }
 
     fun restore(decompiledSource: String, patch: OpenGlShaderPatch): String {
-        var restored = normalizeOutput(decompiledSource)
+        val core = restoreCore(decompiledSource, patch)
+        val restored = when (val restoration = restoreContracts(core, patch)) {
+            is IrisContractRestoration.Restored -> restoration.source
+            is IrisContractRestoration.StructuralPreservation -> fail(
+                patch.sourceName,
+                patch.stage,
+                null,
+                restoration.reason,
+            )
+        }
+        validateContract(restored, patch)
+        return restored.trimEnd() + "\n"
+    }
+
+    fun restoreCore(decompiledSource: String, patch: OpenGlShaderPatch): String {
+        var restored = normalizeOutput(patch.irisContracts.stripCompilerArtifacts(decompiledSource))
         patch.generatedLayouts.forEach { generated ->
             val declarations = parseDeclarations(restored)
             val declaration = declarations.singleOrNull { it.key == generated.key }
@@ -155,9 +170,11 @@ internal class OpenGlShaderPatcher {
         }
         restored = restoreDeclarations(restored, patch)
         restored = restoreMissingQualifiers(restored, patch)
-        restored = restoreSourceContracts(restored, patch)
-        validateContract(restored, patch)
         return restored.trimEnd() + "\n"
+    }
+
+    fun restoreContracts(source: String, patch: OpenGlShaderPatch): IrisContractRestoration {
+        return patch.irisContracts.restore(source)
     }
 
     fun validateContract(restoredSource: String, patch: OpenGlShaderPatch) {
@@ -381,18 +398,6 @@ internal class OpenGlShaderPatcher {
             "layout(${remaining.joinToString(", ") { it.original }}) "
         }
         return source.replaceRange(layoutRange, replacement)
-    }
-
-    private fun restoreSourceContracts(source: String, patch: OpenGlShaderPatch): String {
-        return when (val restoration = patch.irisContracts.restore(source)) {
-            is IrisContractRestoration.Restored -> restoration.source
-            is IrisContractRestoration.StructuralPreservation -> fail(
-                patch.sourceName,
-                patch.stage,
-                null,
-                restoration.reason,
-            )
-        }
     }
 
     private fun restoreDeclarations(source: String, patch: OpenGlShaderPatch): String {

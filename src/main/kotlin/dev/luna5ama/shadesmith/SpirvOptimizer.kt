@@ -16,6 +16,9 @@ internal data class SpirvCompilerModule(
     val resourceMarkers: List<TextureResourceMarker> = emptyList(),
     val conservativeAccess: TextureAccess = TextureAccess(),
     val irisContracts: IrisShaderContractPlan? = null,
+    val settings: List<ShaderSetting> = emptyList(),
+    val structuralSignature: ShaderStructuralSignature? = null,
+    val structuralAssignment: Map<String, String> = emptyMap(),
 )
 
 internal data class SpirvOptimizationRequest(
@@ -23,17 +26,25 @@ internal data class SpirvOptimizationRequest(
     val stage: ShaderStage,
     val source: String,
     val compilerModules: List<SpirvCompilerModule> = emptyList(),
+    val structuralPlan: ShaderStructuralCoveragePlan? = null,
 )
 
 internal enum class SpirvEmissionMode {
     OPTIMIZED,
-    PRESERVED_COMPILER_COPY,
+    PRESERVED_SOURCE,
 }
 
 internal data class SpirvModuleResult(
     val name: String,
     val source: String,
-    val semanticSource: String,
+    val coreSource: String,
+    val bridgeSettings: List<ShaderSetting>,
+    val structuralSignature: ShaderStructuralSignature?,
+    val structuralAssignment: Map<String, String>,
+    val irisContracts: IrisShaderContractPlan,
+    val originalContract: ShaderAbiContract,
+    val generatedLayouts: List<GeneratedShaderLayout>,
+    val restorationFailure: String?,
     val textureAccess: TextureAccess,
     val artifactDirectory: Path,
     val originalSpirv: Path,
@@ -51,9 +62,17 @@ internal data class SpirvModuleResult(
 internal data class SpirvOptimizationResult(
     val source: String,
     val emissionMode: SpirvEmissionMode,
+    val fallbackReason: String?,
+    val specializationSettings: List<String>,
+    val structuralSignatures: List<ShaderStructuralSignature>,
+    val finalValidationInvocations: List<SpirvInvocation>,
+    val cacheHits: Int,
     val artifactDirectory: Path,
     val modules: List<SpirvModuleResult>,
-)
+) {
+    val processCount: Int
+        get() = modules.sumOf { it.invocations.size } + finalValidationInvocations.size
+}
 
 internal enum class SpirvRoundTripPhase(val displayName: String) {
     PROTECT("preprocessor protection"),
@@ -131,15 +150,33 @@ internal class SpirvOptimizer(
             listOf(SpirvCompilerModule("main", request.source))
         }
         val results = optimizeModules(request, modules, requestDirectory, explicitModules)
-        val emittedSource = if (explicitModules) request.source else results.single().source
-        requestDirectory.resolve(if (explicitModules) "preserved.glsl" else "optimized.glsl").writeText(emittedSource)
+        val emission = phase(request, SpirvRoundTripPhase.RESTORE, requestDirectory) {
+            SpirvFinalEmitter.emit(request, results)
+        }
+        val finalValidationInvocations = if (
+            emission.mode == SpirvEmissionMode.OPTIMIZED && request.structuralPlan != null
+        ) {
+            validateFinalStructuralSource(
+                request,
+                emission.source,
+                results,
+                request.structuralPlan,
+                requestDirectory,
+            )
+        } else {
+            emptyList()
+        }
+        requestDirectory.resolve(
+            if (emission.mode == SpirvEmissionMode.OPTIMIZED) "optimized.glsl" else "preserved.glsl",
+        ).writeText(emission.source)
         return SpirvOptimizationResult(
-            source = emittedSource,
-            emissionMode = if (explicitModules) {
-                SpirvEmissionMode.PRESERVED_COMPILER_COPY
-            } else {
-                SpirvEmissionMode.OPTIMIZED
-            },
+            source = emission.source,
+            emissionMode = emission.mode,
+            fallbackReason = emission.fallbackReason,
+            specializationSettings = modules.flatMap { it.settings }.map { it.name }.distinct().sorted(),
+            structuralSignatures = results.mapNotNull { it.structuralSignature }.distinct(),
+            finalValidationInvocations = finalValidationInvocations,
+            cacheHits = 0,
             artifactDirectory = requestDirectory,
             modules = results,
         )
@@ -233,42 +270,134 @@ internal class SpirvOptimizer(
         }
 
         val semanticSource = decompiledPath.readText()
-        val restored = phase(request, SpirvRoundTripPhase.RESTORE, moduleDirectory, moduleSourceName) {
-            patcher.restore(semanticSource, patch)
+        val compilerCore = phase(request, SpirvRoundTripPhase.RESTORE, moduleDirectory, moduleSourceName) {
+            patcher.restoreCore(semanticSource, patch)
+        }
+        val bridge = phase(request, SpirvRoundTripPhase.RESTORE, moduleDirectory, moduleSourceName) {
+            SpirvSettingBridge.restoreCrossOutput(
+                compilerCore,
+                module.settings,
+                patch.irisContracts.localSizeSpecializationIds,
+            )
+        }
+        val internalCoreSource: String
+        val bridgeSettings: List<ShaderSetting>
+        var restorationFailure: String? = null
+        when (bridge) {
+            is SpirvSettingBridgeRestoration.Restored -> {
+                internalCoreSource = bridge.source
+                bridgeSettings = bridge.settings
+            }
+            is SpirvSettingBridgeRestoration.Preserved -> {
+                internalCoreSource = compilerCore
+                bridgeSettings = emptyList()
+                restorationFailure = bridge.reason
+            }
+        }
+        val contractSource = if (restorationFailure == null) {
+            when (val contracts = patcher.restoreContracts(internalCoreSource, patch)) {
+                is IrisContractRestoration.Restored -> contracts.source.also {
+                    patcher.validateContract(it, patch)
+                }
+                is IrisContractRestoration.StructuralPreservation -> {
+                    restorationFailure = contracts.reason
+                    internalCoreSource
+                }
+            }
+        } else {
+            internalCoreSource
+        }
+        val restored = if (restorationFailure == null) {
+            when (
+                val bridges = SpirvSettingBridge.placeAfterDefinitions(
+                    contractSource,
+                    bridgeSettings,
+                    patch.irisContracts.contracts,
+                )
+            ) {
+                is SpirvSettingBridgeRestoration.Restored -> bridges.source
+                is SpirvSettingBridgeRestoration.Preserved -> {
+                    restorationFailure = bridges.reason
+                    contractSource
+                }
+            }
+        } else {
+            contractSource
         }
         val restoredPath = moduleDirectory.resolve("restored.glsl")
         restoredPath.writeText(restored)
 
-        val validationPatch = phase(request, SpirvRoundTripPhase.VALIDATE, moduleDirectory, moduleSourceName) {
-            val restoredProtection = PreprocessorProtection.protectGeneratedCompilerSource(restored, moduleSourceName)
-            patcher.patch(
-                restoredProtection,
-                request.stage,
-                patch.generatedLayouts,
-                patch.irisContracts,
+        val validationCompilerSource = if (restorationFailure == null) {
+            val compilerRestored = SpirvSettingBridge.restoreCompilerDeclarations(
+                restored,
+                bridgeSettings,
+                emptyMap(),
+                emptySet(),
             )
-        }
-        if (validationPatch.generatedLayouts.toSet() != patch.generatedLayouts.toSet()) {
-            fail(
-                request,
-                SpirvRoundTripPhase.VALIDATE,
-                moduleDirectory,
-                "generated OpenGL layout mapping changed after restoration",
-                moduleSourceName,
-            )
+            val validationPatch = phase(request, SpirvRoundTripPhase.VALIDATE, moduleDirectory, moduleSourceName) {
+                val restoredProtection = PreprocessorProtection.protectGeneratedCompilerSource(
+                    compilerRestored,
+                    moduleSourceName,
+                )
+                patcher.patch(
+                    restoredProtection,
+                    request.stage,
+                    patch.generatedLayouts,
+                    patch.irisContracts,
+                )
+            }
+            if (validationPatch.generatedLayouts.toSet() != patch.generatedLayouts.toSet()) {
+                fail(
+                    request,
+                    SpirvRoundTripPhase.VALIDATE,
+                    moduleDirectory,
+                    "generated OpenGL layout mapping changed after restoration",
+                    moduleSourceName,
+                )
+            }
+            validationPatch.compilerSource
+        } else {
+            patch.compilerSource
         }
         val validationSource = moduleDirectory.resolve("validation.glsl")
-        validationSource.writeText(validationPatch.compilerSource)
+        validationSource.writeText(validationCompilerSource)
         val validationSpirv = moduleDirectory.resolve("validation.spv")
         val validationInvocation = toolchain.compileInvocation(request.stage, validationSource, validationSpirv)
         phase(request, SpirvRoundTripPhase.RECOMPILE, moduleDirectory, moduleSourceName) {
             toolchain.execute(validationInvocation)
         }
 
+        val emissionCore = phase(request, SpirvRoundTripPhase.RESTORE, moduleDirectory, moduleSourceName) {
+            TextureAccessAnalyzer.restoreProbeResources(internalCoreSource, module.resourceMarkers)
+        }
+        val emissionSource = phase(request, SpirvRoundTripPhase.RESTORE, moduleDirectory, moduleSourceName) {
+            TextureAccessAnalyzer.restoreProbeResources(restored, module.resourceMarkers)
+        }
+        val emissionPatch = phase(request, SpirvRoundTripPhase.VALIDATE, moduleDirectory, moduleSourceName) {
+            val sourceWithoutMarkers = TextureAccessAnalyzer.restoreProbeResources(module.source, module.resourceMarkers)
+            patcher.patch(
+                PreprocessorProtection.protectGeneratedCompilerSource(sourceWithoutMarkers, moduleSourceName),
+                request.stage,
+                sourceContracts = module.irisContracts,
+            )
+        }
+        if (restorationFailure == null) {
+            phase(request, SpirvRoundTripPhase.VALIDATE, moduleDirectory, moduleSourceName) {
+                patcher.validateContract(emissionSource, emissionPatch)
+            }
+        }
+
         return SpirvModuleResult(
             name = module.name,
-            source = restored,
-            semanticSource = semanticSource,
+            source = emissionSource,
+            coreSource = emissionCore,
+            bridgeSettings = bridgeSettings,
+            structuralSignature = module.structuralSignature,
+            structuralAssignment = module.structuralAssignment,
+            irisContracts = patch.irisContracts,
+            originalContract = emissionPatch.originalContract,
+            generatedLayouts = emissionPatch.generatedLayouts,
+            restorationFailure = restorationFailure,
             textureAccess = TextureAccessAnalyzer.fromOptimizedSource(
                 semanticSource,
                 module.resourceMarkers,
@@ -284,6 +413,136 @@ internal class SpirvOptimizer(
                 validationInvocation,
             ),
         )
+    }
+
+    private fun validateFinalStructuralSource(
+        request: SpirvOptimizationRequest,
+        source: String,
+        modules: List<SpirvModuleResult>,
+        structuralPlan: ShaderStructuralCoveragePlan,
+        requestDirectory: Path,
+    ): List<SpirvInvocation> {
+        val finalDirectory = requestDirectory.resolve("final-structural-validation")
+        finalDirectory.createDirectories()
+        val materializer = ShaderCompilerCopyMaterializer(
+            finalDirectory.resolve("cc"),
+            processGate = processGate,
+            metrics = metrics,
+        )
+        return modules.mapIndexed { index, module ->
+            val signature = requireNotNull(module.structuralSignature) {
+                "${request.sourceName} final structural validation is missing ${module.name} signature metadata"
+            }
+            val compilerBridge = phase(
+                request,
+                SpirvRoundTripPhase.VALIDATE,
+                finalDirectory,
+                "${request.sourceName}#${module.name}",
+            ) {
+                SpirvSettingBridge.restoreCompilerDeclarations(
+                    source,
+                    module.bridgeSettings,
+                    module.structuralAssignment,
+                    structuralPlan.graph.structuralSettings,
+                )
+            }
+            val selectedSource = phase(
+                request,
+                SpirvRoundTripPhase.VALIDATE,
+                finalDirectory,
+                "${request.sourceName}#${module.name}",
+            ) {
+                structuralPlan.restorationPlan.materializeFinalSource(
+                    compilerBridge,
+                    module.structuralAssignment,
+                )
+            }
+            val compilerSource = phase(
+                request,
+                SpirvRoundTripPhase.VALIDATE,
+                finalDirectory,
+                "${request.sourceName}#${module.name}",
+            ) {
+                module.irisContracts.prepareCompilerSource(selectedSource)
+            }
+            val materialized = phase(
+                request,
+                SpirvRoundTripPhase.VALIDATE,
+                finalDirectory,
+                "${request.sourceName}#${module.name}",
+            ) {
+                materializer.materializeSource(
+                    request.sourceName,
+                    request.stage,
+                    compilerSource,
+                    "v${index.toString().padStart(3, '0')}",
+                )
+            }
+            val actualSignature = ShaderStructuralSignatureExtractor.extract(
+                request.stage,
+                materialized,
+                signature.requiredCapabilities,
+                signature.localSizeFallback,
+            )
+            if (actualSignature != signature) {
+                fail(
+                    request,
+                    SpirvRoundTripPhase.VALIDATE,
+                    finalDirectory,
+                    "final structural signature changed for ${module.name}; expected=" +
+                        signature.canonical.replace('\n', ' ') + "; actual=" +
+                        actualSignature.canonical.replace('\n', ' '),
+                    "${request.sourceName}#${module.name}",
+                )
+            }
+            val finalPatch = phase(
+                request,
+                SpirvRoundTripPhase.VALIDATE,
+                finalDirectory,
+                "${request.sourceName}#${module.name}",
+            ) {
+                patcher.patch(
+                    PreprocessorProtection.protectGeneratedCompilerSource(
+                        materialized,
+                        "${request.sourceName}#${module.name}",
+                    ),
+                    request.stage,
+                    module.generatedLayouts,
+                )
+            }
+            if (
+                finalPatch.originalContract != module.originalContract ||
+                finalPatch.generatedLayouts.toSet() != module.generatedLayouts.toSet()
+            ) {
+                fail(
+                    request,
+                    SpirvRoundTripPhase.VALIDATE,
+                    finalDirectory,
+                    "final structural ABI or generated layout mapping changed for ${module.name}",
+                    "${request.sourceName}#${module.name}",
+                )
+            }
+            val moduleDirectory = finalDirectory.resolve(safeName(module.name))
+            moduleDirectory.createDirectories()
+            val compilerPath = moduleDirectory.resolve("final.glsl")
+            val spirvPath = moduleDirectory.resolve("final.spv")
+            compilerPath.writeText(finalPatch.compilerSource)
+            val toolchain = if (processRunner == null) {
+                SpirvToolchain(moduleDirectory, executables, processGate = processGate, metrics = metrics)
+            } else {
+                SpirvToolchain(moduleDirectory, executables, processRunner, processGate, metrics)
+            }
+            val invocation = toolchain.compileInvocation(request.stage, compilerPath, spirvPath)
+            phase(
+                request,
+                SpirvRoundTripPhase.RECOMPILE,
+                moduleDirectory,
+                "${request.sourceName}#${module.name}",
+            ) {
+                toolchain.execute(invocation)
+            }
+            invocation
+        }
     }
 
     private fun validateModules(
