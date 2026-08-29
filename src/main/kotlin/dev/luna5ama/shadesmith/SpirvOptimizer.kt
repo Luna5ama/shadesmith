@@ -70,6 +70,9 @@ internal data class SpirvOptimizationResult(
     val cacheHits: Int,
     val artifactDirectory: Path,
     val modules: List<SpirvModuleResult>,
+    val optimizedEntities: Int,
+    val restoredEntities: Int,
+    val restoredBytes: Int,
 ) {
     val compilerModuleCount: Int
         get() = modules.map { module ->
@@ -186,6 +189,9 @@ internal class SpirvOptimizer(
             cacheHits = 0,
             artifactDirectory = requestDirectory,
             modules = results,
+            optimizedEntities = emission.optimizedEntities,
+            restoredEntities = emission.restoredEntities,
+            restoredBytes = emission.restoredBytes,
         )
     }
 
@@ -479,6 +485,7 @@ internal class SpirvOptimizer(
     ): List<SpirvInvocation> {
         val finalDirectory = requestDirectory.resolve("final-structural-validation")
         finalDirectory.createDirectories()
+        finalDirectory.resolve("emitted.glsl").writeText(source)
         val varying = ShaderVaryingStructuralSlots.from(
             modules.map { requireNotNull(it.structuralSignature) },
         )
@@ -536,6 +543,10 @@ internal class SpirvOptimizer(
                     "v${index.toString().padStart(3, '0')}",
                 )
             }
+            val moduleDirectory = finalDirectory.resolve(safeName(module.name))
+            moduleDirectory.createDirectories()
+            moduleDirectory.resolve("selected.glsl").writeText(selectedSource)
+            moduleDirectory.resolve("materialized.glsl").writeText(materialized)
             val actualSignature = ShaderStructuralSignatureExtractor.extract(
                 request.stage,
                 materialized,
@@ -569,20 +580,27 @@ internal class SpirvOptimizer(
                     module.irisContracts,
                 )
             }
-            if (
-                finalPatch.originalContract != module.originalContract ||
-                finalPatch.generatedLayouts.toSet() != module.generatedLayouts.toSet()
+            phase(
+                request,
+                SpirvRoundTripPhase.VALIDATE,
+                finalDirectory,
+                "${request.sourceName}#${module.name}",
             ) {
+                patcher.validateContract(
+                    materialized,
+                    finalPatch.copy(originalContract = module.originalContract),
+                    validateSourceContracts = false,
+                )
+            }
+            generatedLayoutDifference(module.generatedLayouts, finalPatch.generatedLayouts)?.let { difference ->
                 fail(
                     request,
                     SpirvRoundTripPhase.VALIDATE,
                     finalDirectory,
-                    "final structural ABI or generated layout mapping changed for ${module.name}",
+                    "final generated layout mapping changed for ${module.name}: $difference",
                     "${request.sourceName}#${module.name}",
                 )
             }
-            val moduleDirectory = finalDirectory.resolve(safeName(module.name))
-            moduleDirectory.createDirectories()
             val compilerPath = moduleDirectory.resolve("final.glsl")
             val spirvPath = moduleDirectory.resolve("final.spv")
             compilerPath.writeText(finalPatch.compilerSource)
@@ -633,6 +651,32 @@ internal class SpirvOptimizer(
             compatible(actual.resources, expected.resources, varying.resources) { !it.startsWith("shared ") } &&
             compatible(actual.stageInterfaces, expected.stageInterfaces, varying.interfaces) &&
             compatible(actual.functionAbi, expected.functionAbi, varying.functionAbi)
+    }
+
+    private fun generatedLayoutDifference(
+        expected: List<GeneratedShaderLayout>,
+        actual: List<GeneratedShaderLayout>,
+    ): String? {
+        val duplicateExpected = expected.groupingBy(GeneratedShaderLayout::key).eachCount().filterValues { it > 1 }.keys
+        val duplicateActual = actual.groupingBy(GeneratedShaderLayout::key).eachCount().filterValues { it > 1 }.keys
+        if (duplicateExpected.isNotEmpty() || duplicateActual.isNotEmpty()) {
+            val order = compareBy<ShaderAbiKey>({ it.kind.name }, ShaderAbiKey::name)
+            return "duplicate keys expected=${duplicateExpected.sortedWith(order)} " +
+                "actual=${duplicateActual.sortedWith(order)}"
+        }
+        val expectedByKey = expected.associateBy(GeneratedShaderLayout::key)
+        val actualByKey = actual.associateBy(GeneratedShaderLayout::key)
+        val differences = (expectedByKey.keys + actualByKey.keys).sortedWith(
+            compareBy<ShaderAbiKey>({ it.kind.name }, ShaderAbiKey::name),
+        ).mapNotNull { key ->
+            val expectedLayout = expectedByKey[key]
+            val actualLayout = actualByKey[key]
+            if (expectedLayout == actualLayout) null else {
+                "${key.kind}:${key.name} expected=${expectedLayout?.qualifier}=${expectedLayout?.value} " +
+                    "actual=${actualLayout?.qualifier}=${actualLayout?.value}"
+            }
+        }
+        return differences.takeIf { it.isNotEmpty() }?.joinToString("; ")
     }
 
     private fun validateModules(

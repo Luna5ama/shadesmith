@@ -29,6 +29,10 @@ internal data class OptimizedShaderFile(
     val processCount: Int = 0,
     val finalValidationProcessCount: Int = 0,
     val cacheHits: Int = 0,
+    val optimizedEntities: Int = 0,
+    val restoredEntities: Int = 0,
+    val restoredBytes: Int = 0,
+    val activationPredicate: String = "unconstrained",
 )
 
 internal data class ShaderPipelineFailure(
@@ -256,6 +260,7 @@ internal class ShaderPipeline(
                     textureAccess = TextureAccessAnalyzer.fromOptimizedSource(file.code),
                     moduleCount = 0,
                     fallbackReason = HOST_INTEGRATION_REASON,
+                    activationPredicate = "host-fragment",
                 ),
             )
         }
@@ -266,7 +271,7 @@ internal class ShaderPipeline(
 
         val protection = PreprocessorProtection.protect(file.code, sourceName)
         if (protection.compilerBlockers.isEmpty()) {
-            return ShaderPreparation.Direct(file, entryPoint.stage, decision.binding)
+            return ShaderPreparation.Direct(file, entryPoint.stage, activation.predicate, decision.binding)
         }
         val probe = TextureAccessAnalyzer.createProbe(file.code, ioContext.config)
         val toolCapabilities = capabilities
@@ -282,6 +287,7 @@ internal class ShaderPipeline(
                 entryPoint.stage,
                 plan,
                 probe,
+                activation.predicate,
                 decision.binding,
             )
         }
@@ -290,7 +296,7 @@ internal class ShaderPipeline(
                 ShaderPreparation.Completed(
                     file,
                     entryPoint.stage,
-                    preservedStructural(file, entryPoint.stage, structural.reason),
+                    preservedStructural(file, entryPoint.stage, structural.reason, activation.predicate),
                     decision.binding,
                 )
             }
@@ -300,6 +306,7 @@ internal class ShaderPipeline(
                     entryPoint.stage,
                     structural.plan,
                     probe,
+                    activation.predicate,
                     decision.binding,
                 )
             }
@@ -316,6 +323,7 @@ internal class ShaderPipeline(
             is ShaderPreparation.Direct -> optimizedFile(
                 preparation.file,
                 preparation.stage,
+                preparation.activationPredicate,
                 optimizer.optimize(
                     SpirvOptimizationRequest(
                         sourceName = sourceName(preparation.file),
@@ -332,6 +340,7 @@ internal class ShaderPipeline(
                 optimizedFile(
                     preparation.file,
                     preparation.stage,
+                    preparation.activationPredicate,
                     optimizer.optimize(
                         SpirvOptimizationRequest(
                             sourceName = sourceName(preparation.file),
@@ -346,13 +355,19 @@ internal class ShaderPipeline(
                 val candidates = materializations.map { it.moduleOrThrow() }
                 when (val finalized = preparation.plan.deduplicate(candidates)) {
                     is ShaderStructuralMaterializationResult.Preserved -> {
-                        preservedStructural(preparation.file, preparation.stage, finalized.reason)
+                        preservedStructural(
+                            preparation.file,
+                            preparation.stage,
+                            finalized.reason,
+                            preparation.activationPredicate,
+                        )
                     }
                     is ShaderStructuralMaterializationResult.Materialized -> {
                         try {
                             optimizedFile(
                                 preparation.file,
                                 preparation.stage,
+                                preparation.activationPredicate,
                                 optimizer.optimize(
                                     SpirvOptimizationRequest(
                                         sourceName = sourceName(preparation.file),
@@ -369,6 +384,7 @@ internal class ShaderPipeline(
                                 preparation.file,
                                 preparation.stage,
                                 structuralRoundTripFallbackReason(preparation.file, e),
+                                preparation.activationPredicate,
                             )
                         }
                     }
@@ -445,6 +461,10 @@ internal class ShaderPipeline(
                 processCount = 0,
                 finalValidationProcessCount = 0,
                 cacheHits = 1,
+                optimizedEntities = cached.optimizedEntities,
+                restoredEntities = cached.restoredEntities,
+                restoredBytes = cached.restoredBytes,
+                activationPredicate = cached.activationPredicate,
             )
         }.getOrNull()
     }
@@ -469,6 +489,10 @@ internal class ShaderPipeline(
             fallbackReason = result.fallbackReason,
             specializationSettings = result.specializationSettings.distinct().sorted(),
             structuralSignatures = result.structuralSignatures.map(CachedStructuralSignature::from),
+            optimizedEntities = result.optimizedEntities,
+            restoredEntities = result.restoredEntities,
+            restoredBytes = result.restoredBytes,
+            activationPredicate = result.activationPredicate,
         )
     }
 
@@ -507,6 +531,7 @@ internal class ShaderPipeline(
     private fun optimizedFile(
         file: ShaderFile,
         stage: ShaderStage,
+        activationPredicate: String,
         result: SpirvOptimizationResult,
     ): OptimizedShaderFile {
         return OptimizedShaderFile(
@@ -519,7 +544,14 @@ internal class ShaderPipeline(
             },
             textureAccess = result.modules
                 .map { it.textureAccess }
-                .fold(TextureAccess(), TextureAccess::plus),
+                .fold(
+                    if (result.structuralSignatures.isEmpty()) {
+                        TextureAccess()
+                    } else {
+                        TextureAccessAnalyzer.fromOptimizedSource(file.code)
+                    },
+                    TextureAccess::plus,
+                ),
             moduleCount = result.compilerModuleCount,
             moduleRowCount = result.modules.size,
             fallbackReason = result.fallbackReason,
@@ -528,6 +560,10 @@ internal class ShaderPipeline(
             processCount = result.processCount,
             finalValidationProcessCount = result.finalValidationInvocations.size,
             cacheHits = result.cacheHits,
+            optimizedEntities = result.optimizedEntities,
+            restoredEntities = result.restoredEntities,
+            restoredBytes = result.restoredBytes,
+            activationPredicate = activationPredicate,
         )
     }
 
@@ -535,6 +571,7 @@ internal class ShaderPipeline(
         file: ShaderFile,
         stage: ShaderStage,
         reason: String,
+        activationPredicate: String = "unconstrained",
     ): OptimizedShaderFile {
         return OptimizedShaderFile(
             file = file,
@@ -543,6 +580,7 @@ internal class ShaderPipeline(
             textureAccess = TextureAccessAnalyzer.fromOptimizedSource(file.code),
             moduleCount = 0,
             fallbackReason = reason,
+            activationPredicate = activationPredicate,
         )
     }
 
@@ -648,7 +686,8 @@ internal class ShaderPipeline(
         val content = buildString {
             appendLine(
                 "source\tstage\tdisposition\tsource_sha256\tsettings\tstructural_signatures\tfallback\t" +
-                    "modules\tmodule_rows\tlifecycle_reads\tlifecycle_writes",
+                    "modules\tmodule_rows\toptimized_entities\trestored_entities\trestored_bytes\t" +
+                    "activation_predicate\tlifecycle_reads\tlifecycle_writes",
             )
             files.forEach { file ->
                 append(sourceName(file.file).asTsvField())
@@ -668,6 +707,14 @@ internal class ShaderPipeline(
                 append(file.moduleCount)
                 append('\t')
                 append(file.moduleRowCount)
+                append('\t')
+                append(file.optimizedEntities)
+                append('\t')
+                append(file.restoredEntities)
+                append('\t')
+                append(file.restoredBytes)
+                append('\t')
+                append(file.activationPredicate.asTsvField())
                 append('\t')
                 append(file.textureAccess.reads.sorted().joinToString(",").asTsvField())
                 append('\t')
@@ -725,6 +772,7 @@ internal class ShaderPipeline(
     private sealed interface ShaderPreparation {
         val file: ShaderFile
         val stage: ShaderStage
+        val activationPredicate: String
         val binding: CacheBinding?
 
         data class Completed(
@@ -732,11 +780,15 @@ internal class ShaderPipeline(
             override val stage: ShaderStage,
             val result: OptimizedShaderFile,
             override val binding: CacheBinding? = null,
-        ) : ShaderPreparation
+        ) : ShaderPreparation {
+            override val activationPredicate: String
+                get() = result.activationPredicate
+        }
 
         data class Direct(
             override val file: ShaderFile,
             override val stage: ShaderStage,
+            override val activationPredicate: String,
             override val binding: CacheBinding?,
         ) : ShaderPreparation
 
@@ -745,6 +797,7 @@ internal class ShaderPipeline(
             override val stage: ShaderStage,
             val plan: ShaderCompilerCopyPlan,
             val probe: TextureAccessProbe,
+            override val activationPredicate: String,
             override val binding: CacheBinding?,
         ) : ShaderPreparation
 
@@ -753,6 +806,7 @@ internal class ShaderPipeline(
             override val stage: ShaderStage,
             val plan: ShaderStructuralCoveragePlan,
             val probe: TextureAccessProbe,
+            override val activationPredicate: String,
             override val binding: CacheBinding?,
         ) : ShaderPreparation
     }
@@ -797,7 +851,7 @@ internal class ShaderPipeline(
         private const val MAX_PARALLELISM = 10
         private const val ROOT_BATCH_SIZE = 2
         private const val PIPELINE_CACHE_CONTRACT = "shadesmith-compiler-copy-structural-round-trip-v1"
-        private const val ROOT_DERIVED_PLAN_CONTRACT = "$PIPELINE_CACHE_CONTRACT\nroot-derived-plan-v1"
+        private const val ROOT_DERIVED_PLAN_CONTRACT = "$PIPELINE_CACHE_CONTRACT\nroot-derived-plan-v2"
         private const val HOST_INTEGRATION_REASON =
             "host integration fragment has no standalone #version/main contract; source preserved and lifecycle access is conservative"
     }

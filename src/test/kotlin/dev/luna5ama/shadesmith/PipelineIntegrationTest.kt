@@ -111,6 +111,7 @@ class PipelineIntegrationTest {
         assertEquals(hostFragment.file.code, output.resolve("voxy_hook.glsl").readText())
         assertContains(artifacts.resolve("boundaries.tsv").readText(), "voxy_hook.glsl\tfrag")
         val outputs = artifacts.resolve("outputs.tsv").readText()
+        assertContains(outputs.lineSequence().first(), "optimized_entities\trestored_entities\trestored_bytes\tactivation_predicate")
         assertContains(outputs, "composite2.csh\tcomp\tSPIRV_ROUND_TRIP")
         assertContains(outputs, "SETTING_BRANCH")
         assertContains(outputs, "transient_branch")

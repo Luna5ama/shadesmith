@@ -284,12 +284,6 @@ internal data class ShaderStructuralRestorationPlan(
                     placement,
                 )
             }
-            if (issue == null) {
-                islands.firstOrNull { it.kind == ShaderStructuralEntitySlotKind.FUNCTION }?.let { slot ->
-                    issue = "${basePlan.sourceName}:${slot.sourceLine}: whole-function structural entity slot " +
-                        "'${slot.canonicalEntity}' requires optimized-entity restoration"
-                }
-            }
             val reanchored = reanchorContracts(basePlan, source, mergedRanges, contractLocations)
             if (issue == null) issue = reanchored.issue
             return ShaderStructuralRestorationPlan(

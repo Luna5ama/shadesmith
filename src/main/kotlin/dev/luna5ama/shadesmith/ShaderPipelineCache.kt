@@ -87,6 +87,10 @@ internal data class CachedOptimizedShader(
     val fallbackReason: String? = null,
     val specializationSettings: List<String> = emptyList(),
     val structuralSignatures: List<CachedStructuralSignature> = emptyList(),
+    val optimizedEntities: Int = 0,
+    val restoredEntities: Int = 0,
+    val restoredBytes: Int = 0,
+    val activationPredicate: String = "unconstrained",
 )
 
 internal class ShaderPipelineCache(

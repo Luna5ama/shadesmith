@@ -477,6 +477,9 @@ class ShaderStructuralPlannerTest {
         assertFalse("constant_id" in result.source)
         assertEquals(2, result.structuralSignatures.size)
         assertEquals(2, result.finalValidationInvocations.size)
+        assertTrue(result.optimizedEntities > 0)
+        assertTrue(result.restoredEntities > 0)
+        assertTrue(result.restoredBytes >= exactIsland.encodeToByteArray().size)
     }
 
     @Test
@@ -600,7 +603,7 @@ class ShaderStructuralPlannerTest {
 
         assertEquals(SpirvEmissionMode.PRESERVED_SOURCE, first.emissionMode)
         assertEquals(source, first.source)
-        assertContains(first.fallbackReason.orEmpty(), "optimized structural semantic bodies diverged")
+        assertContains(first.fallbackReason.orEmpty(), "would leave no optimized executable entity")
         assertEquals(first.fallbackReason, second.fallbackReason)
         assertTrue(first.modules.size >= 2)
         assertTrue(first.finalValidationInvocations.isEmpty())
@@ -629,7 +632,7 @@ class ShaderStructuralPlannerTest {
 
         assertEquals(SpirvEmissionMode.PRESERVED_SOURCE, result.emissionMode)
         assertEquals(source, result.source)
-        assertContains(result.fallbackReason.orEmpty(), "whole-function structural entity slot")
+        assertContains(result.fallbackReason.orEmpty(), "would leave no optimized executable entity")
         assertEquals(2, result.modules.size)
         assertEquals(
             setOf("branch_0", "branch_1"),
@@ -661,7 +664,7 @@ class ShaderStructuralPlannerTest {
         }
         assertContains(slot.canonicalEntity.orEmpty(), "float evaluate(float values[SETTING_WIDTH])")
         assertContains(slot.exactText, "return values[0];")
-        assertContains(planned.restorationPlan.issue.orEmpty(), "requires optimized-entity restoration")
+        assertEquals(null, planned.restorationPlan.issue)
     }
 
     @Test

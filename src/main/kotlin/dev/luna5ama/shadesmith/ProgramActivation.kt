@@ -5,6 +5,8 @@ internal data class ProgramActivationContract(
     private val propertiesSource: String,
     private val rules: List<ProgramActivationRule>,
 ) {
+    val predicate: String = rules.joinToString(" || ") { rule -> rule.canonical }.ifEmpty { "unconstrained" }
+
     val cacheContract: String = buildString {
         appendLine("program-activation-v1")
         appendLine(program)

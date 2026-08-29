@@ -177,7 +177,11 @@ internal class OpenGlShaderPatcher {
         return patch.irisContracts.restore(source)
     }
 
-    fun validateContract(restoredSource: String, patch: OpenGlShaderPatch) {
+    fun validateContract(
+        restoredSource: String,
+        patch: OpenGlShaderPatch,
+        validateSourceContracts: Boolean = true,
+    ) {
         val compilerView = patch.irisContracts.prepareCompilerSource(restoredSource)
         val actual = analyzeContract(compilerView, patch.sourceName, patch.stage)
         val expected = patch.originalContract
@@ -256,14 +260,16 @@ internal class OpenGlShaderPatcher {
         if (!MAIN_REGEX.containsMatchIn(restoredSource)) {
             fail(patch.sourceName, patch.stage, null, "entry point main disappeared after round-trip")
         }
-        patch.irisContracts.contracts.forEach { contract ->
-            if (!restoredSource.contains(contract.exactText)) {
-                fail(
-                    patch.sourceName,
-                    patch.stage,
-                    contract.sourceLine,
-                    "Iris ${contract.kind} source contract was not restored exactly",
-                )
+        if (validateSourceContracts) {
+            patch.irisContracts.contracts.forEach { contract ->
+                if (!restoredSource.contains(contract.exactText)) {
+                    fail(
+                        patch.sourceName,
+                        patch.stage,
+                        contract.sourceLine,
+                        "Iris ${contract.kind} source contract was not restored exactly",
+                    )
+                }
             }
         }
     }
