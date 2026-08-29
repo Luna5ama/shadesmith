@@ -566,6 +566,7 @@ internal class SpirvOptimizer(
                     ),
                     request.stage,
                     module.generatedLayouts,
+                    module.irisContracts,
                 )
             }
             if (

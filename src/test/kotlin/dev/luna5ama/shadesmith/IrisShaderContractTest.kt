@@ -176,6 +176,30 @@ class IrisShaderContractTest {
     }
 
     @Test
+    fun booleanPredicateCanSelectNumericSettingInDerivedScalar() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_REAL_SUN_TEMPERATURE
+            #define SETTING_SUN_TEMPERATURE 5700 //[1000 5700]
+            #ifdef SETTING_REAL_SUN_TEMPERATURE
+            #define SUN_TEMPERATURE 5772.0
+            #else
+            #define SUN_TEMPERATURE SETTING_SUN_TEMPERATURE
+            #endif
+            layout(local_size_x = 1) in;
+            void main() { float temperature = SUN_TEMPERATURE; }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "real-sun-temperature.csh")
+
+        assertTrue(plan.structuralBlockers.isEmpty(), plan.structuralBlockers.toString())
+        val compiler = assertNotNull(plan.compilerSource)
+        assertContains(compiler, "SM_SETTING_REAL_SUN_TEMPERATURE")
+        assertContains(compiler, "SM_SETTING_SUN_TEMPERATURE")
+        assertContains(compiler, "? (5772.0) : (SM_SETTING_SUN_TEMPERATURE)")
+    }
+
+    @Test
     fun specializationDependentTopLevelConstantsBecomeCompilerOnlyMacros() {
         val source = """
             #version 460 compatibility
@@ -359,6 +383,70 @@ class IrisShaderContractTest {
     }
 
     @Test
+    fun preservesSpirvCrossCapabilityPrologueWhileRestoringSourceExtension() {
+        val source = """
+            #version 460 compatibility
+            #extension GL_ARB_gpu_shader_int64 : require
+            layout(location = 0) out vec4 color;
+            void main() { color = vec4(1.0); }
+        """.trimIndent() + "\n"
+        val optimized = """
+            #version 460 core
+            #if defined(GL_KHR_shader_subgroup_ballot)
+            #extension GL_KHR_shader_subgroup_ballot : require
+            #elif defined(GL_ARB_shader_ballot)
+            #extension GL_ARB_shader_ballot : require
+            #else
+            #error No subgroup ballot extension available
+            #endif
+            layout(location = 0) out vec4 color;
+            void main() { color = vec4(1.0); }
+        """.trimIndent() + "\n"
+        val plan = ShaderCompilerCopyPlanner.plan(source, "capability-prologue.fsh").irisContracts
+
+        val restored = assertIs<IrisContractRestoration.Restored>(plan.restore(optimized)).source
+
+        assertContains(restored, "#extension GL_ARB_gpu_shader_int64 : require")
+        assertContains(restored, "#extension GL_KHR_shader_subgroup_ballot : require")
+        assertContains(restored, "#extension GL_ARB_shader_ballot : require")
+        assertContains(restored, "#error No subgroup ballot extension available")
+        assertTrue(restored.indexOf("#version") < restored.indexOf("#extension GL_ARB_gpu_shader_int64"))
+        assertTrue(restored.indexOf("#extension GL_ARB_gpu_shader_int64") < restored.indexOf("#if defined(GL_KHR_shader_subgroup_ballot)"))
+
+        val compiler = plan.prepareCompilerSource(restored)
+        assertContains(compiler, "#extension GL_KHR_shader_subgroup_ballot : require")
+        assertContains(compiler, "#extension GL_ARB_shader_ballot : require")
+        assertEquals(1, "#extension GL_ARB_gpu_shader_int64 : require".toRegex().findAll(compiler).count())
+    }
+
+    @Test
+    fun finalValidationReusesOnlyExtensionsActiveInTheMaterializedCompilerModule() {
+        val source = """
+            #version 460 compatibility
+            #ifdef SETTING_VENDOR
+            #extension GL_NV_shader_thread_group : require
+            #else
+            #extension GL_KHR_shader_subgroup_basic : require
+            #endif
+            layout(local_size_x = 1) in;
+            void main() {}
+        """.trimIndent() + "\n"
+        val materialized = """
+            #version 460 compatibility
+            #extension GL_KHR_shader_subgroup_basic : require
+            layout(local_size_x = 1) in;
+            void main() {}
+        """.trimIndent() + "\n"
+        val contracts = ShaderCompilerCopyPlanner.plan(source, "materialized-capability.csh").irisContracts
+            .withMaterializedCompilerSource(materialized)
+
+        val compiler = contracts.prepareCompilerSource("#version 460 core\nvoid main() {}\n")
+
+        assertContains(compiler, "#extension GL_KHR_shader_subgroup_basic : require")
+        assertFalse("GL_NV_shader_thread_group" in compiler)
+    }
+
+    @Test
     fun numericDefinedPredicateIsTrueEvenWhenItsValueIsZeroAndIdsDoNotCollide() {
         val source = """
             #version 460 compatibility
@@ -415,6 +503,31 @@ class IrisShaderContractTest {
             nestedComment.structuralBlockers.joinToString { it.reason },
             "nested Iris comment directive has no stable top-level anchor",
         )
+    }
+
+    @Test
+    fun conditionalCommentContractKeepsDirectiveLineBoundariesWhenAbiBodiesAreRemoved() {
+        val source = """
+            #version 460 compatibility
+            #ifdef SETTING_TRANSLUCENT
+            /* RENDERTARGETS:0,2 */
+            layout(location = 0) out float depth;
+            layout(location = 1) out vec4 color;
+            #else
+            /* RENDERTARGETS:0 */
+            layout(location = 0) out float depth;
+            #endif
+            void main() { depth = 1.0; }
+        """.trimIndent() + "\n"
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "conditional-targets.fsh")
+        val contract = plan.irisContracts.contracts.single {
+            it.kind == IrisSourceContractKind.CONDITIONAL_CONTRACT
+        }.exactText
+
+        PreprocessorProtection.protect(contract, "conditional-targets-contract")
+        assertContains(contract, "/* RENDERTARGETS:0,2 */\n#else")
+        assertContains(contract, "/* RENDERTARGETS:0 */\n#endif")
     }
 
     @Test

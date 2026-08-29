@@ -702,7 +702,12 @@ internal object ShaderCompilerCopyPlanner {
         val derived = derivedControls.filter { it.sourceConditionalId == group.id }
         if (derived.isNotEmpty()) {
             val failed = derived.firstOrNull {
-                convertConditionExpression(it.compilerExpression, settings, macros) == null
+                convertConditionExpression(
+                    it.compilerExpression,
+                    settings,
+                    macros,
+                    requireBoolean = it.kind == ShaderDerivedControlKind.PRESENCE,
+                ) == null
             }
             if (failed == null) {
                 group.disposition = ShaderConditionalDisposition.COMPILER_NO_OP
@@ -850,7 +855,14 @@ internal object ShaderCompilerCopyPlanner {
         val compilerControlReplacements = settings.filter { it.controlKind != ShaderControlKind.HOST_PRESENCE }
             .associate { it.name to it.compilerName }.toMutableMap()
         derivedControls.forEach { derived ->
-            val expression = requireNotNull(convertConditionExpression(derived.compilerExpression, settingsByName, macros)) {
+            val expression = requireNotNull(
+                convertConditionExpression(
+                    derived.compilerExpression,
+                    settingsByName,
+                    macros,
+                    requireBoolean = derived.kind == ShaderDerivedControlKind.PRESENCE,
+                ),
+            ) {
                 "derived control ${derived.name} lost its typed compiler expression"
             }
             compilerControlReplacements[derived.name] = "($expression)"
@@ -890,21 +902,31 @@ internal object ShaderCompilerCopyPlanner {
         macros: List<ShaderMacroDependency>,
     ): String {
         val settingDependentMacros = macros.filter { it.settingDependencies.isNotEmpty() }.mapTo(hashSetOf()) { it.name }
-        val regions = findSourceRegions(source, SourceMap(source, "compiler-copy aggregate specialization"))
-        val replacements = regions.filter {
-            it.kind == ShaderSourceRegionKind.TOP_LEVEL_DECLARATION
-        }.mapNotNull { region ->
-            val declaration = region.exactSlice
+        val masked = maskCommentsAndStrings(source)
+        var braceDepth = 0
+        val braceDepths = IntArray(masked.length + 1)
+        masked.forEachIndexed { index, character ->
+            braceDepths[index] = braceDepth
+            when (character) {
+                '{' -> braceDepth++
+                '}' -> braceDepth--
+            }
+        }
+        braceDepths[masked.length] = braceDepth
+        val replacements = GLOBAL_CONST_INITIALIZER.findAll(masked).mapNotNull { match ->
+            if (braceDepths[match.range.first] != 0) return@mapNotNull null
+            val semicolon = masked.indexOf(';', match.range.last + 1)
+            if (semicolon < 0 || braceDepths[semicolon] != 0) return@mapNotNull null
+            val declaration = source.substring(match.range.first, semicolon + 1)
             val settingDependent = COMPILER_SETTING_PREFIX in declaration ||
                 identifiers(maskCommentsAndStrings(declaration)).any(settingDependentMacros::contains)
             if (!settingDependent) return@mapNotNull null
-            val match = GLOBAL_CONST_INITIALIZER.find(declaration) ?: return@mapNotNull null
             val scalar = match.groupValues[1] in SCALAR_GLSL_TYPES &&
                 match.groupValues[2].isEmpty() && match.groupValues[3].isEmpty()
             if (scalar) return@mapNotNull null
-            val start = region.startOffset + match.range.first
+            val start = match.range.first
             Replacement(start, start + "const".length, " ".repeat("const".length))
-        }
+        }.toList()
         return applyReplacements(source, replacements)
     }
 
@@ -1075,6 +1097,7 @@ internal object ShaderCompilerCopyPlanner {
         settings: Map<String, ShaderSetting>,
         macros: List<ShaderMacroDependency>,
         visiting: Set<String> = emptySet(),
+        requireBoolean: Boolean = true,
     ): String? {
         val macroByName = macros.associateBy { it.name }
         var failed = false
@@ -1092,6 +1115,7 @@ internal object ShaderCompilerCopyPlanner {
                             settings,
                             macros,
                             visiting + name,
+                            requireBoolean = false,
                         )
                     }
                     if (expanded == null) {
@@ -1117,6 +1141,7 @@ internal object ShaderCompilerCopyPlanner {
                             settings,
                             macros,
                             visiting + name,
+                            requireBoolean = false,
                         )
                     }
                     if (expanded == null) {
@@ -1150,7 +1175,13 @@ internal object ShaderCompilerCopyPlanner {
                         val body = macro.derivedControl?.compilerExpression ?: macro.sourceSlices.singleOrNull()
                             ?.let { stripComments(it.substringAfter(macro.name)).trim() }
                         val expanded = body?.let {
-                            convertConditionExpression(it, settings, macros, visiting + token)
+                            convertConditionExpression(
+                                it,
+                                settings,
+                                macros,
+                                visiting + token,
+                                requireBoolean = false,
+                            )
                         }
                         if (expanded == null) {
                             failed = true
@@ -1169,7 +1200,7 @@ internal object ShaderCompilerCopyPlanner {
         val numericSettings = settings.values.filter {
             it.type != ShaderSettingType.BOOL && IDENTIFIER_TOKEN(it.compilerName).containsMatchIn(expression)
         }
-        if (numericSettings.isNotEmpty() && !COMPARISON_OPERATOR.containsMatchIn(expression)) {
+        if (requireBoolean && numericSettings.isNotEmpty() && !COMPARISON_OPERATOR.containsMatchIn(expression)) {
             val simple = numericSettings.singleOrNull() ?: return null
             expression = when (expression.trim()) {
                 simple.compilerName -> "${simple.compilerName} != 0"
@@ -1870,7 +1901,7 @@ internal class ShaderCompilerCopyMaterializer(
                         source = result.source,
                         resourceMarkers = request.probe.markers,
                         conservativeAccess = request.probe.conservativeAccess,
-                        irisContracts = request.plan.irisContracts,
+                        irisContracts = request.plan.irisContracts.withMaterializedCompilerSource(result.source),
                         settings = request.plan.settings,
                     ),
                 )

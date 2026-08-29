@@ -242,6 +242,7 @@ class ShaderCompilerCopyTest {
             const vec3 tint = vec3(SETTING_GAIN);
             const vec2 offsets[2] = vec2[2](vec2(0.0), vec2(SETTING_GAIN));
             const vec2[3] typedOffsets = vec2[3](vec2(0.0), vec2(SETTING_GAIN), vec2(2.0));
+            const vec2[3] braceOffsets = { vec2(0.0), vec2(SETTING_GAIN), vec2(2.0) };
             const highp vec2[3] preciseTypedOffsets = vec2[3](vec2(0.0), vec2(SETTING_GAIN), vec2(2.0));
             const vec3 indirectTint = MAKE_TINT(1.0);
             float values[SETTING_SIZE];
@@ -259,6 +260,7 @@ class ShaderCompilerCopyTest {
         assertContains(compiler, "#define SM_DYNAMIC_tint (vec3(SM_SETTING_GAIN))")
         assertContains(compiler, "      vec2 offsets[2] = vec2[2](vec2(0.0), vec2(SM_SETTING_GAIN));")
         assertContains(compiler, "      vec2[3] typedOffsets")
+        assertContains(compiler, "      vec2[3] braceOffsets = { vec2(0.0), vec2(SM_SETTING_GAIN), vec2(2.0) };")
         assertContains(compiler, "      highp vec2[3] preciseTypedOffsets")
         assertContains(compiler, "      vec3 indirectTint = MAKE_TINT(1.0);")
         assertContains(compiler, "float values[SM_SETTING_SIZE];")

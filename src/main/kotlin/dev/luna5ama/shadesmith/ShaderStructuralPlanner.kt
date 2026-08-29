@@ -609,7 +609,11 @@ internal object ShaderStructuralPlanner {
                             )
                         }
                         val contracts = try {
-                            basePlan.irisContracts.forStructuralModule(planned.compilerCandidateSource, fallback)
+                            basePlan.irisContracts.forStructuralModule(
+                                planned.compilerCandidateSource,
+                                fallback,
+                                planned.irisContracts,
+                            )
                         } catch (e: IllegalArgumentException) {
                             return ShaderStructuralPlanningResult.Preserved(e.message.orEmpty())
                         }

@@ -101,12 +101,27 @@ internal data class IrisShaderContractPlan(
         return copy(contracts = restorationContracts)
     }
 
+    fun withMaterializedCompilerSource(source: String): IrisShaderContractPlan {
+        val activeExtensions = PreprocessorProtection.protectGeneratedCompilerSource(source, sourceName).directives
+            .filter { it.kind == PreprocessorDirectiveKind.EXTENSION }
+            .mapNotNull { directive ->
+                EXTENSION_DECLARATION.find(directive.exactText)?.destructured?.let { (name, behavior) ->
+                    "#extension $name : $behavior"
+                }
+            }
+            .distinct()
+        val marker = compilerPrelude.indexOf(COMPILER_MARKER)
+        val nonExtensionPrelude = if (marker < 0) compilerPrelude else compilerPrelude.substring(marker)
+        val materializedPrelude = buildString {
+            activeExtensions.forEach { appendLine(it) }
+            append(nonExtensionPrelude)
+        }
+        return copy(compilerPrelude = materializedPrelude)
+    }
+
     fun stripCompilerArtifacts(source: String): String {
         var result = normalizeCompilerText(source)
         if (localSize != null) result = LOCAL_SIZE_LAYOUT.replace(result, "")
-        if (contracts.any { it.kind == IrisSourceContractKind.EXTENSION }) {
-            result = EXTENSION_LINE.replace(result, "")
-        }
         compilerHostNames.forEach { name ->
             result = compilerHostDeclaration(name).replace(result, "")
         }
@@ -116,8 +131,15 @@ internal data class IrisShaderContractPlan(
     fun forStructuralModule(
         source: String,
         fallbackSignature: LocalSizeAbiSignature?,
+        modulePlan: IrisShaderContractPlan,
     ): IrisShaderContractPlan {
-        if (fallbackSignature == null) return copy(compilerSource = source)
+        if (fallbackSignature == null) return copy(
+            compilerSource = source,
+            derivedMacros = modulePlan.derivedMacros,
+            compilerPrelude = modulePlan.compilerPrelude,
+            compilerSettings = modulePlan.compilerSettings,
+            compilerHostNames = modulePlan.compilerHostNames,
+        )
         val local = requireNotNull(localSize) { "$sourceName has no local-size contract to specialize" }
         require(local.fallbackRequired) { "$sourceName local-size contract does not require a structural fallback" }
         val fixedLayout = renderFixedLocalSize(fallbackSignature)
@@ -139,7 +161,13 @@ internal data class IrisShaderContractPlan(
             structuralIssues = structuralIssues.filterNot {
                 it.kind == IrisStructuralIssueKind.LOCAL_SIZE_FALLBACK
             },
-            compilerPrelude = compilerPrelude.replace(local.compilerLayout, fixedLayout),
+            derivedMacros = modulePlan.derivedMacros,
+            compilerPrelude = modulePlan.compilerPrelude.replace(
+                modulePlan.localSize?.compilerLayout ?: local.compilerLayout,
+                fixedLayout,
+            ),
+            compilerSettings = modulePlan.compilerSettings,
+            compilerHostNames = modulePlan.compilerHostNames,
         )
     }
 
@@ -1222,7 +1250,11 @@ private fun synthesizeConditionalContract(
         ranges.forEach { range ->
             previousEnd?.let { end ->
                 val gap = source.substring(end + 1, range.first)
-                if (gap.all(Char::isWhitespace)) append(gap)
+                if (gap.all(Char::isWhitespace)) {
+                    append(gap)
+                } else if (lastOrNull() !in listOf('\r', '\n')) {
+                    append(LINE_ENDING.find(gap)?.value ?: "\n")
+                }
             }
             append(source.substring(range))
             previousEnd = range.last
@@ -1752,7 +1784,6 @@ private val CONDITIONAL_CONTRACT_KINDS = setOf(
     IrisSourceContractKind.CONDITIONAL_CONTRACT,
 )
 private val VERSION_LINE = "(?m)^[\\t ]*#version[^\\r\\n]*".toRegex()
-private val EXTENSION_LINE = "(?m)^[\\t ]*#extension\\b[^\\r\\n]*(?:\\r\\n|\\n|\\r|$)".toRegex()
 private val LOCAL_SIZE_LAYOUT =
     "(?m)^[\\t ]*layout\\s*\\(([^)]*\\blocal_size_[xyz](?:_id)?\\b[^)]*)\\)\\s*in\\s*;[^\\r\\n]*(?:\\r\\n|\\n|\\r|$)".toRegex()
 private val LOCAL_SIZE_ITEM = "local_size_([xyz])\\s*=\\s*(.+)".toRegex()
