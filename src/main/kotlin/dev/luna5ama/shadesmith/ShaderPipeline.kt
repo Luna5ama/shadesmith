@@ -6,6 +6,7 @@ import java.security.MessageDigest
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import kotlin.io.path.createDirectories
+import kotlin.io.path.nameWithoutExtension
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 
@@ -258,7 +259,9 @@ internal class ShaderPipeline(
                 ),
             )
         }
-        val decision = lookupCache(activeCache, file, entryPoint.stage, ROOT_DERIVED_PLAN_CONTRACT)
+        val activation = ioContext.programActivations.contractFor(file.path.nameWithoutExtension)
+        val planContract = "$ROOT_DERIVED_PLAN_CONTRACT\n${activation.cacheContract}"
+        val decision = lookupCache(activeCache, file, entryPoint.stage, planContract)
         decision.hit?.let { return ShaderPreparation.Completed(file, entryPoint.stage, it, decision.binding) }
 
         val protection = PreprocessorProtection.protect(file.code, sourceName)
@@ -282,7 +285,7 @@ internal class ShaderPipeline(
                 decision.binding,
             )
         }
-        return when (val structural = ShaderStructuralPlanner.plan(plan, entryPoint.stage)) {
+        return when (val structural = ShaderStructuralPlanner.plan(plan, entryPoint.stage, activation = activation)) {
             is ShaderStructuralPlanningResult.Preserved -> {
                 ShaderPreparation.Completed(
                     file,

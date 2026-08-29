@@ -416,6 +416,48 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
+    fun programActivationPrunesOnlyStructuralRowsProvenDisabled() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_GRID_SIZE 64 //[16 32 64]
+            layout(std430, binding = 0) buffer Values { uint values[SETTING_GRID_SIZE]; };
+            layout(local_size_x = 1) in;
+            void main() { values[0] = 1u; }
+        """.trimIndent()
+        val properties = """
+            #if SETTING_GRID_SIZE == 64
+            program.prepare5.enabled=true
+            #else
+            program.prepare5.enabled=false
+            #endif
+            #if defined(UNKNOWN_HOST_CAPABILITY)
+            program.unknown.enabled=true
+            #else
+            program.unknown.enabled=false
+            #endif
+        """.trimIndent()
+        val base = ShaderCompilerCopyPlanner.plan(source, "prepare5.csh")
+        val index = ProgramActivationIndex.parse(properties)
+
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(
+                base,
+                ShaderStage.COMPUTE,
+                activation = index.contractFor("prepare5"),
+            ),
+        ).plan
+
+        assertEquals(listOf(mapOf("SETTING_GRID_SIZE" to "64")), planned.rows.map { it.assignment })
+        assertFalse(
+            index.contractFor("unknown").isProvenDisabled(
+                mapOf("SETTING_GRID_SIZE" to "16"),
+                base.settings.associateBy { it.name },
+            ),
+        )
+        assertFalse(index.contractFor("prepare5").cacheContract == index.contractFor("unknown").cacheContract)
+    }
+
+    @Test
     fun equalStructuralBodiesRestoreExactIslandAndRecompileEverySignature() = withWorkspace { workspace ->
         val source = equalStructuralBodies()
         val result = optimizeStructural(workspace, "equal.csh", source, ShaderStage.COMPUTE)
@@ -587,12 +629,39 @@ class ShaderStructuralPlannerTest {
 
         assertEquals(SpirvEmissionMode.PRESERVED_SOURCE, result.emissionMode)
         assertEquals(source, result.source)
-        assertContains(result.fallbackReason.orEmpty(), "structural island is nested inside executable code")
+        assertContains(result.fallbackReason.orEmpty(), "whole-function structural entity slot")
         assertEquals(2, result.modules.size)
         assertEquals(
             setOf("branch_0", "branch_1"),
             result.modules.map { it.textureAccess }.fold(TextureAccess(), TextureAccess::plus).reads,
         )
+    }
+
+    @Test
+    fun abiCoupledExecutableUsePromotesToSourceMappableWholeFunctionSlot() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_WIDTH 2 //[2 4]
+            float evaluate(float values[SETTING_WIDTH]) { return values[0]; }
+            layout(local_size_x = 1) in;
+            void main() {
+                float values[SETTING_WIDTH];
+                values[0] = evaluate(values);
+            }
+        """.trimIndent()
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(
+                ShaderCompilerCopyPlanner.plan(source, "function-slot.csh"),
+                ShaderStage.COMPUTE,
+            ),
+        ).plan
+
+        val slot = planned.restorationPlan.islands.single {
+            it.kind == ShaderStructuralEntitySlotKind.FUNCTION
+        }
+        assertContains(slot.canonicalEntity.orEmpty(), "float evaluate(float values[SETTING_WIDTH])")
+        assertContains(slot.exactText, "return values[0];")
+        assertContains(planned.restorationPlan.issue.orEmpty(), "requires optimized-entity restoration")
     }
 
     @Test

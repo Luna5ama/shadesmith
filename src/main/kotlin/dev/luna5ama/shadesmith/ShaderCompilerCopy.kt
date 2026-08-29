@@ -55,6 +55,7 @@ internal data class ShaderDerivedControl(
 internal data class ShaderMacroDependency(
     val name: String,
     val functionLike: Boolean,
+    val unconditionallyDefined: Boolean,
     val dependencies: Set<String>,
     val settingDependencies: Set<String>,
     val sourceSlices: List<String>,
@@ -395,6 +396,10 @@ internal object ShaderCompilerCopyPlanner {
                 MacroDraft(
                     name = name,
                     functionLike = definitions.any { it.macroFunctionLike },
+                    unconditionallyDefined = definitions.any { it.conditionalDepth == 0 } &&
+                        directives.none {
+                            it.kind == PreprocessorDirectiveKind.UNDEF && it.macroName == name
+                        },
                     bodies = definitions.map { it.macroBody.orEmpty() },
                     sourceSlices = definitions.map { it.exactText },
                 )
@@ -429,6 +434,7 @@ internal object ShaderCompilerCopyPlanner {
             ShaderMacroDependency(
                 name = draft.name,
                 functionLike = draft.functionLike,
+                unconditionallyDefined = draft.unconditionallyDefined,
                 dependencies = direct.getValue(draft.name),
                 settingDependencies = settingsFor(draft.name, linkedSetOf()),
                 sourceSlices = draft.sourceSlices,
@@ -863,11 +869,12 @@ internal object ShaderCompilerCopyPlanner {
                     requireBoolean = derived.kind == ShaderDerivedControlKind.PRESENCE,
                 ),
             ) {
-                "derived control ${derived.name} lost its typed compiler expression"
+                "${sourceMap.sourceName}: derived control ${derived.name} lost its typed compiler expression"
             }
             compilerControlReplacements[derived.name] = "($expression)"
         }
         result = replaceIdentifierTokens(result, compilerControlReplacements)
+        result = normalizeCompilerPresenceDirectives(result)
         result = relaxAggregateSpecializationInitializers(result, macros)
         if (settings.isEmpty()) return result
 
@@ -1107,6 +1114,7 @@ internal object ShaderCompilerCopyPlanner {
             val setting = settings[name]
             when {
                 setting?.presenceToggle == true -> setting.compilerName
+                macroByName[name]?.unconditionallyDefined == true -> "true"
                 macroByName[name]?.derivedControl?.kind == ShaderDerivedControlKind.PRESENCE -> {
                     val macro = macroByName.getValue(name)
                     val expanded = if (name in visiting) null else {
@@ -1133,6 +1141,7 @@ internal object ShaderCompilerCopyPlanner {
             val setting = settings[name]
             when {
                 setting?.presenceToggle == true -> setting.compilerName
+                macroByName[name]?.unconditionallyDefined == true -> "true"
                 macroByName[name]?.derivedControl?.kind == ShaderDerivedControlKind.PRESENCE -> {
                     val macro = macroByName.getValue(name)
                     val expanded = if (name in visiting) null else {
@@ -1614,6 +1623,17 @@ internal object ShaderCompilerCopyPlanner {
         }
     }
 
+    private fun normalizeCompilerPresenceDirectives(source: String): String {
+        return REPLACED_PRESENCE_DIRECTIVE.replace(source) { match ->
+            val indent = match.groupValues[1]
+            val keyword = match.groupValues[2]
+            val expression = match.groupValues[3]
+            val comment = match.groupValues[4]
+            val condition = if (keyword == "ifdef") expression else "!($expression)"
+            "$indent#if $condition$comment"
+        }
+    }
+
     private fun Char.isAsciiIdentifierStart(): Boolean = this == '_' || this in 'A'..'Z' || this in 'a'..'z'
 
     private fun Char.isAsciiIdentifierPart(): Boolean = isAsciiIdentifierStart() || this in '0'..'9'
@@ -1643,6 +1663,7 @@ internal object ShaderCompilerCopyPlanner {
     private data class MacroDraft(
         val name: String,
         val functionLike: Boolean,
+        val unconditionallyDefined: Boolean,
         val bodies: List<String>,
         val sourceSlices: List<String>,
     )
@@ -1763,6 +1784,8 @@ internal object ShaderCompilerCopyPlanner {
     private const val SETTING_PREFIX = "SETTING_"
     private const val COMPILER_SETTING_PREFIX = "SM_SETTING_"
     private val SETTING_TOKEN = "\\bSETTING_[A-Za-z0-9_]+\\b".toRegex()
+    private val REPLACED_PRESENCE_DIRECTIVE =
+        "(?m)^([\\t ]*)#[\\t ]*(ifdef|ifndef)[\\t ]+(\\([^\\r\\n]+\\))([\\t ]*(?://[^\\r\\n]*)?)$".toRegex()
     private val IDENTIFIER = "[A-Za-z_][A-Za-z0-9_]*".toRegex()
     private fun IDENTIFIER_TOKEN(name: String) = "(?<![A-Za-z0-9_])${Regex.escape(name)}(?![A-Za-z0-9_])".toRegex()
     private val OPTION_DOMAIN = "//\\s*\\[([^]\\r\\n]+)]".toRegex()

@@ -177,6 +177,35 @@ class ShaderCompilerCopyTest {
     }
 
     @Test
+    fun rewritesDerivedPresenceExpressionsInPreservedDirectivesAsIfConditions() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1 2]
+            #define HOST_PASS a
+            #ifdef HOST_PASS
+            #if SETTING_MODE == 0
+            #elif SETTING_MODE == 1
+            #define FEATURE_ENABLED
+            #elif SETTING_MODE == 2
+            #define FEATURE_ENABLED
+            #endif
+            #ifdef FEATURE_ENABLED
+            layout(rgba16f, binding = 0) uniform image2D target;
+            #endif
+            #endif
+            void main() {}
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "derived-structural.csh")
+        val compiler = plan.compilerCandidateSource
+
+        PreprocessorProtection.protect(compiler, "derived-structural.csh")
+        assertFalse("#ifdef (" in compiler)
+        assertContains(compiler, "#if (")
+        assertContains(compiler, "SM_SETTING_MODE == 1")
+    }
+
+    @Test
     fun allocatesCompilerControlNamesWithoutCollidingWithShaderIdentifiers() {
         val source = """
             #version 460 compatibility

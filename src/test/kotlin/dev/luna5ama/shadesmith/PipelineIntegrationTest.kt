@@ -21,6 +21,40 @@ import kotlin.test.assertTrue
 
 class PipelineIntegrationTest {
     @Test
+    fun shadersPropertiesProgramPredicateParticipatesInRootCacheIdentity() = withWorkspace { workspace ->
+        val input = workspace.resolve("input").createDirectories()
+        val output = workspace.resolve("output")
+        val artifacts = workspace.resolve("artifacts")
+        input.resolve("composite.csh").writeText(
+            """
+                #version 460 compatibility
+                layout(local_size_x = 1) in;
+                void main() {}
+            """.trimIndent(),
+        )
+        val shadersProperties = input.resolve("shaders.properties")
+        shadersProperties.writeText("program.composite.enabled=true\n")
+
+        fun run(): OptimizedShaderFile {
+            val ioContext = IOContext(input, output)
+            val pipeline = ShaderPipeline(
+                artifacts,
+                cacheIdentityProvider = { "1".repeat(64) },
+            )
+            val result = context(ioContext) {
+                pipeline.optimize(listOf(requireNotNull(ioContext.readInputRoot("composite.csh"))))
+            }.single()
+            pipeline.publishCache()
+            return result
+        }
+
+        assertEquals(0, run().cacheHits)
+        assertEquals(1, run().cacheHits)
+        shadersProperties.writeText("#if SETTING_UNUSED\nprogram.composite.enabled=true\n#endif\n")
+        assertEquals(0, run().cacheHits)
+    }
+
+    @Test
     fun compilerCopySemanticsDriveDeterministicLifecycleOutputs() = withWorkspace { workspace ->
         val input = workspace.resolve("input")
         val output = workspace.resolve("output")

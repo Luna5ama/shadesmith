@@ -392,7 +392,7 @@ internal object PreprocessorProtection {
             PreprocessorDirectiveKind.IFNDEF,
             PreprocessorDirectiveKind.UNDEF,
             -> if (!IDENTIFIER_ONLY.matches(expression.substringBefore("//").trim())) {
-                reject(sourceName, sourceLine, "#$keyword requires one identifier")
+                reject(sourceName, sourceLine, "#$keyword requires one identifier, got '$expression'")
             }
 
             else -> Unit

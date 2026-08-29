@@ -108,8 +108,15 @@ internal data class ShaderVaryingStructuralSlots(
     }
 }
 
-internal data class ShaderStructuralSourceIsland(
+internal enum class ShaderStructuralEntitySlotKind {
+    TOP_LEVEL_REGION,
+    FUNCTION,
+}
+
+internal data class ShaderStructuralEntitySlot(
     val ordinal: Int,
+    val kind: ShaderStructuralEntitySlotKind,
+    val canonicalEntity: String?,
     val exactText: String,
     val sourceLine: Int,
     val beforeAnchor: IrisSourceAnchor?,
@@ -126,14 +133,14 @@ internal data class ShaderStructuralRestorationPlan(
     val sourceName: String,
     val settings: List<ShaderSetting>,
     val structuralSettings: Set<String>,
-    val islands: List<ShaderStructuralSourceIsland>,
+    val islands: List<ShaderStructuralEntitySlot>,
     val restorationContracts: List<IrisSourceContractSlice>,
     val issue: String?,
 ) {
     fun restore(source: String): ShaderStructuralRestoration {
         issue?.let { return ShaderStructuralRestoration.Preserved(it) }
         val anchors = findStableAnchors(source)
-        data class PendingInsertion(val offset: Int, val island: ShaderStructuralSourceIsland)
+        data class PendingInsertion(val offset: Int, val island: ShaderStructuralEntitySlot)
         val pending = mutableListOf<PendingInsertion>()
         islands.forEach { island ->
             val before = island.beforeAnchor?.let { anchor ->
@@ -187,7 +194,7 @@ internal data class ShaderStructuralRestorationPlan(
         return model.freezeSettingsForCompiler(rendered, assignment, structuralSettings)
     }
 
-    private fun anchorFailure(island: ShaderStructuralSourceIsland, anchor: IrisSourceAnchor, matches: Int): String {
+    private fun anchorFailure(island: ShaderStructuralEntitySlot, anchor: IrisSourceAnchor, matches: Int): String {
         val state = if (matches == 0) "missing" else "ambiguous ($matches matches)"
         return "$sourceName:${island.sourceLine}: structural island ${anchor.kind}:${anchor.name} anchor is $state"
     }
@@ -206,9 +213,11 @@ internal data class ShaderStructuralRestorationPlan(
             val structuralConditionalIds = basePlan.conditionals.filter {
                 it.disposition == ShaderConditionalDisposition.STRUCTURAL
             }.mapTo(hashSetOf()) { it.id }
-            val candidates = model.structuralIslandRanges(graph.structuralSettings, structuralConditionalIds)
+            val candidates = model.structuralEntitySlots(graph.structuralSettings, structuralConditionalIds)
             val partialOverlap = candidates.firstOrNull { candidate ->
-                contractRanges.any { contract -> candidate.overlaps(contract) && !contract.containsRange(candidate) }
+                contractRanges.any { contract ->
+                    candidate.range.overlaps(contract) && !contract.containsRange(candidate.range)
+                }
             }
             if (partialOverlap != null) {
                 return ShaderStructuralRestorationPlan(
@@ -217,12 +226,24 @@ internal data class ShaderStructuralRestorationPlan(
                     graph.structuralSettings,
                     emptyList(),
                     basePlan.irisContracts.contracts,
-                    "${basePlan.sourceName}:${model.lineAt(partialOverlap.first)}: structural island partially overlaps an Iris contract",
+                    "${basePlan.sourceName}:${model.lineAt(partialOverlap.range.first)}: structural entity slot partially overlaps an Iris contract",
                 )
             }
-            val uncovered = candidates.filterNot { candidate -> contractRanges.any { it.containsRange(candidate) } }
-            val merged = mergeStructuralRanges(source, uncovered)
-            val nested = merged.firstOrNull { model.braceDepthAt(it.first) != 0 }
+            val uncovered = candidates.filterNot { candidate ->
+                contractRanges.any { it.containsRange(candidate.range) }
+            }
+            val functions = uncovered.filter { it.kind == ShaderStructuralEntitySlotKind.FUNCTION }
+                .distinctBy { it.range }
+            val mergedTopLevel = mergeStructuralRanges(
+                source,
+                uncovered.filter { it.kind == ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION }.map { it.range },
+            ).map { range ->
+                StructuralEntitySlotCandidate(range, ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION, null)
+            }
+            val merged = (functions + mergedTopLevel).sortedBy { it.range.first }
+            val nested = merged.firstOrNull {
+                it.kind == ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION && model.braceDepthAt(it.range.first) != 0
+            }
             if (nested != null) {
                 return ShaderStructuralRestorationPlan(
                     basePlan.sourceName,
@@ -230,15 +251,17 @@ internal data class ShaderStructuralRestorationPlan(
                     graph.structuralSettings,
                     emptyList(),
                     basePlan.irisContracts.contracts,
-                    "${basePlan.sourceName}:${model.lineAt(nested.first)}: structural island is nested inside executable code",
+                    "${basePlan.sourceName}:${model.lineAt(nested.range.first)}: structural entity slot is nested inside executable code",
                 )
             }
-            val excluded = merged + contractRanges
+            val mergedRanges = merged.map { it.range }
+            val excluded = mergedRanges + contractRanges
             val anchors = findStableAnchors(source).filter { anchor ->
                 anchor.anchor.kind != IrisAnchorKind.DECLARATION && excluded.none { it.overlaps(anchor.range) }
             }
             var issue: String? = null
-            val islands = merged.mapIndexed { ordinal, range ->
+            val islands = merged.mapIndexed { ordinal, slot ->
+                val range = slot.range
                 val before = anchors.filter { it.range.last < range.first }.maxByOrNull { it.range.last }
                 val after = anchors.filter { it.range.first > range.last }.minByOrNull { it.range.first }
                 if (before == null && after == null) {
@@ -250,8 +273,10 @@ internal data class ShaderStructuralRestorationPlan(
                     range.first - before.range.last <= after.range.first - range.last -> IrisAnchorPlacement.AFTER_BEFORE
                     else -> IrisAnchorPlacement.BEFORE_AFTER
                 }
-                ShaderStructuralSourceIsland(
+                ShaderStructuralEntitySlot(
                     ordinal,
+                    slot.kind,
+                    slot.canonicalEntity,
                     source.substring(range),
                     model.lineAt(range.first),
                     before?.anchor,
@@ -259,7 +284,13 @@ internal data class ShaderStructuralRestorationPlan(
                     placement,
                 )
             }
-            val reanchored = reanchorContracts(basePlan, source, merged, contractLocations)
+            if (issue == null) {
+                islands.firstOrNull { it.kind == ShaderStructuralEntitySlotKind.FUNCTION }?.let { slot ->
+                    issue = "${basePlan.sourceName}:${slot.sourceLine}: whole-function structural entity slot " +
+                        "'${slot.canonicalEntity}' requires optimized-entity restoration"
+                }
+            }
+            val reanchored = reanchorContracts(basePlan, source, mergedRanges, contractLocations)
             if (issue == null) issue = reanchored.issue
             return ShaderStructuralRestorationPlan(
                 basePlan.sourceName,
@@ -416,6 +447,7 @@ internal object ShaderStructuralPlanner {
         basePlan: ShaderCompilerCopyPlan,
         stage: ShaderStage,
         compileFeedback: ShaderStructuralCompileFeedback? = null,
+        activation: ProgramActivationContract? = null,
     ): ShaderStructuralPlanningResult {
         if (!requiresPlanning(basePlan)) {
             return ShaderStructuralPlanningResult.Preserved(
@@ -527,11 +559,18 @@ internal object ShaderStructuralPlanner {
         val hiddenDependencies = mutableListOf<Set<String>>()
         repeat(settings.size.coerceAtLeast(1)) {
             val graph = buildGraph(nodes, settings, hiddenDependencies)
-            val assignments = coverageAssignments(graph, settings)
+            val assignments = coverageAssignments(graph, settings)?.filterNot { assignment ->
+                activation?.isProvenDisabled(assignment, settings) == true
+            }
                 ?: return ShaderStructuralPlanningResult.Preserved(
                     "${basePlan.sourceName}: structural dependency domain exceeds $MAX_COMPONENT_ASSIGNMENTS rows\n" +
                         graph.diagnostic(),
                 )
+            if (assignments.isEmpty()) {
+                return ShaderStructuralPlanningResult.Preserved(
+                    "${basePlan.sourceName}: program activation contract proves every structural assignment disabled",
+                )
+            }
             val rows = mutableListOf<ShaderStructuralCoverageRow>()
             val plansByShape = linkedMapOf<StructuralCoverageShapeKey, ShaderCompilerCopyPlan>()
             try {
@@ -891,10 +930,10 @@ private class StructuralSourceModel(
         }
     }
 
-    fun structuralIslandRanges(
+    fun structuralEntitySlots(
         selectedSettings: Set<String>,
         structuralConditionalIds: Set<Int>,
-    ): List<IntRange> {
+    ): List<StructuralEntitySlotCandidate> {
         val selectedGroups = groups.filter { group ->
             group.id in structuralConditionalIds &&
                 groupSettingDependencies.getValue(group.id).any(selectedSettings::contains)
@@ -905,7 +944,24 @@ private class StructuralSourceModel(
         val directRanges = sourceDirectRegions.filter { region ->
             region.settings.any(selectedSettings::contains) && groupRanges.none { it.containsRange(region.range) }
         }.map { it.range }
-        return (groupRanges + directRanges).distinct().sortedBy { it.first }
+        return (groupRanges + directRanges).distinct().map { range ->
+            val function = topLevelBlocks.singleOrNull { block ->
+                block.kind == TopLevelGlslBlockKind.FUNCTION && block.fullRange.containsRange(range)
+            }
+            if (function == null) {
+                StructuralEntitySlotCandidate(
+                    range,
+                    ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION,
+                    null,
+                )
+            } else {
+                StructuralEntitySlotCandidate(
+                    function.fullRange,
+                    ShaderStructuralEntitySlotKind.FUNCTION,
+                    normalizeStructuralSignatureText(source.substring(function.prefixRange)),
+                )
+            }
+        }.distinctBy { listOf(it.range, it.kind, it.canonicalEntity) }.sortedBy { it.range.first }
     }
 
     fun braceDepthAt(offset: Int): Int {
@@ -1309,6 +1365,12 @@ private data class StructuralDirectRegion(
     val detail: String,
 )
 
+private data class StructuralEntitySlotCandidate(
+    val range: IntRange,
+    val kind: ShaderStructuralEntitySlotKind,
+    val canonicalEntity: String?,
+)
+
 private data class StructuralDirective(val directive: PreprocessorDirective, val range: IntRange)
 
 private data class StructuralConditionalGroup(
@@ -1606,7 +1668,7 @@ private class StructuralPreprocessorEvaluator(
     }
 }
 
-private class StructuralExpressionParser(
+internal class StructuralExpressionParser(
     private val source: String,
     private val identifierValue: (String) -> Long?,
     private val isDefined: (String) -> Boolean,

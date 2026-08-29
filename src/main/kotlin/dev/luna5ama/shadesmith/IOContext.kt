@@ -9,6 +9,7 @@ import kotlin.io.path.absolute
 import kotlin.io.path.absolutePathString
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
+import kotlin.io.path.isRegularFile
 import kotlin.io.path.pathString
 import kotlin.io.path.readText
 import kotlin.io.path.relativeTo
@@ -26,6 +27,10 @@ class IOContext(val inputPath: Path, val outputPath: Path) {
         Json.decodeFromString<Config>(inputPath.resolve("shadesmith.json").readText())
     }.getOrElse {
         Config()
+    }
+
+    internal val programActivations = inputPath.resolve("shaders.properties").let { path ->
+        if (path.isRegularFile()) ProgramActivationIndex.parse(path.readText()) else ProgramActivationIndex.empty()
     }
 
     fun resolveInputPath(path: String): Path {
