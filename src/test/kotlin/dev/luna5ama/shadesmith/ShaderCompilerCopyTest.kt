@@ -105,6 +105,132 @@ class ShaderCompilerCopyTest {
     }
 
     @Test
+    fun modelsHostPresenceAndIrisOptionsAsDistinctBaseControls() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_PBR_MATERIAL 1 //[0 1 2]
+            void main() {
+            #if defined(MC_TEXTURE_FORMAT_LAB_PBR) && (SETTING_PBR_MATERIAL == 1 || SETTING_PBR_MATERIAL == 2)
+                int value = 1;
+            #else
+                int value = 0;
+            #endif
+            }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "host-presence.csh")
+
+        assertTrue(plan.structuralBlockers.isEmpty(), plan.structuralBlockers.toString())
+        val host = plan.settings.single { it.name == "MC_TEXTURE_FORMAT_LAB_PBR" }
+        val option = plan.settings.single { it.name == "SETTING_PBR_MATERIAL" }
+        assertEquals(ShaderControlKind.HOST_PRESENCE, host.controlKind)
+        assertEquals(ShaderControlKind.IRIS_SCALAR, option.controlKind)
+        assertEquals(0, host.specializationId)
+        assertEquals(1, option.specializationId)
+        assertEquals("SM_HOST_MC_TEXTURE_FORMAT_LAB_PBR", host.compilerName)
+        val compiler = assertNotNull(plan.compilerSource)
+        assertContains(compiler, "layout(constant_id = 0) const bool SM_HOST_MC_TEXTURE_FORMAT_LAB_PBR = false;")
+        assertContains(compiler, "layout(constant_id = 1) const int SM_SETTING_PBR_MATERIAL = 1;")
+        assertContains(compiler, "SM_HOST_MC_TEXTURE_FORMAT_LAB_PBR")
+        assertFalse("defined(MC_TEXTURE_FORMAT_LAB_PBR)" in compiler)
+    }
+
+    @Test
+    fun lowersDerivedPresenceAndScalarMacrosWithoutAllocatingExtraIds() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_TBN_PACKING 1 //[0 1]
+            #if SETTING_TBN_PACKING == 1
+            #define GBUFFER_USE_TBN_PACKING
+            #else
+            // Explicitly absent.
+            #endif
+            #if SETTING_TBN_PACKING == 0
+            #define TBN_WEIGHT 2
+            #else
+            #define TBN_WEIGHT 4
+            #endif
+            void main() {
+            #ifdef GBUFFER_USE_TBN_PACKING
+                int value = TBN_WEIGHT;
+            #else
+                int value = 0;
+            #endif
+            }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "derived-controls.csh")
+
+        assertTrue(plan.structuralBlockers.isEmpty(), plan.structuralBlockers.toString())
+        assertEquals(1, plan.settings.size)
+        assertEquals(
+            setOf(ShaderDerivedControlKind.PRESENCE, ShaderDerivedControlKind.SCALAR),
+            plan.derivedControls.mapTo(hashSetOf()) { it.kind },
+        )
+        val compiler = assertNotNull(plan.compilerSource)
+        assertEquals(1, "layout\\(constant_id".toRegex().findAll(compiler).count())
+        assertFalse("#define GBUFFER_USE_TBN_PACKING" in compiler)
+        assertFalse("#define TBN_WEIGHT" in compiler)
+        assertFalse("#ifdef GBUFFER_USE_TBN_PACKING" in compiler)
+        assertContains(compiler, "SM_SETTING_TBN_PACKING == 1")
+        assertContains(compiler, "? (2) : (4)")
+    }
+
+    @Test
+    fun allocatesCompilerControlNamesWithoutCollidingWithShaderIdentifiers() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_MODE 2 //[1 2]
+            int SM_SETTING_MODE = 7;
+            // SETTING_MODE remains recognizable in source comments.
+            void main() {
+                int value = SETTING_MODE + SM_SETTING_MODE;
+            }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "hygienic-name.csh")
+
+        val setting = plan.settings.single()
+        assertEquals("SM_SETTING_MODE_", setting.compilerName)
+        val compiler = assertNotNull(plan.compilerSource)
+        assertContains(compiler, "const int SM_SETTING_MODE_ = 2;")
+        assertContains(compiler, "int SM_SETTING_MODE = 7;")
+        assertContains(compiler, "int value = SM_SETTING_MODE_ + SM_SETTING_MODE;")
+        assertContains(compiler, "// SETTING_MODE remains recognizable in source comments.")
+    }
+
+    @Test
+    fun renamesDynamicGlobalConstantWithoutCapturingLocalShadow() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_ALBEDO 1 //[1 2]
+            const vec3 GROUND_ALBEDO_BASE = vec3(SETTING_ALBEDO);
+            vec3 passthrough(vec3 GROUND_ALBEDO_BASE) {
+                return GROUND_ALBEDO_BASE;
+            }
+            void main() {
+                vec3 before = GROUND_ALBEDO_BASE;
+                {
+                    const vec3 GROUND_ALBEDO_BASE = vec3(0.0);
+                    vec3 local = GROUND_ALBEDO_BASE;
+                }
+                vec3 after = GROUND_ALBEDO_BASE;
+            }
+        """.trimIndent()
+
+        val compiler = assertNotNull(ShaderCompilerCopyPlanner.plan(source, "begin3.csh").compilerSource)
+
+        assertContains(compiler, "#define SM_DYNAMIC_GROUND_ALBEDO_BASE (vec3(SM_SETTING_ALBEDO))")
+        assertContains(compiler, "vec3 passthrough(vec3 GROUND_ALBEDO_BASE)")
+        assertContains(compiler, "return GROUND_ALBEDO_BASE;")
+        assertContains(compiler, "vec3 before = SM_DYNAMIC_GROUND_ALBEDO_BASE;")
+        assertContains(compiler, "const vec3 GROUND_ALBEDO_BASE = vec3(0.0);")
+        assertContains(compiler, "vec3 local = GROUND_ALBEDO_BASE;")
+        assertContains(compiler, "vec3 after = SM_DYNAMIC_GROUND_ALBEDO_BASE;")
+        assertFalse("#define GROUND_ALBEDO_BASE" in compiler)
+    }
+
+    @Test
     fun relaxesOnlyAggregateGlobalConstantsThatDependOnSpecializationValues() {
         val source = """
             #version 460 compatibility
@@ -116,10 +242,11 @@ class ShaderCompilerCopyTest {
             const vec3 tint = vec3(SETTING_GAIN);
             const vec2 offsets[2] = vec2[2](vec2(0.0), vec2(SETTING_GAIN));
             const vec2[3] typedOffsets = vec2[3](vec2(0.0), vec2(SETTING_GAIN), vec2(2.0));
+            const highp vec2[3] preciseTypedOffsets = vec2[3](vec2(0.0), vec2(SETTING_GAIN), vec2(2.0));
             const vec3 indirectTint = MAKE_TINT(1.0);
             float values[SETTING_SIZE];
             void main() {
-                values[0] = tint.x + offsets[1].x + typedOffsets[1].x + indirectTint.x + scalarGain + float(scalarSize);
+                values[0] = tint.x + offsets[1].x + typedOffsets[1].x + preciseTypedOffsets[1].x + indirectTint.x + scalarGain + float(scalarSize);
             }
         """.trimIndent()
 
@@ -127,13 +254,17 @@ class ShaderCompilerCopyTest {
 
         assertContains(compiler, "layout(constant_id = 0) const float SM_SETTING_GAIN = 1.0;")
         assertContains(compiler, "layout(constant_id = 1) const int SM_SETTING_SIZE = 2;")
-        assertContains(compiler, "#define scalarGain (SM_SETTING_GAIN)")
-        assertContains(compiler, "#define scalarSize (SM_SETTING_SIZE)")
-        assertContains(compiler, "#define tint (vec3(SM_SETTING_GAIN))")
+        assertContains(compiler, "#define SM_DYNAMIC_scalarGain (SM_SETTING_GAIN)")
+        assertContains(compiler, "#define SM_DYNAMIC_scalarSize (SM_SETTING_SIZE)")
+        assertContains(compiler, "#define SM_DYNAMIC_tint (vec3(SM_SETTING_GAIN))")
         assertContains(compiler, "      vec2 offsets[2] = vec2[2](vec2(0.0), vec2(SM_SETTING_GAIN));")
         assertContains(compiler, "      vec2[3] typedOffsets")
+        assertContains(compiler, "      highp vec2[3] preciseTypedOffsets")
         assertContains(compiler, "      vec3 indirectTint = MAKE_TINT(1.0);")
         assertContains(compiler, "float values[SM_SETTING_SIZE];")
+        assertContains(compiler, "SM_DYNAMIC_tint.x")
+        assertContains(compiler, "SM_DYNAMIC_scalarGain")
+        assertContains(compiler, "float(SM_DYNAMIC_scalarSize)")
     }
 
     @Test

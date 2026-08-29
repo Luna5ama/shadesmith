@@ -197,11 +197,16 @@ class IrisShaderContractTest {
         val compiler = assertNotNull(plan.compilerSource)
         assertContains(
             compiler,
-            "#define SHADOW_TEXEL_SIZE (1.0 / float(SM_IRIS_HOST_shadowMapResolution))",
+            "#define SM_DYNAMIC_SHADOW_TEXEL_SIZE (1.0 / float(SM_IRIS_HOST_shadowMapResolution))",
         )
         assertContains(
             compiler,
-            "#define SHADOW_MAP_SIZE (vec2(float(SM_IRIS_HOST_shadowMapResolution), SHADOW_TEXEL_SIZE))",
+            "#define SM_DYNAMIC_SHADOW_MAP_SIZE " +
+                "(vec2(float(SM_IRIS_HOST_shadowMapResolution), SM_DYNAMIC_SHADOW_TEXEL_SIZE))",
+        )
+        assertContains(
+            compiler,
+            "float value = SM_DYNAMIC_SHADOW_MAP_SIZE.x + SM_DYNAMIC_SHADOW_TEXEL_SIZE;",
         )
         assertFalse("const float SHADOW_TEXEL_SIZE" in compiler)
         assertFalse("const vec2 SHADOW_MAP_SIZE" in compiler)

@@ -16,6 +16,17 @@ internal enum class ShaderSettingType(val glslName: String) {
     FLOAT("float"),
 }
 
+internal enum class ShaderControlKind {
+    IRIS_SCALAR,
+    IRIS_PRESENCE,
+    HOST_PRESENCE,
+}
+
+internal enum class ShaderDerivedControlKind {
+    SCALAR,
+    PRESENCE,
+}
+
 internal data class ShaderSetting(
     val name: String,
     val type: ShaderSettingType,
@@ -24,10 +35,22 @@ internal data class ShaderSetting(
     val presenceToggle: Boolean,
     val specializationId: Int,
     val sourceSlices: List<String>,
-) {
-    val compilerName: String
-        get() = "SM_$name"
-}
+    val controlKind: ShaderControlKind = if (presenceToggle) {
+        ShaderControlKind.IRIS_PRESENCE
+    } else {
+        ShaderControlKind.IRIS_SCALAR
+    },
+    val compilerName: String = if (controlKind == ShaderControlKind.HOST_PRESENCE) "SM_HOST_$name" else "SM_$name",
+)
+
+internal data class ShaderDerivedControl(
+    val name: String,
+    val kind: ShaderDerivedControlKind,
+    val compilerExpression: String,
+    val settingDependencies: Set<String>,
+    val sourceSlices: List<String>,
+    val sourceConditionalId: Int,
+)
 
 internal data class ShaderMacroDependency(
     val name: String,
@@ -35,6 +58,7 @@ internal data class ShaderMacroDependency(
     val dependencies: Set<String>,
     val settingDependencies: Set<String>,
     val sourceSlices: List<String>,
+    val derivedControl: ShaderDerivedControl? = null,
 )
 
 internal enum class ShaderSourceRegionKind {
@@ -82,6 +106,7 @@ internal data class ShaderCompilerCopyPlan(
     val compilerSource: String?,
     val compilerCandidateSource: String,
     val settings: List<ShaderSetting>,
+    val derivedControls: List<ShaderDerivedControl>,
     val macros: List<ShaderMacroDependency>,
     val sourceRegions: List<ShaderSourceRegion>,
     val conditionals: List<ShaderConditionalRegion>,
@@ -103,17 +128,20 @@ internal object ShaderCompilerCopyPlanner {
         val initialSourceMap = SourceMap(source, sourceName)
         initialSourceMap.directives += initialProtection.directives
         val settingCandidates = collectSettingCandidates(initialProtection.directives)
-        val initialMacroDependencies = resolveMacroDependencies(collectMacros(initialProtection.directives))
+        val initialMacroDrafts = collectMacros(initialProtection.directives)
+        var initialMacroDependencies = resolveMacroDependencies(initialMacroDrafts)
         val initialGroups = buildConditionalGroups(initialProtection.directives, initialSourceMap)
+        populateConditionalDependencies(initialGroups, initialMacroDependencies)
+        val initialDerivedControls = collectDerivedControls(
+            source,
+            initialSourceMap,
+            initialProtection.directives,
+            initialGroups,
+        )
+        initialMacroDependencies = resolveMacroDependencies(initialMacroDrafts, initialDerivedControls)
+        populateConditionalDependencies(initialGroups, initialMacroDependencies)
 
-        val referencedSettings = linkedSetOf<String>()
-        initialGroups.forEach { group ->
-            group.settingDependencies += settingDependencies(
-                group.delimiters.mapNotNull { it.expression }.joinToString(" "),
-                initialMacroDependencies,
-            )
-            referencedSettings += group.settingDependencies
-        }
+        val referencedSettings = initialGroups.flatMapTo(linkedSetOf()) { it.settingDependencies }
         val definitionRanges = initialProtection.directives
             .filter { it.macroName?.startsWith(SETTING_PREFIX) == true }
             .map { initialSourceMap.directiveRange(it) }
@@ -128,7 +156,7 @@ internal object ShaderCompilerCopyPlanner {
             .flatMap { it.settingDependencies }
 
         val blockers = mutableListOf<ShaderCompilerCopyBlocker>()
-        val settings = referencedSettings.sorted().mapNotNull { name ->
+        val optionControls = referencedSettings.sorted().mapNotNull { name ->
             val candidates = settingCandidates[name].orEmpty()
             if (candidates.isEmpty()) {
                 blockers += ShaderCompilerCopyBlocker(
@@ -144,12 +172,23 @@ internal object ShaderCompilerCopyPlanner {
                 }?.takeIf { it.reason == null }
             }
         }
+        val hostControls = collectHostPresenceCandidates(
+            source,
+            initialSourceMap,
+            initialProtection.directives,
+            initialGroups,
+            initialMacroDependencies,
+        )
+        val controls = (optionControls + hostControls).distinctBy { it.name }.sortedBy { it.name }
         val existingIds = EXISTING_SPECIALIZATION_ID.findAll(source)
             .map { it.groupValues[1].toInt() }
             .toMutableSet()
+        val reservedNames = identifiers(maskCommentsAndStrings(source)).toMutableSet()
         var nextId = 0
-        val typedSettings = settings.map { candidate ->
+        val typedSettings = controls.map { candidate ->
             while (nextId in existingIds) nextId++
+            val controlKind = requireNotNull(candidate.controlKind)
+            val compilerName = allocateCompilerName(candidate.name, controlKind, reservedNames)
             val result = ShaderSetting(
                 name = candidate.name,
                 type = requireNotNull(candidate.type),
@@ -158,6 +197,8 @@ internal object ShaderCompilerCopyPlanner {
                 presenceToggle = candidate.presenceToggle,
                 specializationId = nextId,
                 sourceSlices = candidate.sourceSlices,
+                controlKind = controlKind,
+                compilerName = compilerName,
             )
             existingIds += nextId
             nextId++
@@ -177,22 +218,30 @@ internal object ShaderCompilerCopyPlanner {
         val protection = PreprocessorProtection.protect(planningSource, sourceName)
         val sourceMap = SourceMap(planningSource, sourceName)
         sourceMap.directives += protection.directives
-        val macroDependencies = resolveMacroDependencies(collectMacros(protection.directives))
+        val macroDrafts = collectMacros(protection.directives)
+        var macroDependencies = resolveMacroDependencies(macroDrafts)
         val groups = buildConditionalGroups(protection.directives, sourceMap)
+        populateConditionalDependencies(groups, macroDependencies)
+        val derivedControls = collectDerivedControls(planningSource, sourceMap, protection.directives, groups)
+        macroDependencies = resolveMacroDependencies(macroDrafts, derivedControls)
+        populateConditionalDependencies(groups, macroDependencies)
         val regions = findSourceRegions(planningSource, sourceMap)
-        groups.forEach { group ->
-            group.settingDependencies += settingDependencies(
-                group.delimiters.mapNotNull { it.expression }.joinToString(" "),
-                macroDependencies,
-            )
-        }
         irisContracts.structuralReason?.let { reason ->
             blockers += ShaderCompilerCopyBlocker(1, reason)
         }
 
         val groupById = groups.associateBy { it.id }
         groups.sortedByDescending { it.depth }.forEach { group ->
-            classifyGroup(group, groupById, planningSource, sourceMap, settingsByName, macroDependencies, regions)
+            classifyGroup(
+                group,
+                groupById,
+                planningSource,
+                sourceMap,
+                settingsByName,
+                macroDependencies,
+                derivedControls,
+                regions,
+            )
             if (group.disposition == ShaderConditionalDisposition.STRUCTURAL) {
                 blockers += ShaderCompilerCopyBlocker(group.opener.sourceLine, requireNotNull(group.reason))
             }
@@ -201,7 +250,7 @@ internal object ShaderCompilerCopyPlanner {
             planningSource,
             sourceMap,
             protection.directives,
-            settingsByName.keys,
+            typedSettings.filter { it.controlKind != ShaderControlKind.HOST_PRESENCE }.mapTo(hashSetOf()) { it.name },
             macroDependencies,
         )
         protection.directives.filter {
@@ -221,6 +270,7 @@ internal object ShaderCompilerCopyPlanner {
             typedSettings,
             groups,
             macroDependencies,
+            derivedControls,
         )
         return ShaderCompilerCopyPlan(
             sourceName = sourceName,
@@ -228,6 +278,7 @@ internal object ShaderCompilerCopyPlanner {
             compilerSource = compilerCandidate.takeIf { distinctBlockers.isEmpty() },
             compilerCandidateSource = compilerCandidate,
             settings = typedSettings,
+            derivedControls = derivedControls,
             macros = macroDependencies,
             sourceRegions = regions,
             conditionals = groups.map { group ->
@@ -275,6 +326,7 @@ internal object ShaderCompilerCopyPlanner {
                 "false",
                 listOf("false", "true"),
                 presenceToggle = true,
+                ShaderControlKind.IRIS_PRESENCE,
                 directive.sourceLine,
                 listOf(directive.exactText),
             )
@@ -288,6 +340,7 @@ internal object ShaderCompilerCopyPlanner {
                 "true",
                 listOf("false", "true"),
                 presenceToggle = true,
+                ShaderControlKind.IRIS_PRESENCE,
                 directive.sourceLine,
                 listOf(directive.exactText),
             )
@@ -310,6 +363,7 @@ internal object ShaderCompilerCopyPlanner {
             normalizeScalar(body, type),
             (if (rawDomain.isEmpty()) listOf(body) else rawDomain).map { normalizeScalar(it, type) }.distinct(),
             presenceToggle = false,
+            ShaderControlKind.IRIS_SCALAR,
             directive.sourceLine,
             listOf(directive.exactText),
         )
@@ -319,7 +373,7 @@ internal object ShaderCompilerCopyPlanner {
         val invalid = candidates.firstOrNull { it.reason != null }
         if (invalid != null) return invalid
         val signatures = candidates.map {
-            listOf(it.type, it.defaultValue, it.domain, it.presenceToggle)
+            listOf(it.type, it.defaultValue, it.domain, it.presenceToggle, it.controlKind)
         }.distinct()
         if (signatures.size != 1) {
             return SettingCandidate.invalid(
@@ -347,10 +401,15 @@ internal object ShaderCompilerCopyPlanner {
             }
     }
 
-    private fun resolveMacroDependencies(drafts: List<MacroDraft>): List<ShaderMacroDependency> {
+    private fun resolveMacroDependencies(
+        drafts: List<MacroDraft>,
+        derivedControls: List<ShaderDerivedControl> = emptyList(),
+    ): List<ShaderMacroDependency> {
         val byName = drafts.associateBy { it.name }
+        val derivedByName = derivedControls.associateBy { it.name }
         val direct = drafts.associate { draft ->
-            draft.name to draft.bodies.flatMapTo(linkedSetOf()) { identifiers(stripComments(it)) - draft.name }
+            val expressions = draft.bodies + listOfNotNull(derivedByName[draft.name]?.compilerExpression)
+            draft.name to expressions.flatMapTo(linkedSetOf()) { identifiers(stripComments(it)) - draft.name }
         }
         val memo = mutableMapOf<String, Set<String>>()
         fun settingsFor(name: String, visiting: MutableSet<String>): Set<String> {
@@ -373,8 +432,203 @@ internal object ShaderCompilerCopyPlanner {
                 dependencies = direct.getValue(draft.name),
                 settingDependencies = settingsFor(draft.name, linkedSetOf()),
                 sourceSlices = draft.sourceSlices,
+                derivedControl = derivedByName[draft.name],
             )
         }
+    }
+
+    private fun populateConditionalDependencies(
+        groups: List<ConditionalGroup>,
+        macros: List<ShaderMacroDependency>,
+    ) {
+        groups.forEach { group ->
+            group.settingDependencies.clear()
+            group.settingDependencies += settingDependencies(
+                group.delimiters.mapNotNull { it.expression }.joinToString(" "),
+                macros,
+            )
+        }
+    }
+
+    private fun collectDerivedControls(
+        source: String,
+        sourceMap: SourceMap,
+        directives: List<PreprocessorDirective>,
+        groups: List<ConditionalGroup>,
+    ): List<ShaderDerivedControl> {
+        val delimiterIndexes = groups.flatMapTo(hashSetOf()) { group ->
+            (group.delimiters + listOfNotNull(group.endif)).map { it.index }
+        }
+        val mutationsByName = directives.filter {
+            it.kind in setOf(PreprocessorDirectiveKind.DEFINE, PreprocessorDirectiveKind.UNDEF) &&
+                it.macroName?.startsWith(SETTING_PREFIX) == false
+        }.groupBy { requireNotNull(it.macroName) }
+        val result = mutableListOf<ShaderDerivedControl>()
+        groups.filter { it.settingDependencies.isNotEmpty() }.forEach { group ->
+            val branches = branchSlices(group, source, sourceMap)
+            val internal = directives.filter { directive ->
+                sourceMap.directiveRange(directive).first in group.range && directive.index !in delimiterIndexes
+            }
+            if (internal.isEmpty() || internal.any {
+                    it.kind !in setOf(PreprocessorDirectiveKind.DEFINE, PreprocessorDirectiveKind.UNDEF) ||
+                        it.macroFunctionLike
+                }
+            ) {
+                return@forEach
+            }
+            val branchDirectives = branches.map { branch ->
+                internal.filter { sourceMap.directiveRange(it).first in branch.bodyRange }
+            }
+            val bodyOnlyDirectives = branches.zip(branchDirectives).all { (branch, branchItems) ->
+                val masked = branchItems.map { directive ->
+                    val range = sourceMap.directiveRange(directive)
+                    Replacement(
+                        range.first - branch.bodyRange.first,
+                        range.last + 1 - branch.bodyRange.first,
+                        maskSource(source.substring(range)),
+                    )
+                }
+                maskCommentsAndStrings(applyReplacements(branch.renderedBody, masked)).isBlank()
+            }
+            if (!bodyOnlyDirectives) return@forEach
+
+            internal.mapNotNull { it.macroName }.distinct().sorted().forEach { name ->
+                val allMutations = mutationsByName[name].orEmpty()
+                if (allMutations.any { sourceMap.directiveRange(it).first !in group.range }) return@forEach
+                val perBranch = branchDirectives.map { items ->
+                    val matching = items.filter { it.macroName == name }
+                    if (matching.size > 1) return@forEach
+                    matching.singleOrNull()
+                }
+                val bodies = perBranch.map { directive ->
+                    when (directive?.kind) {
+                        PreprocessorDirectiveKind.DEFINE -> stripComments(directive.macroBody.orEmpty()).trim()
+                        PreprocessorDirectiveKind.UNDEF, null -> null
+                        else -> return@forEach
+                    }
+                }
+                val presence = bodies.all { it == null || it.isEmpty() }
+                val expression = if (presence) {
+                    renderDerivedPresenceExpression(branches, bodies.map { it != null })
+                } else {
+                    if (branches.lastOrNull()?.directive?.kind != PreprocessorDirectiveKind.ELSE || bodies.any { it.isNullOrEmpty() }) {
+                        return@forEach
+                    }
+                    renderDerivedScalarExpression(branches, bodies.filterNotNull())
+                }
+                result += ShaderDerivedControl(
+                    name = name,
+                    kind = if (presence) ShaderDerivedControlKind.PRESENCE else ShaderDerivedControlKind.SCALAR,
+                    compilerExpression = expression,
+                    settingDependencies = group.settingDependencies.toSortedSet(),
+                    sourceSlices = allMutations.map { it.exactText },
+                    sourceConditionalId = group.id,
+                )
+            }
+        }
+        return result.distinctBy { it.name }
+    }
+
+    private fun renderDerivedPresenceExpression(
+        branches: List<ConditionalBranch>,
+        defined: List<Boolean>,
+    ): String {
+        val predicates = effectiveBranchPredicates(branches)
+        val selected = predicates.zip(defined).filter { it.second }.map { it.first }
+        return when (selected.size) {
+            0 -> "false"
+            1 -> selected.single()
+            else -> selected.joinToString(" || ", "(", ")") { "($it)" }
+        }
+    }
+
+    private fun renderDerivedScalarExpression(
+        branches: List<ConditionalBranch>,
+        bodies: List<String>,
+    ): String {
+        var expression = bodies.last()
+        val predicates = effectiveBranchPredicates(branches)
+        for (index in branches.lastIndex - 1 downTo 0) {
+            expression = "((${predicates[index]}) ? (${bodies[index]}) : ($expression))"
+        }
+        return expression
+    }
+
+    private fun effectiveBranchPredicates(branches: List<ConditionalBranch>): List<String> {
+        val previous = mutableListOf<String>()
+        return branches.map { branch ->
+            val current = rawDirectiveCondition(branch.directive)
+            val prefix = previous.joinToString(" && ") { "!($it)" }
+            if (current == null) {
+                if (prefix.isEmpty()) "true" else "($prefix)"
+            } else {
+                previous += current
+                if (prefix.isEmpty()) "($current)" else "(($prefix) && ($current))"
+            }
+        }
+    }
+
+    private fun rawDirectiveCondition(directive: PreprocessorDirective): String? {
+        return when (directive.kind) {
+            PreprocessorDirectiveKind.IFDEF -> "defined(${directive.macroName})"
+            PreprocessorDirectiveKind.IFNDEF -> "!defined(${directive.macroName})"
+            PreprocessorDirectiveKind.IF, PreprocessorDirectiveKind.ELIF -> directive.expression.orEmpty()
+                .substringBefore("//").trim()
+            PreprocessorDirectiveKind.ELSE -> null
+            else -> null
+        }
+    }
+
+    private fun collectHostPresenceCandidates(
+        source: String,
+        sourceMap: SourceMap,
+        directives: List<PreprocessorDirective>,
+        groups: List<ConditionalGroup>,
+        macros: List<ShaderMacroDependency>,
+    ): List<SettingCandidate> {
+        val relevantSlices = buildList {
+            groups.filter { it.settingDependencies.isNotEmpty() }.forEach { group ->
+                addAll(group.delimiters.map { it.exactText })
+            }
+            macros.filter { it.settingDependencies.isNotEmpty() }.forEach { macro ->
+                macro.derivedControl?.let { add(it.compilerExpression) }
+                addAll(macro.sourceSlices)
+            }
+        }
+        val macroNames = macros.mapTo(hashSetOf()) { it.name }
+        val names = relevantSlices.flatMapTo(sortedSetOf()) { slice ->
+            DEFINED_IDENTIFIER.findAll(slice).map { it.groupValues[1] }.filterNot {
+                it.startsWith(SETTING_PREFIX) || it.startsWith("GL_") || it in macroNames
+            }
+        }
+        val definedNames = directives.filter { it.kind == PreprocessorDirectiveKind.DEFINE }
+            .mapNotNullTo(hashSetOf()) { it.macroName }
+        return names.map { name ->
+            val slices = relevantSlices.filter { slice ->
+                DEFINED_IDENTIFIER.findAll(slice).any { it.groupValues[1] == name }
+            }
+            val default = if (name in definedNames) "true" else "false"
+            SettingCandidate(
+                name = name,
+                type = ShaderSettingType.BOOL,
+                defaultValue = default,
+                domain = listOf("false", "true"),
+                presenceToggle = true,
+                controlKind = ShaderControlKind.HOST_PRESENCE,
+                sourceLine = firstIdentifierUseLine(source, sourceMap, name),
+                sourceSlices = slices,
+            )
+        }
+    }
+
+    private fun allocateCompilerName(
+        sourceName: String,
+        kind: ShaderControlKind,
+        reservedNames: MutableSet<String>,
+    ): String {
+        var result = if (kind == ShaderControlKind.HOST_PRESENCE) "SM_HOST_$sourceName" else "SM_$sourceName"
+        while (!reservedNames.add(result)) result += '_'
+        return result
     }
 
     private fun buildConditionalGroups(
@@ -421,6 +675,7 @@ internal object ShaderCompilerCopyPlanner {
         sourceMap: SourceMap,
         settings: Map<String, ShaderSetting>,
         macros: List<ShaderMacroDependency>,
+        derivedControls: List<ShaderDerivedControl>,
         regions: List<ShaderSourceRegion>,
     ) {
         if (group.settingDependencies.isEmpty()) {
@@ -442,6 +697,18 @@ internal object ShaderCompilerCopyPlanner {
         }
         if (structuralChild != null) {
             group.structural("setting conditional contains structural conditional ${structuralChild.id}")
+            return
+        }
+        val derived = derivedControls.filter { it.sourceConditionalId == group.id }
+        if (derived.isNotEmpty()) {
+            val failed = derived.firstOrNull {
+                convertConditionExpression(it.compilerExpression, settings, macros) == null
+            }
+            if (failed == null) {
+                group.disposition = ShaderConditionalDisposition.COMPILER_NO_OP
+            } else {
+                group.structural("derived macro ${failed.name} cannot be represented as a typed GLSL expression")
+            }
             return
         }
         val rawBranches = branchSlices(group, source, sourceMap)
@@ -548,6 +815,7 @@ internal object ShaderCompilerCopyPlanner {
         settings: List<ShaderSetting>,
         groups: List<ConditionalGroup>,
         macros: List<ShaderMacroDependency>,
+        derivedControls: List<ShaderDerivedControl>,
     ): String {
         val groupsById = groups.associateBy { it.id }
         val settingsByName = settings.associateBy { it.name }
@@ -567,9 +835,11 @@ internal object ShaderCompilerCopyPlanner {
                 renderGroup(group, source, sourceMap, groupsById, settingsByName, macros),
             )
         }
+        val sourceOptionNames = settings.filter { it.controlKind != ShaderControlKind.HOST_PRESENCE }
+            .mapTo(hashSetOf()) { it.name }
         directives.filter {
             it.kind in SETTING_DEFINITION_DIRECTIVES &&
-                it.macroName in settingsByName
+                it.macroName in sourceOptionNames
         }.forEach {
             val range = sourceMap.directiveRange(it)
             if (rootTransformed.none { group -> range.first >= group.range.first && range.last <= group.range.last }) {
@@ -577,7 +847,15 @@ internal object ShaderCompilerCopyPlanner {
             }
         }
         var result = applyReplacements(source, replacements)
-        result = replaceIdentifierTokens(result, settings.associate { it.name to it.compilerName })
+        val compilerControlReplacements = settings.filter { it.controlKind != ShaderControlKind.HOST_PRESENCE }
+            .associate { it.name to it.compilerName }.toMutableMap()
+        derivedControls.forEach { derived ->
+            val expression = requireNotNull(convertConditionExpression(derived.compilerExpression, settingsByName, macros)) {
+                "derived control ${derived.name} lost its typed compiler expression"
+            }
+            compilerControlReplacements[derived.name] = "($expression)"
+        }
+        result = replaceIdentifierTokens(result, compilerControlReplacements)
         result = relaxAggregateSpecializationInitializers(result, macros)
         if (settings.isEmpty()) return result
 
@@ -774,14 +1052,13 @@ internal object ShaderCompilerCopyPlanner {
         macros: List<ShaderMacroDependency>,
     ): String? {
         if (directive.kind == PreprocessorDirectiveKind.ELSE) return null
-        val macroByName = macros.associateBy { it.name }
         val raw = when (directive.kind) {
             PreprocessorDirectiveKind.IFDEF,
             PreprocessorDirectiveKind.IFNDEF,
             -> {
-                val setting = settings[directive.macroName] ?: return null
-                if (!setting.presenceToggle) return null
-                return if (directive.kind == PreprocessorDirectiveKind.IFDEF) setting.compilerName else "!${setting.compilerName}"
+                val name = directive.macroName ?: return null
+                val expression = "defined($name)"
+                if (directive.kind == PreprocessorDirectiveKind.IFDEF) expression else "!($expression)"
             }
 
             PreprocessorDirectiveKind.IF,
@@ -790,32 +1067,97 @@ internal object ShaderCompilerCopyPlanner {
 
             else -> return null
         }
-        var expression = raw
-        expression = DEFINED_SETTING.replace(expression) { match ->
-            val name = match.groupValues[1]
-            settings[name]?.takeIf { it.presenceToggle }?.compilerName ?: match.value
-        }
-        expression = DEFINED_SETTING_BARE.replace(expression) { match ->
-            val name = match.groupValues[1]
-            settings[name]?.takeIf { it.presenceToggle }?.compilerName ?: match.value
-        }
+        return convertConditionExpression(raw, settings, macros)
+    }
+
+    private fun convertConditionExpression(
+        raw: String,
+        settings: Map<String, ShaderSetting>,
+        macros: List<ShaderMacroDependency>,
+        visiting: Set<String> = emptySet(),
+    ): String? {
+        val macroByName = macros.associateBy { it.name }
         var failed = false
+        var expression = raw
+        expression = DEFINED_IDENTIFIER.replace(expression) { match ->
+            val name = match.groupValues[1]
+            val setting = settings[name]
+            when {
+                setting?.presenceToggle == true -> setting.compilerName
+                macroByName[name]?.derivedControl?.kind == ShaderDerivedControlKind.PRESENCE -> {
+                    val macro = macroByName.getValue(name)
+                    val expanded = if (name in visiting) null else {
+                        convertConditionExpression(
+                            requireNotNull(macro.derivedControl).compilerExpression,
+                            settings,
+                            macros,
+                            visiting + name,
+                        )
+                    }
+                    if (expanded == null) {
+                        failed = true
+                        match.value
+                    } else {
+                        "($expanded)"
+                    }
+                }
+                else -> match.value
+            }
+        }
+        expression = DEFINED_IDENTIFIER_BARE.replace(expression) { match ->
+            val name = match.groupValues[1]
+            val setting = settings[name]
+            when {
+                setting?.presenceToggle == true -> setting.compilerName
+                macroByName[name]?.derivedControl?.kind == ShaderDerivedControlKind.PRESENCE -> {
+                    val macro = macroByName.getValue(name)
+                    val expanded = if (name in visiting) null else {
+                        convertConditionExpression(
+                            requireNotNull(macro.derivedControl).compilerExpression,
+                            settings,
+                            macros,
+                            visiting + name,
+                        )
+                    }
+                    if (expanded == null) {
+                        failed = true
+                        match.value
+                    } else {
+                        "($expanded)"
+                    }
+                }
+                else -> match.value
+            }
+        }
         expression = IDENTIFIER.findAll(expression).toList().asReversed().fold(expression) { value, match ->
             val token = match.value
             val replacement = when {
-                token in settings -> settings.getValue(token).compilerName
-                macroByName[token]?.settingDependencies?.isNotEmpty() == true -> {
-                    val macro = macroByName.getValue(token)
-                    if (macro.functionLike || macro.sourceSlices.size != 1) {
+                token in settings -> {
+                    val control = settings.getValue(token)
+                    if (control.controlKind == ShaderControlKind.HOST_PRESENCE) {
                         failed = true
                         token
                     } else {
-                        val body = stripComments(macro.sourceSlices.single().substringAfter(macro.name)).trim()
-                        val expanded = replaceIdentifierTokens(
-                            body,
-                            settings.mapValues { it.value.compilerName },
-                        )
-                        "($expanded)"
+                        control.compilerName
+                    }
+                }
+                macroByName[token]?.settingDependencies?.isNotEmpty() == true -> {
+                    val macro = macroByName.getValue(token)
+                    if (macro.functionLike || token in visiting) {
+                        failed = true
+                        token
+                    } else {
+                        val body = macro.derivedControl?.compilerExpression ?: macro.sourceSlices.singleOrNull()
+                            ?.let { stripComments(it.substringAfter(macro.name)).trim() }
+                        val expanded = body?.let {
+                            convertConditionExpression(it, settings, macros, visiting + token)
+                        }
+                        if (expanded == null) {
+                            failed = true
+                            token
+                        } else {
+                            "($expanded)"
+                        }
                     }
                 }
 
@@ -1127,6 +1469,10 @@ internal object ShaderCompilerCopyPlanner {
     }
 
     private fun firstSettingUseLine(source: String, sourceMap: SourceMap, name: String): Int {
+        return firstIdentifierUseLine(source, sourceMap, name)
+    }
+
+    private fun firstIdentifierUseLine(source: String, sourceMap: SourceMap, name: String): Int {
         val offset = IDENTIFIER_TOKEN(name).find(source)?.range?.first ?: return 1
         return sourceMap.lineAt(offset)
     }
@@ -1219,17 +1565,18 @@ internal object ShaderCompilerCopyPlanner {
 
     private fun replaceIdentifierTokens(source: String, replacements: Map<String, String>): String {
         if (replacements.isEmpty()) return source
+        val lexical = maskCommentsAndStrings(source)
         return buildString(source.length) {
             var cursor = 0
             while (cursor < source.length) {
-                val char = source[cursor]
+                val char = lexical[cursor]
                 if (!char.isAsciiIdentifierStart()) {
-                    append(char)
+                    append(source[cursor])
                     cursor++
                     continue
                 }
                 val start = cursor++
-                while (cursor < source.length && source[cursor].isAsciiIdentifierPart()) cursor++
+                while (cursor < source.length && lexical[cursor].isAsciiIdentifierPart()) cursor++
                 val token = source.substring(start, cursor)
                 append(replacements[token] ?: token)
             }
@@ -1246,6 +1593,7 @@ internal object ShaderCompilerCopyPlanner {
         val defaultValue: String?,
         val domain: List<String>,
         val presenceToggle: Boolean,
+        val controlKind: ShaderControlKind?,
         val sourceLine: Int,
         val sourceSlices: List<String>,
         val reason: String? = null,
@@ -1256,7 +1604,7 @@ internal object ShaderCompilerCopyPlanner {
             }
 
             fun invalid(name: String, line: Int, slices: List<String>, reason: String): SettingCandidate {
-                return SettingCandidate(name, null, null, emptyList(), false, line, slices, reason)
+                return SettingCandidate(name, null, null, emptyList(), false, null, line, slices, reason)
             }
         }
     }
@@ -1393,8 +1741,8 @@ internal object ShaderCompilerCopyPlanner {
     private val STRING_LITERAL = "\"(?:[^\"\\\\]|\\\\.)*\"".toRegex()
     private val BLOCK_COMMENT = "/\\*.*?\\*/".toRegex(setOf(RegexOption.DOT_MATCHES_ALL))
     private val EXISTING_SPECIALIZATION_ID = "(?:constant_id|local_size_[xyz]_id)\\s*=\\s*([0-9]+)".toRegex()
-    private val DEFINED_SETTING = "\\bdefined\\s*\\(\\s*(SETTING_[A-Za-z0-9_]+)\\s*\\)".toRegex()
-    private val DEFINED_SETTING_BARE = "\\bdefined\\s+(SETTING_[A-Za-z0-9_]+)".toRegex()
+    private val DEFINED_IDENTIFIER = "\\bdefined\\s*\\(\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*\\)".toRegex()
+    private val DEFINED_IDENTIFIER_BARE = "\\bdefined\\s+([A-Za-z_][A-Za-z0-9_]*)".toRegex()
     private val DEFINED_REMAINS = "\\bdefined\\b".toRegex()
     private val COMPARISON_OPERATOR = "==|!=|<=|>=|<|>".toRegex()
     private val CASE_LABEL = "(?m)^[ \\t]*(?:case\\b[^:]*|default)[ \\t]*:".toRegex()
@@ -1407,8 +1755,8 @@ internal object ShaderCompilerCopyPlanner {
     private val ABI_DECLARATION = "\\b(?:uniform|buffer|in|out|attribute|varying|shared)\\b".toRegex()
     private val ABI_BLOCK_DECLARATION = "\\b(?:uniform|buffer)\\b[^{;]*\\{".toRegex()
     private val GLOBAL_CONST_INITIALIZER =
-        ("\\bconst\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(\\[[^=;]*])?\\s+" +
-            "[A-Za-z_][A-Za-z0-9_]*\\s*(\\[[^=;]*])?\\s*=").toRegex()
+        ("\\bconst\\s+(?:(?:highp|mediump|lowp|precise)\\s+)*([A-Za-z_][A-Za-z0-9_]*)\\s*" +
+            "((?:\\[[^=;]*])*)\\s+[A-Za-z_][A-Za-z0-9_]*\\s*((?:\\[[^=;]*])*)\\s*=").toRegex()
     private val SCALAR_GLSL_TYPES = setOf("bool", "int", "uint", "float", "double")
     private val VERSION_LINE = "(?m)^[ \\t]*#version\\b[^\\r\\n]*".toRegex()
     private val LINE_ENDING = "\\r\\n|\\n|\\r".toRegex()

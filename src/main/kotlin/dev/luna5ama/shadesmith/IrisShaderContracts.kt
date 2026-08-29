@@ -938,6 +938,11 @@ private data class DynamicTopLevelConstant(
     val indent: String,
 )
 
+private data class ContractSourceReplacement(
+    val range: IntRange,
+    val text: String,
+)
+
 private data class ContractMacroDefinition(
     val name: String,
     val body: String,
@@ -1076,6 +1081,26 @@ private class ContractLexicalMap(private val source: String) {
     fun isCode(offset: Int): Boolean = offset in code.indices && code[offset]
     fun isTopLevel(offset: Int): Boolean = offset in depth.indices && depth[offset] == 0
     fun isTopLevelCode(offset: Int): Boolean = isCode(offset) && depth[offset] == 0
+
+    fun depthAt(offset: Int): Int = depth.getOrElse(offset) { 0 }
+
+    fun enclosingBlockEnd(offset: Int): Int? {
+        val targetDepth = depthAt(offset)
+        if (targetDepth == 0) return null
+        for (cursor in offset until source.length) {
+            if (source[cursor] == '}' && isCode(cursor) && depthAt(cursor) == targetDepth) return cursor
+        }
+        return null
+    }
+
+    fun matchingBlockEnd(openBrace: Int): Int? {
+        if (source.getOrNull(openBrace) != '{' || !isCode(openBrace)) return null
+        val targetDepth = depthAt(openBrace) + 1
+        for (cursor in openBrace + 1 until source.length) {
+            if (source[cursor] == '}' && isCode(cursor) && depthAt(cursor) == targetDepth) return cursor
+        }
+        return null
+    }
 
     fun findCodeCharacter(character: Char, start: Int): Int? {
         for (offset in start until source.length) {
@@ -1387,12 +1412,80 @@ private fun lowerDynamicTopLevelConstants(source: String, initialDynamicNames: S
     } while (changed)
     if (lowered.isEmpty()) return source
 
-    return lowered.sortedByDescending { it.range.first }.fold(source) { result, constant ->
-        val expression = stripComments(constant.initializer).replace(WHITESPACE, " ").trim()
-        result.replaceRange(
-            constant.range,
-            "${constant.indent}#define ${constant.name} ($expression)",
+    val occupiedNames = IDENTIFIER.findAll(source).mapTo(linkedSetOf(), MatchResult::value)
+    val aliases = lowered.sortedBy { it.name }.associate { constant ->
+        var alias = "SM_DYNAMIC_${constant.name}"
+        while (alias in occupiedNames) alias += '_'
+        occupiedNames += alias
+        constant.name to alias
+    }
+    val loweredRanges = lowered.map(DynamicTopLevelConstant::range)
+    val directiveLines = PreprocessorProtection.protect(source, "<dynamic-global-constant>").directives
+    val lineMap = ContractLineMap(source)
+    val directiveRanges = directiveLines.map(lineMap::directiveRange)
+    val shadowRanges = aliases.keys.associateWith { name -> localShadowRanges(source, name, lexical) }
+    val replacements = mutableListOf<ContractSourceReplacement>()
+
+    lowered.forEach { constant ->
+        val expression = replaceFragmentIdentifiers(
+            stripComments(constant.initializer).replace(WHITESPACE, " ").trim(),
+            aliases,
         )
+        replacements += ContractSourceReplacement(
+            constant.range,
+            "${constant.indent}#define ${aliases.getValue(constant.name)} ($expression)",
+        )
+    }
+    IDENTIFIER.findAll(source).forEach { match ->
+        val alias = aliases[match.value] ?: return@forEach
+        val offset = match.range.first
+        if (!lexical.isCode(offset)) return@forEach
+        if (directiveRanges.any { offset in it }) return@forEach
+        if (loweredRanges.any { offset in it }) return@forEach
+        if (shadowRanges.getValue(match.value).any { offset in it }) return@forEach
+        replacements += ContractSourceReplacement(match.range, alias)
+    }
+    return replacements.sortedByDescending { it.range.first }.fold(source) { result, replacement ->
+        result.replaceRange(replacement.range, replacement.text)
+    }
+}
+
+private fun localShadowRanges(source: String, name: String, lexical: ContractLexicalMap): List<IntRange> {
+    val escapedName = Regex.escape(name)
+    val declarations = Regex(
+        "(?m)(?:^|[;{}])[\\t ]*" +
+            "(?:(?:const|precise|highp|mediump|lowp|in|out|inout)\\s+)*" +
+            "[A-Za-z_][A-Za-z0-9_]*(?:\\s*\\[[^]\\r\\n]*])?\\s+($escapedName)\\b",
+    ).findAll(source).mapNotNull { match ->
+        val offset = match.groups[1]?.range?.first ?: return@mapNotNull null
+        if (!lexical.isCode(offset) || lexical.isTopLevel(offset)) return@mapNotNull null
+        offset..(lexical.enclosingBlockEnd(offset) ?: return@mapNotNull null)
+    }.toMutableList()
+
+    FUNCTION_START.findAll(source).forEach { function ->
+        if (!lexical.isTopLevelCode(function.range.first)) return@forEach
+        val openParen = source.indexOf('(', function.range.first)
+        val openBrace = source.indexOf('{', function.range.first)
+        val closeParen = source.lastIndexOf(')', openBrace)
+        if (openParen < 0 || closeParen < openParen || openBrace < 0 || openBrace > function.range.last) return@forEach
+        val closeBrace = lexical.matchingBlockEnd(openBrace) ?: return@forEach
+        identifierRegex(name).findAll(source, openParen + 1).takeWhile { it.range.first < closeParen }.filter {
+            lexical.isCode(it.range.first)
+        }.forEach { match ->
+            declarations += match.range.first..closeBrace
+        }
+    }
+    return declarations
+}
+
+private fun replaceFragmentIdentifiers(source: String, replacements: Map<String, String>): String {
+    if (replacements.isEmpty()) return source
+    val lexical = ContractLexicalMap(source)
+    val matches = IDENTIFIER.findAll(source).filter {
+        it.value in replacements && lexical.isCode(it.range.first)
+    }.toList()
+    return matches.asReversed().fold(source) { result, match ->
+        result.replaceRange(match.range, replacements.getValue(match.value))
     }
 }
 
