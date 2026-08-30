@@ -288,13 +288,16 @@ internal class ShaderPipelineCache(
                 ?.normalize()
         }
 
-        private fun toolchainContract(executables: SpirvExecutables): String {
+        internal fun toolchainContract(executables: SpirvExecutables): String {
             return buildList {
+                add(CompilerCopyEarlyReturnNormalizer.CACHE_CONTRACT)
                 add(executables.glslang)
                 addAll(listOf("--target-env", "opengl", "--target-env", "spirv1.3", "-S", "<stage>", "-o", "<output>", "<input>"))
                 add(executables.spirvOpt)
                 addAll(SpirvToolchain.OPTIMIZER_PASSES)
                 addAll(listOf("<input>", "-o", "<output>"))
+                add("cross-adapter")
+                addAll(SpirvToolchain.CROSS_ADAPTER_PASSES)
                 add(executables.spirvCross)
                 addAll(
                     listOf(

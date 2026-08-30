@@ -333,16 +333,25 @@ internal class SpirvOptimizer(
                 sourceContracts = module.irisContracts,
             )
         }
+        val earlyReturnNormalization = phase(
+            request,
+            SpirvRoundTripPhase.PATCH_INPUT,
+            moduleDirectory,
+            moduleSourceName,
+        ) {
+            CompilerCopyEarlyReturnNormalizer.normalize(patch.compilerSource)
+        }
+        moduleDirectory.resolve("compiler-early-returns.txt").writeText(earlyReturnNormalization.renderReport())
         val plannedNativeContract = phase(
             request,
             SpirvRoundTripPhase.PATCH_INPUT,
             moduleDirectory,
             moduleSourceName,
         ) {
-            SpirvNativePrimitiveContract.plan(patch.compilerSource)
+            SpirvNativePrimitiveContract.plan(earlyReturnNormalization.source)
         }
-        val compilerSource = plannedNativeContract?.prepareCompilerSource(patch.compilerSource)
-            ?: patch.compilerSource
+        val compilerSource = plannedNativeContract?.prepareCompilerSource(earlyReturnNormalization.source)
+            ?: earlyReturnNormalization.source
         val compilerPath = moduleDirectory.resolve("compiler.glsl")
         compilerPath.writeText(compilerSource)
 
@@ -402,7 +411,7 @@ internal class SpirvOptimizer(
             optimizedSpirv
         } else {
             val crossCompilerPath = moduleDirectory.resolve("cross-compiler.glsl")
-            crossCompilerPath.writeText(nativeContract.prepareCrossSource(patch.compilerSource))
+            crossCompilerPath.writeText(nativeContract.prepareCrossSource(earlyReturnNormalization.source))
             val crossOriginalSpirv = moduleDirectory.resolve("cross-input.spv")
             crossCompileInvocation = toolchain.compileInvocation(request.stage, crossCompilerPath, crossOriginalSpirv)
             phase(request, SpirvRoundTripPhase.COMPILE, moduleDirectory, moduleSourceName) {
@@ -522,12 +531,17 @@ internal class SpirvOptimizer(
         } else {
             bridgeSource
         }
+        val restoredWithTypes = if (restorationFailure == null && !deferFinalRestoration) {
+            SpirvFinalEmitter.restoreMissingSourceTypeDeclarations(request, restored)
+        } else {
+            restored
+        }
         val restoredPath = moduleDirectory.resolve("restored.glsl")
-        restoredPath.writeText(restored)
+        restoredPath.writeText(restoredWithTypes)
 
         val validationCompilerSource = if (restorationFailure == null) {
             val compilerRestored = SpirvSettingBridge.restoreCompilerDeclarations(
-                restored,
+                restoredWithTypes,
                 bridgeSettings,
                 emptyMap(),
                 emptySet(),
@@ -553,8 +567,10 @@ internal class SpirvOptimizer(
                     moduleSourceName,
                 )
             }
-            nativeContract?.prepareCompilerSource(validationPatch.compilerSource)
-                ?: validationPatch.compilerSource
+            val validationNormalization = CompilerCopyEarlyReturnNormalizer.normalize(validationPatch.compilerSource)
+            moduleDirectory.resolve("validation-early-returns.txt").writeText(validationNormalization.renderReport())
+            nativeContract?.prepareCompilerSource(validationNormalization.source)
+                ?: validationNormalization.source
         } else {
             compilerSource
         }
@@ -595,7 +611,7 @@ internal class SpirvOptimizer(
             TextureAccessAnalyzer.restoreProbeResources(internalCoreSource, module.resourceMarkers)
         }
         val emissionSource = phase(request, SpirvRoundTripPhase.RESTORE, moduleDirectory, moduleSourceName) {
-            TextureAccessAnalyzer.restoreProbeResources(restored, module.resourceMarkers)
+            TextureAccessAnalyzer.restoreProbeResources(restoredWithTypes, module.resourceMarkers)
         }
         val emissionPatch = phase(request, SpirvRoundTripPhase.VALIDATE, moduleDirectory, moduleSourceName) {
             val sourceWithoutMarkers = TextureAccessAnalyzer.restoreProbeResources(module.source, module.resourceMarkers)
@@ -757,6 +773,12 @@ internal class SpirvOptimizer(
             }
             val moduleDirectory = finalDirectory.resolve(safeName(module.name))
             moduleDirectory.createDirectories()
+            val selectedDiagnostic = moduleDirectory.resolve("selected.failed.glsl")
+            val preprocessedDiagnostic = moduleDirectory.resolve("preprocessed.failed.glsl")
+            val materializedDiagnostic = moduleDirectory.resolve("materialized.failed.glsl")
+            selectedDiagnostic.writeText(selectedSource)
+            preprocessedDiagnostic.writeText(preprocessedSource)
+            materializedDiagnostic.writeText(materialized)
             val actualSignature = ShaderStructuralSignatureExtractor.extract(
                 request.stage,
                 materialized,
@@ -814,9 +836,11 @@ internal class SpirvOptimizer(
             }
             val compilerPath = moduleDirectory.resolve("final.glsl")
             val spirvPath = moduleDirectory.resolve("final.spv")
-            val finalCompilerSource = SpirvNativePrimitiveContract.plan(finalPatch.compilerSource)
-                ?.prepareCompilerSource(finalPatch.compilerSource)
-                ?: finalPatch.compilerSource
+            val finalNormalization = CompilerCopyEarlyReturnNormalizer.normalize(finalPatch.compilerSource)
+            moduleDirectory.resolve("early-returns.txt").writeText(finalNormalization.renderReport())
+            val finalCompilerSource = SpirvNativePrimitiveContract.plan(finalNormalization.source)
+                ?.prepareCompilerSource(finalNormalization.source)
+                ?: finalNormalization.source
             compilerPath.writeText(finalCompilerSource)
             val toolchain = if (processRunner == null) {
                 SpirvToolchain(
@@ -838,6 +862,9 @@ internal class SpirvOptimizer(
             ) {
                 toolchain.execute(invocation)
             }
+            Files.deleteIfExists(selectedDiagnostic)
+            Files.deleteIfExists(preprocessedDiagnostic)
+            Files.deleteIfExists(materializedDiagnostic)
             return invocation
         }
         if (candidates.size == 1) return listOf(validateModule(candidates.single(), preprocessedSources.single()))
@@ -1002,6 +1029,7 @@ internal class SpirvOptimizer(
         private val MODULE_ARTIFACT_NAMES = listOf(
             "input.glsl",
             "compiler.glsl",
+            "compiler-early-returns.txt",
             "input.spv",
             "optimized.spv",
             "cross-compiler.glsl",
@@ -1012,6 +1040,7 @@ internal class SpirvOptimizer(
             "native-primitives.txt",
             "restored.glsl",
             "validation.glsl",
+            "validation-early-returns.txt",
             "validation.spv",
         )
     }

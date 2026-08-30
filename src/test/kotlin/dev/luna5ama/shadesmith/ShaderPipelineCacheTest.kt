@@ -7,11 +7,20 @@ import java.util.concurrent.Executors
 import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
 import kotlin.test.Test
+import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 
 class ShaderPipelineCacheTest {
+    @Test
+    fun toolchainIdentityContainsOrderedPassesAndEarlyReturnLoweringContract() {
+        val contract = ShaderPipelineCache.toolchainContract(SpirvExecutables())
+
+        assertContains(contract, CompilerCopyEarlyReturnNormalizer.CACHE_CONTRACT)
+        assertContains(contract, SpirvToolchain.OPTIMIZER_PASSES.joinToString("\u0000"))
+    }
+
     @Test
     fun roundTripsCompleteStructuralEntriesAndInvalidatesEverySemanticInput() = withWorkspace { workspace ->
         val identity = ShaderPipelineCache.composeIdentity(

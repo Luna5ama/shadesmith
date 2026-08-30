@@ -762,6 +762,79 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
+    fun conditionalAbiVariantsWinOverAnOptimizedUnconditionalDuplicate() {
+        val source = """
+            #version 460 compatibility
+            #ifdef VOXEL_MATERIAL_VEC4
+            layout(std430, binding = 4) readonly buffer VoxelMaterialData {
+                uvec4 voxel_materials_v4[];
+            };
+            #else
+            layout(std430, binding = 4) readonly buffer VoxelMaterialData {
+                uint voxel_materials[];
+            };
+            #endif
+            layout(std430, binding = 4) readonly buffer VoxelMaterialData {
+                uint voxel_materials[];
+            };
+            void main() {}
+        """.trimIndent()
+
+        val result = SpirvFinalEmitter.deduplicateUnconditionalDeclarations(source)
+
+        assertContains(result, "uvec4 voxel_materials_v4[];")
+        assertContains(result, "uint voxel_materials[];")
+        assertEquals(2, Regex("\\bbuffer VoxelMaterialData\\b").findAll(result).count())
+        assertEquals(1, Regex("\\buint voxel_materials\\[\\]").findAll(result).count())
+    }
+
+    @Test
+    fun sourceFunctionSignatureReplacesCrossStorageQualifierDuplicate() {
+        val original = """
+            #version 460 compatibility
+            vec3 interpolateTurbo(float x) {
+                x *= 255.0;
+                return vec3(x);
+            }
+        """.trimIndent()
+        val restored = """
+            #version 460 compatibility
+            vec3 interpolateTurbo(inout float x) {
+                x *= 255.0;
+                return vec3(x);
+            }
+            vec3 interpolateTurbo(float x) {
+                x *= 255.0;
+                return vec3(x);
+            }
+        """.trimIndent()
+
+        val result = SpirvFinalEmitter.deduplicateRelaxedFunctionDefinitions(original, restored)
+
+        assertFalse("inout float x" in result)
+        assertEquals(1, Regex("vec3 interpolateTurbo\\(").findAll(result).count())
+        assertContains(result, "vec3 interpolateTurbo(float x)")
+    }
+
+    @Test
+    fun alreadyOrderedMacroDependentConstantIsNotHoistedWithAnUnrelatedLateConstant() {
+        val source = """
+            #version 460 compatibility
+            float useLate() { return LATE_VALUE; }
+            #define SAMPLE_COUNT 4
+            const float BASE_WEIGHT = 1.0 / SAMPLE_COUNT;
+            float useBase() { return BASE_WEIGHT; }
+            const float LATE_VALUE = 2.0;
+        """.trimIndent()
+
+        val result = SpirvFinalEmitter.hoistLateReferencedConstants(source)
+
+        assertTrue(result.indexOf("#define SAMPLE_COUNT 4") < result.indexOf("const float BASE_WEIGHT"))
+        assertTrue(result.indexOf("const float BASE_WEIGHT") < result.indexOf("float useBase"))
+        assertTrue(result.indexOf("const float LATE_VALUE") < result.indexOf("float useLate"))
+    }
+
+    @Test
     fun optimizedCapabilityFunctionRecoversSimpleOriginalGuard() {
         val original = """
             #version 460 compatibility

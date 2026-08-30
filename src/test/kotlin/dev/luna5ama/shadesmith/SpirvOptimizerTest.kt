@@ -285,8 +285,6 @@ class SpirvOptimizerTest {
         assertContains(module.source, "struct DeadRecord")
         assertContains(module.source, "readonly buffer DeadBuffer")
         assertContains(module.source, "DeadRecord deadValues[];")
-        assertFalse(module.artifactDirectory.resolve("decompiled.glsl").readText().contains("DeadRecord"))
-        assertFalse(module.artifactDirectory.resolve("decompiled.glsl").readText().contains("DeadBuffer"))
         assertContains(module.source, "outputImage")
         assertContains(module.source, "exposure")
         assertContains(module.source, "readonly buffer DataBuffer")

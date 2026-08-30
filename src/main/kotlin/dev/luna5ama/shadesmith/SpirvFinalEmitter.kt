@@ -144,7 +144,10 @@ internal object SpirvSettingBridge {
         fixedSettings: Set<String>,
     ): String {
         val bridgeRanges = locateBridges(source, settings)
-        settings.forEach { setting ->
+        val requiredSettings = settings.filter { setting ->
+            bridgeRanges.getValue(setting).isNotEmpty() || identifierRegex(setting.compilerName).containsMatchIn(source)
+        }
+        requiredSettings.forEach { setting ->
             val ranges = bridgeRanges.getValue(setting)
             require(ranges.isNotEmpty()) {
                 "setting bridge ${setting.compilerName} is missing from final GLSL"
@@ -155,7 +158,7 @@ internal object SpirvSettingBridge {
         }
         val result = removeRanges(source, bridgeRanges.values.flatten())
         val declarations = buildString {
-            settings.sortedBy { it.name }.forEach { setting ->
+            requiredSettings.sortedBy { it.name }.forEach { setting ->
                 if (setting.name in fixedSettings) {
                     append("const ")
                     append(setting.type.glslName)
@@ -467,13 +470,13 @@ internal object SpirvFinalEmitter {
                 bridgeSettings,
             )
         ) {
-            is SpirvSettingBridgeRestoration.Restored -> completion.source
+            is SpirvSettingBridgeRestoration.Restored -> completion
             is SpirvSettingBridgeRestoration.Preserved -> return preserved(request, completion.reason)
         }
         val restored = when (
             val bridges = SpirvSettingBridge.placeAfterDefinitions(
-                completedBridges,
-                bridgeSettings,
+                completedBridges.source,
+                completedBridges.settings,
                 restorationContracts.contracts,
             )
         ) {
@@ -549,14 +552,30 @@ internal object SpirvFinalEmitter {
         finalSource = relocateBranchOwnedPrologue(finalSource)
         finalSource = hoistLateDeclarationDependencies(finalSource)
         finalSource = hoistLateReferencedConstants(finalSource)
-        finalSource = ensureForwardFunctionDeclarations(finalSource)
         finalSource = relocateSourceAbiDeclarations(request, finalSource)
-        finalSource = hoistLateAbiDeclarations(finalSource)
         finalSource = relocateUnconditionalLateSourceAbiDeclarations(request, finalSource)
+        finalSource = hoistLateAbiDeclarations(finalSource)
         finalSource = hoistLateAbiQualifierMacros(finalSource)
         finalSource = resolveAbiModifierTokens(finalSource, signatures)
         finalSource = restoreMissingSourceTypeDeclarations(request, finalSource)
+        finalSource = when (
+            val dependencies = restoreMissingSourceGlobalDependencies(
+                request,
+                finalSource,
+                structuralPlan.restorationPlan,
+                modules.first().irisContracts,
+            )
+        ) {
+            is ShaderStructuralRestoration.Restored -> dependencies.source
+            is ShaderStructuralRestoration.Preserved -> return preserved(request, dependencies.reason)
+        }
+        finalSource = hoistLateDeclarationDependencies(finalSource)
+        finalSource = hoistLateReferencedConstants(finalSource)
+        finalSource = relocateUnconditionalLateSourceAbiDeclarations(request, finalSource)
+        finalSource = hoistLateAbiDeclarations(finalSource)
         finalSource = restoreSourceFunctionConditionalOwners(request.source, finalSource)
+        finalSource = deduplicateRelaxedFunctionDefinitions(request.source, finalSource)
+        finalSource = ensureForwardFunctionDeclarations(finalSource)
         finalSource = relocateUnconditionalAbiFromFunctionOwners(request, finalSource)
         finalSource = deduplicateUnconditionalDeclarations(finalSource)
         finalSource = hoistLateAbiQualifierMacros(finalSource)
@@ -732,8 +751,21 @@ internal object SpirvFinalEmitter {
         }
 
         val identities = parsedModules.flatMapTo(sortedSetOf()) { it.keys }
-        val sourceEntities = structuralEntities(request.source)
-        val sourceByIdentity = sourceEntities.groupBy(StructuralEntity::identity)
+        val sourceEntities = (
+            sourceStructuralEntities(request.source) +
+                scanSourceFunctions(request.source) +
+                scanNamedSourceFunctions(request.source)
+            ).distinctBy(StructuralEntity::range)
+        val sourceByIdentity = sourceEntities.groupBy(StructuralEntity::identity).toMutableMap()
+        val sourceFunctionsByShape = sourceEntities.filter { it.kind == StructuralEntityKind.FUNCTION }
+            .groupBy { relaxedFunctionIdentity(it.identity) }
+        identities.forEach { identity ->
+            if (identity !in sourceByIdentity && identity.startsWith("function:")) {
+                sourceFunctionsByShape[relaxedFunctionIdentity(identity)]?.let { matches ->
+                    sourceByIdentity[identity] = matches
+                }
+            }
+        }
         val retainedSlotReferences = retainedExistingSlots.flatMapTo(linkedSetOf()) { slot ->
             structuralEntities(slot.exactText).flatMap(StructuralEntity::references)
         }
@@ -1213,7 +1245,8 @@ internal object SpirvFinalEmitter {
                 )
             }
         val declaredSymbols = structuralEntities(commonCore).mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
-        val sourceBraceDepths = structuralBraceDepths(maskStructuralCode(source))
+        val sourceMask = maskStructuralCode(source)
+        val sourceBraceDepths = structuralBraceDepths(StructuralBranchMaskResolver(source, sourceMask).defaultMask())
         val constantSlots = dependencyIdentifiers.filter { it !in declaredSymbols }.mapNotNull { name ->
             val declaration = sourceConstDefinition(name).findAll(source).singleOrNull() ?: return@mapNotNull null
             if (sourceBraceDepths[declaration.range.first] != 0) return@mapNotNull null
@@ -1228,7 +1261,7 @@ internal object SpirvFinalEmitter {
                 placement = IrisAnchorPlacement.AFTER_BEFORE,
             )
         }
-        val sourceEntities = structuralEntities(source)
+        val sourceEntities = sourceStructuralEntities(source)
         val coreEntities = structuralEntities(commonCore)
         val sourceFunctions = sourceEntities.filter { it.kind == StructuralEntityKind.FUNCTION }
         val sourceFunctionsByName = sourceFunctions.groupBy { it.symbol }
@@ -1342,7 +1375,7 @@ internal object SpirvFinalEmitter {
         val declared = structuralEntities(source).mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
         val referenced = DECLARATION_IDENTIFIER.findAll(maskStructuralSource(source))
             .mapTo(linkedSetOf(), MatchResult::value)
-        val sourceConstants = structuralEntities(request.source).filter { entity ->
+        val sourceConstants = sourceStructuralEntities(request.source).filter { entity ->
             entity.kind == StructuralEntityKind.DECLARATION && entity.symbol != null &&
                 sourceConstDefinition(requireNotNull(entity.symbol))
                     .matches(request.source.substring(entity.range))
@@ -1386,6 +1419,76 @@ internal object SpirvFinalEmitter {
         ).restore(source)
     }
 
+    private fun restoreMissingSourceGlobalDependencies(
+        request: SpirvOptimizationRequest,
+        source: String,
+        restorationPlan: ShaderStructuralRestorationPlan,
+        irisContracts: IrisShaderContractPlan,
+    ): ShaderStructuralRestoration {
+        val declared = sourceStructuralEntities(source).mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
+        val sourceDeclarations = sourceStructuralEntities(request.source).filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION && entity.symbol != null &&
+                !structuralDeclarationPrototype(request.source.substring(entity.range))
+        }.groupBy { requireNotNull(it.symbol) }
+        val selected = linkedMapOf<String, StructuralEntity>()
+        val pending = ArrayDeque(
+            DECLARATION_IDENTIFIER.findAll(maskStructuralCode(source)).map(MatchResult::value)
+                .filter { it !in declared && sourceDeclarations[it]?.size == 1 }
+                .toCollection(linkedSetOf()),
+        )
+        while (pending.isNotEmpty()) {
+            val name = pending.removeFirst()
+            if (name in declared || name in selected) continue
+            val declaration = sourceDeclarations[name]?.singleOrNull() ?: continue
+            selected[name] = declaration
+            declaration.references.filter { dependency ->
+                dependency !in declared && dependency !in selected && sourceDeclarations[dependency]?.size == 1
+            }.forEach(pending::addLast)
+        }
+        if (selected.isEmpty()) return ShaderStructuralRestoration.Restored(source)
+        val declarationRanges = selected.values.map(StructuralEntity::range)
+        val structuralOwners = restorationPlan.structuralOwnerRanges(request.source, declarationRanges)
+        val conditionalOwners = nearestConditionalOwnerRanges(request.source, declarationRanges)
+        val resolvedRanges = declarationRanges.indices.map { index ->
+            val declaration = declarationRanges[index]
+            val structuralOwner = structuralOwners[index]
+            val conditionalOwner = conditionalOwners[index]
+            val enclosing = structuralOwner ?: conditionalOwner
+            if (
+                conditionalOwner != null && isIncludeGuardOwner(request.source, conditionalOwner) ||
+                enclosing != null && isIncludeGuardOwner(request.source, enclosing)
+            ) declaration else enclosing ?: declaration
+        }.distinct()
+        val ownedRanges = resolvedRanges.filterNot { candidate ->
+            resolvedRanges.any { owner -> owner != candidate && owner.containsRange(candidate) }
+        }
+        val slots = ownedRanges.filterNot { range -> source.contains(request.source.substring(range)) }
+            .map { range ->
+                ShaderStructuralEntitySlot(
+                    ordinal = 0,
+                    kind = ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION,
+                    canonicalEntity = null,
+                    exactText = request.source.substring(range),
+                    sourceLine = sourceLine(request.source, range.first),
+                    beforeAnchor = null,
+                    afterAnchor = null,
+                    placement = IrisAnchorPlacement.AFTER_BEFORE,
+                )
+            }.distinctBy(ShaderStructuralEntitySlot::exactText)
+        if (slots.isEmpty()) return ShaderStructuralRestoration.Restored(source)
+        val anchored = reanchorRestorationSlots(request, slots)
+            ?: return ShaderStructuralRestoration.Preserved(
+                "${request.sourceName}: missing source declaration dependencies have no stable restoration anchor",
+            )
+        return restorationPlan.copy(
+            islands = anchored.map { slot ->
+                slot.copy(exactText = irisContracts.replaceHostReferences(slot.exactText))
+            },
+            restorationContracts = emptyList(),
+            issue = null,
+        ).restore(source)
+    }
+
     private fun restoreMissingSourceAbiDeclarations(
         request: SpirvOptimizationRequest,
         source: String,
@@ -1394,7 +1497,7 @@ internal object SpirvFinalEmitter {
         val emittedDeclarations = structuralEntities(source)
             .filter { entity -> entity.kind == StructuralEntityKind.DECLARATION }
             .mapTo(hashSetOf(), StructuralEntity::identity)
-        val sourceDeclarations = structuralEntities(request.source).filter { entity ->
+        val sourceDeclarations = sourceStructuralEntities(request.source).filter { entity ->
             entity.kind == StructuralEntityKind.DECLARATION &&
                 ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical)
         }
@@ -1437,7 +1540,7 @@ internal object SpirvFinalEmitter {
         originalSource: String,
         source: String,
     ): String {
-        val sourceDeclarations = structuralEntities(originalSource).filter { entity ->
+        val sourceDeclarations = sourceStructuralEntities(originalSource).filter { entity ->
             entity.kind == StructuralEntityKind.DECLARATION &&
                 ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical) &&
                 SYMBOLIC_ARRAY_EXTENT.containsMatchIn(originalSource.substring(entity.range))
@@ -1522,7 +1625,7 @@ internal object SpirvFinalEmitter {
         irisContracts: IrisShaderContractPlan,
     ): ShaderStructuralRestoration {
         val reachableIdentifiers = reachableCodeAndMacroIdentifiers(source)
-        val sourceFunctions = (structuralEntities(request.source).filter { entity ->
+        val sourceFunctions = (sourceStructuralEntities(request.source).filter { entity ->
             entity.kind == StructuralEntityKind.FUNCTION && entity.symbol != null
         } + scanSourceFunctions(request.source) + scanNamedSourceFunctions(request.source))
             .distinctBy(StructuralEntity::identity)
@@ -1629,20 +1732,20 @@ internal object SpirvFinalEmitter {
 
     private fun scanNamedSourceFunctions(source: String): List<StructuralEntity> {
         val masked = maskStructuralCode(source)
-        val braceDepths = structuralBraceDepths(masked)
+        val branchMasks = StructuralBranchMaskResolver(source, masked)
         val headerStart = Regex(
             "(?m)^[\\t ]*(?:[A-Za-z_][A-Za-z0-9_]*[\\t ]+)+([A-Za-z_][A-Za-z0-9_]*)[\\t ]*\\(",
         )
         return headerStart.findAll(masked).mapNotNull { match ->
-            if (braceDepths[match.range.first] != 0) return@mapNotNull null
-            val open = masked.indexOf('{', match.range.last + 1)
+            val selectedMask = branchMasks.maskFor(match.range.first)
+            val open = selectedMask.indexOf('{', match.range.last + 1)
             if (open < 0) return@mapNotNull null
-            val semicolon = masked.indexOf(';', match.range.last + 1)
+            val semicolon = selectedMask.indexOf(';', match.range.last + 1)
             if (semicolon in 0 until open) return@mapNotNull null
             var depth = 0
             var close = -1
-            for (offset in open until masked.length) {
-                when (masked[offset]) {
+            for (offset in open until selectedMask.length) {
+                when (selectedMask[offset]) {
                     '{' -> depth++
                     '}' -> {
                         depth--
@@ -1701,11 +1804,25 @@ internal object SpirvFinalEmitter {
         }
     }
 
+    internal fun deduplicateRelaxedFunctionDefinitions(originalSource: String, source: String): String {
+        val originalIdentities = (scanSourceFunctions(originalSource) + scanNamedSourceFunctions(originalSource))
+            .mapTo(hashSetOf(), StructuralEntity::identity)
+        val functions = (scanSourceFunctions(source) + scanNamedSourceFunctions(source))
+            .distinctBy(StructuralEntity::range)
+        val removals = functions.groupBy { relaxedFunctionIdentity(it.identity) }.values.flatMap { variants ->
+            if (variants.size < 2) return@flatMap emptyList()
+            val sourceDefinitions = variants.filter { it.identity in originalIdentities }
+            if (sourceDefinitions.size != 1) return@flatMap emptyList()
+            variants.filterNot { it === sourceDefinitions.single() }.map(StructuralEntity::range)
+        }
+        return if (removals.isEmpty()) source else removeRanges(source, removals)
+    }
+
     private fun relocateUnconditionalAbiFromFunctionOwners(
         request: SpirvOptimizationRequest,
         source: String,
     ): String {
-        val sourceDeclarations = structuralEntities(request.source).filter { entity ->
+        val sourceDeclarations = sourceStructuralEntities(request.source).filter { entity ->
             entity.kind == StructuralEntityKind.DECLARATION &&
                 ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical)
         }
@@ -1824,7 +1941,7 @@ internal object SpirvFinalEmitter {
     }
 
     private fun ensureForwardFunctionDeclarations(source: String): String {
-        val entities = structuralEntities(source)
+        val entities = sourceStructuralEntities(source)
         val functions = entities.filter { it.kind == StructuralEntityKind.FUNCTION }
         if (functions.isEmpty()) return source
         val functionsByName = functions.groupBy { it.symbol }
@@ -1848,12 +1965,13 @@ internal object SpirvFinalEmitter {
             }
         }.map { function -> function.canonical.trimEnd() + ";" }.distinct()
         if (prototypes.isEmpty()) return source
+        insertionOffset = unconditionalInsertionOffset(source, insertionOffset)
         val insertion = prototypes.joinToString(separator = "\n", postfix = "\n")
         return source.substring(0, insertionOffset) + insertion + source.substring(insertionOffset)
     }
 
     private fun hoistLateDeclarationDependencies(source: String): String {
-        val entities = structuralEntities(source)
+        val entities = sourceStructuralEntities(source)
         val depths = preprocessorDepths(source)
         val declarations = entities.filter { entity ->
             entity.kind == StructuralEntityKind.DECLARATION && entity.symbol != null &&
@@ -1882,7 +2000,10 @@ internal object SpirvFinalEmitter {
                             }
                     )
             }.forEach { declaration ->
-                insertionOffset = minOf(insertionOffset, firstFunction.range.first)
+                insertionOffset = minOf(
+                    insertionOffset,
+                    unconditionalInsertionOffset(source, firstFunction.range.first),
+                )
                 pending += declaration
             }
         }
@@ -1890,7 +2011,10 @@ internal object SpirvFinalEmitter {
             consumer.references.forEach { reference ->
                 val dependency = declarationsByName[reference]?.singleOrNull() ?: return@forEach
                 if (dependency.range.first > consumer.range.first && dependency.isMovableDeclarationDependency()) {
-                    insertionOffset = minOf(insertionOffset, consumer.range.first)
+                    insertionOffset = minOf(
+                        insertionOffset,
+                        unconditionalInsertionOffset(source, consumer.range.first),
+                    )
                     pending += dependency
                 }
             }
@@ -1939,19 +2063,25 @@ internal object SpirvFinalEmitter {
         return symbols
     }
 
-    private fun hoistLateReferencedConstants(source: String): String {
-        val entities = structuralEntities(source)
-        val firstFunction = entities.firstOrNull { it.kind == StructuralEntityKind.FUNCTION } ?: return source
+    internal fun hoistLateReferencedConstants(source: String): String {
+        val entities = sourceStructuralEntities(source)
         val depths = preprocessorDepths(source)
         val constantsByName = entities.filter { entity ->
             entity.kind == StructuralEntityKind.DECLARATION && entity.symbol != null &&
-                entity.range.first > firstFunction.range.first && depths[entity.range.first] == 0 &&
+                depths[entity.range.first] == 0 &&
                 entity.canonical.startsWith("const ")
         }.associateBy { requireNotNull(it.symbol) }
+        if (constantsByName.isEmpty()) return source
+        val firstReferences = linkedMapOf<String, Int>()
+        entities.forEach { entity ->
+            entity.references.filter(constantsByName::containsKey).forEach { reference ->
+                firstReferences[reference] = minOf(firstReferences[reference] ?: Int.MAX_VALUE, entity.range.first)
+            }
+        }
         val pending = ArrayDeque(
-            entities.filter { it.range.first < constantsByName.values.maxOfOrNull { value -> value.range.first } ?: 0 }
-                .flatMapTo(linkedSetOf(), StructuralEntity::references)
-                .filter(constantsByName::containsKey),
+            constantsByName.filter { (name, declaration) ->
+                firstReferences.getOrDefault(name, Int.MAX_VALUE) < declaration.range.first
+            }.keys,
         )
         val selected = linkedSetOf<StructuralEntity>()
         while (pending.isNotEmpty()) {
@@ -1966,9 +2096,11 @@ internal object SpirvFinalEmitter {
             .filter { entity -> entity.references.any(selectedSymbols::contains) }
             .minOfOrNull { it.range.first }
             ?: return source
+        val unconditionalOffset = unconditionalInsertionOffset(source, insertionOffset)
         val declarations = ordered.joinToString(separator = "\n") { source.substring(it.range) } + "\n"
         val ranges = ordered.map(StructuralEntity::range)
-        val adjustedInsertionOffset = insertionOffset - ranges.filter { it.first < insertionOffset }.sumOf(IntRange::count)
+        val adjustedInsertionOffset = unconditionalOffset -
+            ranges.filter { it.first < unconditionalOffset }.sumOf(IntRange::count)
         val stripped = removeRanges(source, ranges)
         return stripped.substring(0, adjustedInsertionOffset) + declarations + stripped.substring(adjustedInsertionOffset)
     }
@@ -2094,7 +2226,7 @@ internal object SpirvFinalEmitter {
         val prologueBegin = source.indexOf(BRANCH_OWNED_PROLOGUE_BEGIN)
         val prologueEnd = source.indexOf(BRANCH_OWNED_PROLOGUE_END, prologueBegin.coerceAtLeast(0))
         if (prologueBegin < 0 || prologueEnd < 0) return source
-        val sourceDeclarations = structuralEntities(request.source).filter { entity ->
+        val sourceDeclarations = sourceStructuralEntities(request.source).filter { entity ->
             entity.kind == StructuralEntityKind.DECLARATION &&
                 ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical)
         }
@@ -2306,7 +2438,7 @@ internal object SpirvFinalEmitter {
         return result
     }
 
-    private fun restoreMissingSourceTypeDeclarations(
+    internal fun restoreMissingSourceTypeDeclarations(
         request: SpirvOptimizationRequest,
         source: String,
     ): String {
@@ -2318,7 +2450,7 @@ internal object SpirvFinalEmitter {
         val abiLineOffset = source.lineRangeAt(abiOffset).first
         val insertionOffset = nearestConditionalOwnerRanges(source, listOf(abiLineOffset..abiLineOffset))
             .singleOrNull()?.first ?: abiLineOffset
-        val sourceTypes = structuralEntities(request.source).mapNotNull { entity ->
+        val sourceTypes = sourceStructuralEntities(request.source).mapNotNull { entity ->
             if (entity.kind != StructuralEntityKind.DECLARATION) return@mapNotNull null
             val typeName = STRUCT_DECLARATION_NAME.find(entity.canonical)?.groupValues?.get(1)
                 ?: return@mapNotNull null
@@ -2398,9 +2530,9 @@ internal object SpirvFinalEmitter {
     }
 
     private fun hoistLateAbiDeclarations(source: String): String {
-        val functions = structuralEntities(source).filter { it.kind == StructuralEntityKind.FUNCTION }
+        val functions = sourceStructuralEntities(source).filter { it.kind == StructuralEntityKind.FUNCTION }
         val firstFunction = functions.minOfOrNull { it.range.first } ?: return source
-        val candidates = structuralEntities(source).filter { entity ->
+        val candidates = sourceStructuralEntities(source).filter { entity ->
             entity.kind == StructuralEntityKind.DECLARATION &&
                 entity.range.first > firstFunction &&
                 ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical)
@@ -2418,8 +2550,8 @@ internal object SpirvFinalEmitter {
             source.substring(range)
         }
         val stripped = removeRanges(source, ranges)
-        val insertionOffset = structuralEntities(stripped).filter { it.kind == StructuralEntityKind.FUNCTION }
-            .minOf { it.range.first }
+        val insertionOffset = sourceStructuralEntities(stripped).filter { it.kind == StructuralEntityKind.FUNCTION }
+            .minOf { it.range.first }.let { unconditionalInsertionOffset(stripped, it) }
         return stripped.substring(0, insertionOffset) + insertion + stripped.substring(insertionOffset)
     }
 
@@ -2427,9 +2559,9 @@ internal object SpirvFinalEmitter {
         request: SpirvOptimizationRequest,
         source: String,
     ): String {
-        val firstFunction = structuralEntities(source).filter { it.kind == StructuralEntityKind.FUNCTION }
+        val firstFunction = sourceStructuralEntities(source).filter { it.kind == StructuralEntityKind.FUNCTION }
             .minOfOrNull { it.range.first } ?: return source
-        val sourceDeclarations = structuralEntities(request.source).filter { entity ->
+        val sourceDeclarations = sourceStructuralEntities(request.source).filter { entity ->
             entity.kind == StructuralEntityKind.DECLARATION &&
                 ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical)
         }
@@ -2441,13 +2573,23 @@ internal object SpirvFinalEmitter {
             if (conditionalOwners[index] != null) return@mapNotNull null
             val exact = request.source.substring(sourceDeclarations[index].range)
             val occurrences = occurrences(source, exact)
-            if (occurrences.none { it.first > firstFunction }) return@mapNotNull null
-            exact to occurrences
+            val occurrenceOwners = nearestConditionalOwnerRanges(source, occurrences)
+            if (occurrences.indices.any { occurrenceIndex ->
+                    occurrences[occurrenceIndex].first < firstFunction && occurrenceOwners[occurrenceIndex] == null
+                }
+            ) return@mapNotNull null
+            val misplaced = occurrences.indices.mapNotNull { occurrenceIndex ->
+                occurrences[occurrenceIndex].takeIf { occurrence ->
+                    occurrence.first > firstFunction || occurrenceOwners[occurrenceIndex] != null
+                }
+            }
+            if (misplaced.isEmpty()) return@mapNotNull null
+            exact to misplaced
         }.distinctBy { it.first }
         if (relocations.isEmpty()) return source
         val stripped = removeRanges(source, relocations.flatMap { it.second }.distinct())
-        val insertionOffset = structuralEntities(stripped).filter { it.kind == StructuralEntityKind.FUNCTION }
-            .minOf { it.range.first }
+        val insertionOffset = sourceStructuralEntities(stripped).filter { it.kind == StructuralEntityKind.FUNCTION }
+            .minOf { it.range.first }.let { unconditionalInsertionOffset(stripped, it) }
         val insertion = relocations.joinToString("\n", postfix = "\n") { it.first.trim() }
         return stripped.substring(0, insertionOffset) + insertion + stripped.substring(insertionOffset)
     }
@@ -2574,7 +2716,7 @@ internal object SpirvFinalEmitter {
         return result
     }
 
-    private fun deduplicateUnconditionalDeclarations(source: String): String {
+    internal fun deduplicateUnconditionalDeclarations(source: String): String {
         val aliases = objectAliases(source)
         val depths = preprocessorDepths(source)
         val assignedSymbols = optimizedAssignedSymbols(source)
@@ -2605,6 +2747,8 @@ internal object SpirvFinalEmitter {
                     .replace(candidate.second.canonical, candidate.first)
             }
             val physicalCanonical = physicalDeclarations.mapTo(hashSetOf(), ::resolvedCanonical)
+            val conditionalCanonicals = candidates.filter { it.third != 0 }
+                .mapTo(hashSetOf(), ::resolvedCanonical)
             val aliasDuplicates = candidates.filter { candidate ->
                 candidate.second.symbol != candidate.first && resolvedCanonical(candidate) in physicalCanonical
             }
@@ -2615,7 +2759,7 @@ internal object SpirvFinalEmitter {
                         return@any false
                     }
                     val otherOwner = ownerByRange[other.second.range]
-                    other.third == 0 ||
+                    other.third == 0 && conditionalCanonicals.size <= 1 ||
                         (otherOwner != null && isIncludeGuardOwner(source, otherOwner)) ||
                         (otherOwner != null && otherOwner != candidateOwner && otherOwner.containsRange(candidateOwner))
                 }
@@ -2863,6 +3007,19 @@ internal object SpirvFinalEmitter {
 
     private fun IntRange.overlaps(other: IntRange): Boolean = first <= other.last && other.first <= last
 
+    private fun unconditionalInsertionOffset(source: String, offset: Int): Int {
+        var insertionOffset = offset.coerceIn(0, source.length)
+        var probeOffset = insertionOffset
+        while (true) {
+            val line = source.lineRangeAt(probeOffset)
+            val owner = nearestConditionalOwnerRanges(source, listOf(line)).singleOrNull()
+                ?: return insertionOffset
+            insertionOffset = owner.first
+            if (insertionOffset == 0) return 0
+            probeOffset = insertionOffset - 1
+        }
+    }
+
     private fun nearestConditionalOwnerRanges(source: String, ranges: List<IntRange>): List<IntRange?> {
         if (ranges.isEmpty()) return emptyList()
         val lineStarts = mutableListOf(0)
@@ -3013,8 +3170,96 @@ private enum class StructuralEntityKind {
     FUNCTION,
 }
 
-private fun structuralEntities(source: String): List<StructuralEntity> {
-    val masked = maskStructuralCode(source)
+private class StructuralBranchMaskResolver(
+    source: String,
+    private val baseMask: String,
+) {
+    private data class Group(val branches: List<IntRange>)
+    private data class LocatedDirective(val directive: PreprocessorDirective, val range: IntRange)
+
+    private val groups = runCatching { locateGroups(source) }.getOrDefault(emptyList())
+    private val cache = mutableMapOf<List<Pair<Int, Int>>, String>()
+
+    fun defaultMask(): String = maskFor(-1)
+
+    fun maskFor(offset: Int): String {
+        if (groups.isEmpty()) return baseMask
+        val overrides = groups.mapIndexedNotNull { index, group ->
+            group.branches.indexOfFirst { offset in it }.takeIf { it > 0 }?.let { index to it }
+        }
+        return cache.getOrPut(overrides) {
+            val selected = overrides.toMap()
+            val result = baseMask.toCharArray()
+            groups.forEachIndexed { index, group ->
+                val selectedBranch = selected[index] ?: 0
+                group.branches.forEachIndexed { branchIndex, range ->
+                    if (branchIndex != selectedBranch) {
+                        for (cursor in range) {
+                            if (result[cursor] !in "\r\n") result[cursor] = ' '
+                        }
+                    }
+                }
+            }
+            result.concatToString()
+        }
+    }
+
+    private fun locateGroups(source: String): List<Group> {
+        val directives = PreprocessorProtection.protect(source, "<structural-function-scan>").directives
+        var searchOffset = 0
+        val located = directives.map { directive ->
+            val start = source.indexOf(directive.exactText, searchOffset)
+            require(start >= 0) { "preprocessor directive location drifted during structural function scan" }
+            val range = start until start + directive.exactText.length
+            searchOffset = range.last + 1
+            LocatedDirective(directive, range)
+        }
+        return located.filter { it.directive.conditionalId != null }
+            .groupBy { requireNotNull(it.directive.conditionalId) }
+            .toSortedMap()
+            .values
+            .mapNotNull { conditional ->
+                val ordered = conditional.sortedBy { it.range.first }
+                val opener = ordered.firstOrNull { it.directive.kind in CONDITIONAL_OPENING_KINDS }
+                    ?: return@mapNotNull null
+                val end = ordered.lastOrNull { it.directive.kind == PreprocessorDirectiveKind.ENDIF }
+                    ?: return@mapNotNull null
+                val delimiters = listOf(opener) + ordered.filter {
+                    it.directive.kind == PreprocessorDirectiveKind.ELIF ||
+                        it.directive.kind == PreprocessorDirectiveKind.ELSE
+                }
+                Group(
+                    delimiters.mapIndexed { index, delimiter ->
+                        val next = delimiters.getOrNull(index + 1)?.range?.first ?: end.range.first
+                        (delimiter.range.last + 1) until next
+                    },
+                )
+            }
+    }
+
+    private companion object {
+        val CONDITIONAL_OPENING_KINDS = setOf(
+            PreprocessorDirectiveKind.IF,
+            PreprocessorDirectiveKind.IFDEF,
+            PreprocessorDirectiveKind.IFNDEF,
+        )
+    }
+}
+
+private fun structuralEntities(source: String): List<StructuralEntity> =
+    parseStructuralEntities(source, maskStructuralCode(source))
+
+private fun sourceStructuralEntities(source: String): List<StructuralEntity> {
+    val baseMask = maskStructuralCode(source)
+    val branchMask = StructuralBranchMaskResolver(source, baseMask).defaultMask()
+    if (branchMask == baseMask) return parseStructuralEntities(source, baseMask)
+    return (
+        parseStructuralEntities(source, baseMask) +
+            parseStructuralEntities(source, branchMask)
+        ).distinctBy(StructuralEntity::range)
+}
+
+private fun parseStructuralEntities(source: String, masked: String): List<StructuralEntity> {
     val result = mutableListOf<StructuralEntity>()
     var boundary = 0
     var depth = 0
@@ -3117,6 +3362,11 @@ private fun structuralFunctionIdentity(header: String): Pair<String, String>? {
     val name = match.groupValues[1]
     val parameters = splitStructuralParameters(match.groupValues[2]).map(::normalizeStructuralParameter)
     return "function:$name(${parameters.joinToString(",")})" to name
+}
+
+private fun relaxedFunctionIdentity(identity: String): String {
+    if (!identity.startsWith("function:")) return identity
+    return FUNCTION_PARAMETER_QUALIFIER.replace(identity, "")
 }
 
 private fun structuralDeclarationIdentity(declaration: String): Pair<String, String>? {
@@ -3326,6 +3576,8 @@ private val FUNCTION_HEADER =
     "(?s).*?\\b([A-Za-z_][A-Za-z0-9_]*)\\s*\\((.*)\\)\\s*".toRegex()
 private val FUNCTION_PROTOTYPE =
     "(?s)^[A-Za-z_][A-Za-z0-9_\\s\\[\\]]*\\b([A-Za-z_][A-Za-z0-9_]*)\\s*\\((.*)\\)\\s*;$".toRegex()
+private val FUNCTION_PARAMETER_QUALIFIER =
+    "(?<=\\(|,)(?:(?:const|in|out|inout|highp|mediump|lowp)\\s+)+".toRegex()
 private val STRUCTURAL_STATEMENT_PREFIX =
     "^(?:if|else|for|while|do|switch|case|default|return|break|continue|discard)\\b".toRegex()
 private val STRUCTURAL_EXPRESSION_PREFIX =

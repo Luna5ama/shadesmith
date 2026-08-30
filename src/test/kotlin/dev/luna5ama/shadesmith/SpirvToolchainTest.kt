@@ -16,6 +16,52 @@ import kotlin.test.assertTrue
 
 class SpirvToolchainTest {
     @Test
+    fun optimizerPassContractUsesTheMeasuredBaseSequenceWithoutCfgShapeShortcuts() {
+        val expected = listOf(
+            "--preserve-bindings",
+            "--preserve-interface",
+            "--preserve-spec-constants",
+            "--eliminate-dead-branches",
+            "--inline-entry-points-exhaustive",
+            "--eliminate-dead-functions",
+            "--eliminate-dead-code-aggressive",
+            "--private-to-local",
+            "--eliminate-local-single-block",
+            "--eliminate-local-single-store",
+            "--eliminate-dead-code-aggressive",
+            "--scalar-replacement=0",
+            "--convert-local-access-chains",
+            "--eliminate-local-single-block",
+            "--eliminate-local-single-store",
+            "--eliminate-dead-code-aggressive",
+            "--ssa-rewrite",
+            "--eliminate-dead-code-aggressive",
+            "--ccp",
+            "--eliminate-dead-code-aggressive",
+            "--redundancy-elimination",
+            "--combine-access-chains",
+            "--simplify-instructions",
+            "--scalar-replacement=0",
+            "--convert-local-access-chains",
+            "--eliminate-local-single-block",
+            "--eliminate-local-single-store",
+            "--eliminate-dead-code-aggressive",
+            "--ssa-rewrite",
+            "--eliminate-dead-code-aggressive",
+            "--vector-dce",
+            "--eliminate-dead-inserts",
+            "--eliminate-dead-code-aggressive",
+            "--merge-blocks",
+            "--cfg-cleanup",
+            "--simplify-instructions",
+        )
+
+        assertEquals(expected, SpirvToolchain.OPTIMIZER_PASSES)
+        assertEquals(expected.filterNot { it == "--inline-entry-points-exhaustive" }, SpirvToolchain.CROSS_ADAPTER_PASSES)
+        assertTrue(SpirvToolchain.OPTIMIZER_PASSES.none { it in setOf("--merge-return", "--if-conversion", "-O", "-Os") })
+    }
+
+    @Test
     fun mapsEverySupportedShadesmithExtension() {
         val expected = mapOf(
             "shader.vsh" to ShaderStage.VERTEX,
