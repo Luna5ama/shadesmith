@@ -1224,9 +1224,20 @@ internal object SpirvFinalEmitter {
                 sourceConstDefinition(requireNotNull(entity.symbol))
                     .matches(request.source.substring(entity.range))
         }.groupBy { requireNotNull(it.symbol) }
-        val slots = referenced.filter { it !in declared }.mapNotNull { name ->
-            val sourceName = irisContracts.sourceDynamicName(name) ?: name
-            val declaration = sourceConstants[sourceName]?.singleOrNull() ?: return@mapNotNull null
+        val selected = linkedMapOf<String, StructuralEntity>()
+        val pending = ArrayDeque(referenced.filter { it !in declared })
+        while (pending.isNotEmpty()) {
+            val referencedName = pending.removeFirst()
+            val sourceName = irisContracts.sourceDynamicName(referencedName) ?: referencedName
+            if (sourceName in selected || sourceName in declared) continue
+            val declaration = sourceConstants[sourceName]?.singleOrNull() ?: continue
+            selected[sourceName] = declaration
+            declaration.references.filter { dependency ->
+                val dependencyName = irisContracts.sourceDynamicName(dependency) ?: dependency
+                dependencyName !in declared && dependencyName !in selected && sourceConstants[dependencyName]?.size == 1
+            }.forEach(pending::addLast)
+        }
+        val slots = selected.values.sortedBy { it.range.first }.map { declaration ->
             ShaderStructuralEntitySlot(
                 ordinal = 0,
                 kind = ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION,
@@ -1416,12 +1427,14 @@ internal object SpirvFinalEmitter {
             request.source,
             functions.map(StructuralEntity::range),
         )
-        val ranges = functions.indices.map { index -> conditionalOwners[index] ?: functions[index].range }
+        val functionRanges = functions.indices.map { index ->
+            val owner = conditionalOwners[index]
+            if (owner != null && !isIncludeGuardOwner(request.source, owner)) owner else functions[index].range
+        }
+        val ranges = functionRanges
             .distinct()
             .filterNot { candidate ->
-                rangesContainmentOwner(candidate, functions.indices.map { index ->
-                    conditionalOwners[index] ?: functions[index].range
-                })
+                rangesContainmentOwner(candidate, functionRanges)
             }
             .sortedBy(IntRange::first)
         val slots = ranges.mapIndexed { index, range ->
@@ -1469,10 +1482,12 @@ internal object SpirvFinalEmitter {
     }
 
     private fun scanSourceFunctions(source: String): List<StructuralEntity> {
-        return scanTopLevelGlslBlocks(source, maskStructuralCode(source))
+        val masked = maskStructuralCode(source)
+        return scanTopLevelGlslBlocks(source, masked)
             .filter { it.kind == TopLevelGlslBlockKind.FUNCTION }
             .mapNotNull { block ->
-                val start = firstNonWhitespace(source, block.fullRange.first, block.prefixRange.last + 1)
+                val start = firstNonWhitespace(masked, block.fullRange.first, block.prefixRange.last + 1)
+                if (start > block.prefixRange.last) return@mapNotNull null
                 val range = start..block.fullRange.last
                 val header = normalizeStructuralEntity(source.substring(start, block.prefixRange.last + 1))
                 val function = structuralFunctionIdentity(header) ?: return@mapNotNull null
@@ -2925,7 +2940,7 @@ private fun structuralEntities(source: String): List<StructuralEntity> {
                     val text = source.substring(start, cursor + 1).lineSequence()
                         .filterNot { it.trimStart().startsWith('#') }
                         .joinToString("\n").trim()
-                    if (text.isNotEmpty()) {
+                    if (text.isNotEmpty() && isStructuralDeclarationCandidate(text)) {
                         val range = start..cursor
                         val exact = source.substring(range)
                         val canonical = normalizeStructuralEntity(text)
@@ -2960,6 +2975,18 @@ private fun structuralEntities(source: String): List<StructuralEntity> {
     return result
 }
 
+private fun isStructuralDeclarationCandidate(declaration: String): Boolean {
+    val trimmed = declaration.trim()
+    if (STRUCTURAL_STATEMENT_PREFIX.containsMatchIn(trimmed)) return false
+    return !STRUCTURAL_EXPRESSION_PREFIX.containsMatchIn(trimmed)
+}
+
+private fun structuralDeclarationPrototype(declaration: String): Boolean {
+    val firstCall = declaration.indexOf('(')
+    return !declaration.startsWith("layout") && firstCall >= 0 &&
+        '=' !in declaration.substring(0, firstCall) && FUNCTION_PROTOTYPE.matches(declaration)
+}
+
 private fun structuralFunctionIdentity(header: String): Pair<String, String>? {
     val match = FUNCTION_HEADER.matchEntire(header.trim()) ?: return null
     val name = match.groupValues[1]
@@ -2969,16 +2996,7 @@ private fun structuralFunctionIdentity(header: String): Pair<String, String>? {
 
 private fun structuralDeclarationIdentity(declaration: String): Pair<String, String>? {
     val trimmed = declaration.trim()
-    val firstCall = trimmed.indexOf('(')
-    val prototype = if (
-        !trimmed.startsWith("layout") &&
-        firstCall >= 0 &&
-        '=' !in trimmed.substring(0, firstCall)
-    ) {
-        FUNCTION_PROTOTYPE.matchEntire(trimmed)
-    } else {
-        null
-    }
+    val prototype = FUNCTION_PROTOTYPE.matchEntire(trimmed).takeIf { structuralDeclarationPrototype(trimmed) }
     if (prototype != null) {
         val name = prototype.groupValues[1]
         val parameters = splitStructuralParameters(prototype.groupValues[2]).map(::normalizeStructuralParameter)
@@ -3183,6 +3201,10 @@ private val FUNCTION_HEADER =
     "(?s).*?\\b([A-Za-z_][A-Za-z0-9_]*)\\s*\\((.*)\\)\\s*".toRegex()
 private val FUNCTION_PROTOTYPE =
     "(?s)^[A-Za-z_][A-Za-z0-9_\\s\\[\\]]*\\b([A-Za-z_][A-Za-z0-9_]*)\\s*\\((.*)\\)\\s*;$".toRegex()
+private val STRUCTURAL_STATEMENT_PREFIX =
+    "^(?:if|else|for|while|do|switch|case|default|return|break|continue|discard)\\b".toRegex()
+private val STRUCTURAL_EXPRESSION_PREFIX =
+    "^(?:\\+\\+|--|[A-Za-z_][A-Za-z0-9_]*\\s*(?:[<>!+\\-*/%&|^.]|\\+\\+|--))".toRegex()
 private val BLOCK_NAME = "\\b(?:uniform|buffer)\\s+([A-Za-z_][A-Za-z0-9_]*)".toRegex()
 private val DECLARATION_IDENTIFIER = "[A-Za-z_][A-Za-z0-9_]*".toRegex()
 private val ASSIGNED_SYMBOL =

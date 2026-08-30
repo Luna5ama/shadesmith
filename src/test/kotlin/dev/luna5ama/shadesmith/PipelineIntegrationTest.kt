@@ -199,6 +199,66 @@ class PipelineIntegrationTest {
     }
 
     @Test
+    fun macroExpandedLoopStaysInsideRestoredFunctionBody() = withWorkspace { workspace ->
+        val input = workspace.resolve("input")
+        val output = workspace.resolve("output")
+        val artifacts = workspace.resolve("artifacts")
+        input.createDirectories()
+        val source = """
+            #version 460 compatibility
+            #define SETTING_FORMAT 0 //[0 1]
+            #ifndef PRINT_UTIL_GLSL
+            #define PRINT_UTIL_GLSL
+            #define printString(string) { \
+                uint[] characters = uint[] string; \
+                for (int i = 0; i < characters.length(); ++i) printChar(characters[i]); \
+            }
+            const uint _t = 1u;
+            void printChar(uint character) {}
+            void printValue() { printString((_t)); }
+            #endif
+            #if SETTING_FORMAT == 0
+            layout(r32ui) uniform uimage2D target;
+            #else
+            layout(rgba16f) uniform image2D target;
+            #endif
+            layout(local_size_x = 1) in;
+            uniform int limit;
+            void main() {
+                for (int index = 0; index < limit; ++index) {
+                    printValue();
+                    #if SETTING_FORMAT == 0
+                    imageStore(target, ivec2(index), uvec4(1u));
+                    #else
+                    imageStore(target, ivec2(index), vec4(1.0));
+                    #endif
+                }
+            }
+        """.trimIndent()
+        input.resolve("composite.csh").writeText(source)
+        val ioContext = IOContext(input, output)
+
+        val result = context(ioContext) {
+            ShaderPipeline(
+                artifacts,
+                capabilityProvider = {
+                    OpenGlSpirvCapabilities("test", true, artifacts.resolve("capabilities"))
+                },
+                cacheIdentityProvider = { null },
+            ).optimize(listOf(requireNotNull(ioContext.readInputRoot("composite.csh"))))
+        }.single()
+
+        assertEquals(ShaderProcessingMode.SPIRV_ROUND_TRIP, result.processingMode, result.fallbackReason)
+        val emitted = result.file.code
+        assertContains(emitted, "#define printString(string) { \\")
+        assertContains(emitted, "for (int i = 0; i < characters.length(); ++i) printChar(characters[i]); \\")
+        assertEquals(1, emitted.split("uint[] characters = uint[] string;").size - 1)
+        assertContains(emitted, "void printValue()")
+        assertFalse(Regex("(?m)^i < characters\\.length\\(\\);").containsMatchIn(emitted))
+        assertFalse(Regex("(?m)^\\+\\+i\\) printChar").containsMatchIn(emitted))
+    }
+
+    @Test
     fun lifecycleResolutionFailureDoesNotPublishDeferredCacheEntries() = withWorkspace { workspace ->
         val input = workspace.resolve("input")
         val output = workspace.resolve("output")
