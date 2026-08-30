@@ -302,6 +302,19 @@ internal class SpirvToolchain(
     }
 
     fun optimizeInvocation(stage: ShaderStage, input: Path, output: Path): SpirvInvocation {
+        return optimizeInvocation(stage, input, output, OPTIMIZER_PASSES)
+    }
+
+    fun optimizeCrossAdapterInvocation(stage: ShaderStage, input: Path, output: Path): SpirvInvocation {
+        return optimizeInvocation(stage, input, output, CROSS_ADAPTER_PASSES)
+    }
+
+    private fun optimizeInvocation(
+        stage: ShaderStage,
+        input: Path,
+        output: Path,
+        passes: List<String>,
+    ): SpirvInvocation {
         val normalizedInput = input.toAbsolutePath().normalize()
         val normalizedOutput = ownedOutput(output)
         return SpirvInvocation(
@@ -309,7 +322,7 @@ internal class SpirvToolchain(
             stage = stage,
             command = buildList {
                 add(executables.spirvOpt)
-                addAll(OPTIMIZER_PASSES)
+                addAll(passes)
                 add(normalizedInput.absolutePathString())
                 add("-o")
                 add(normalizedOutput.absolutePathString())
@@ -319,24 +332,30 @@ internal class SpirvToolchain(
         )
     }
 
-    fun decompileInvocation(stage: ShaderStage, input: Path, output: Path): SpirvInvocation {
+    fun decompileInvocation(
+        stage: ShaderStage,
+        input: Path,
+        output: Path,
+        vulkanSemantics: Boolean = false,
+    ): SpirvInvocation {
         val normalizedInput = input.toAbsolutePath().normalize()
         val normalizedOutput = ownedOutput(output)
         return SpirvInvocation(
             tool = SpirvTool.SPIRV_CROSS,
             stage = stage,
-            command = listOf(
-                executables.spirvCross,
-                "--no-es",
-                "--version",
-                "460",
-                normalizedInput.absolutePathString(),
-                "--output",
-                normalizedOutput.absolutePathString(),
-                "--glsl-force-flattened-io-blocks",
-                "--combined-samplers-inherit-bindings",
-                "--remove-unused-variables",
-            ),
+            command = buildList {
+                add(executables.spirvCross)
+                add("--no-es")
+                add("--version")
+                add("460")
+                if (vulkanSemantics) add("--vulkan-semantics")
+                add(normalizedInput.absolutePathString())
+                add("--output")
+                add(normalizedOutput.absolutePathString())
+                add("--glsl-force-flattened-io-blocks")
+                add("--combined-samplers-inherit-bindings")
+                add("--remove-unused-variables")
+            },
             input = normalizedInput,
             output = normalizedOutput,
         )
@@ -461,6 +480,7 @@ internal class SpirvToolchain(
             "--eliminate-dead-code-aggressive",
             "--merge-blocks",
         )
+        val CROSS_ADAPTER_PASSES = OPTIMIZER_PASSES.filterNot { it == "--inline-entry-points-exhaustive" }
 
         private val LOG_NAME_INVALID_CHAR = "[^A-Za-z0-9._-]".toRegex()
     }

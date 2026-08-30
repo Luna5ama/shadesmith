@@ -11,6 +11,7 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class SpirvToolchainTest {
@@ -116,6 +117,65 @@ class SpirvToolchainTest {
                 "--remove-unused-variables",
             ),
             invocation.command,
+        )
+    }
+
+    @Test
+    fun buildsVulkanSubgroupCrossCommandOnlyWhenRequested() = withWorkspace { workspace ->
+        val input = workspace.resolve("input module.spv")
+        val output = workspace.resolve("output shader.glsl")
+        val toolchain = SpirvToolchain(workspace)
+
+        val invocation = toolchain.decompileInvocation(
+            ShaderStage.COMPUTE,
+            input,
+            output,
+            vulkanSemantics = true,
+        )
+
+        assertEquals("--vulkan-semantics", invocation.command[4])
+        assertEquals(input.toAbsolutePath().normalize().toString(), invocation.command[5])
+    }
+
+    @Test
+    fun crossAdapterOptimizerKeepsNativeRestorationCallsOutOfInlining() = withWorkspace { workspace ->
+        val input = workspace.resolve("input module.spv")
+        val output = workspace.resolve("output module.spv")
+        val toolchain = SpirvToolchain(workspace)
+
+        val invocation = toolchain.optimizeCrossAdapterInvocation(ShaderStage.COMPUTE, input, output)
+
+        assertEquals(
+            SpirvToolchain.CROSS_ADAPTER_PASSES,
+            invocation.command.drop(1).dropLast(3),
+        )
+        assertFalse("--inline-entry-points-exhaustive" in invocation.command)
+    }
+
+    @Test
+    fun adaptsHoistedDynamicSubgroupBroadcastIdsForCompilerValidation() {
+        val source = """
+            #version 460
+            #extension GL_KHR_shader_subgroup_basic : require
+            #extension GL_KHR_shader_subgroup_ballot : require
+            void main() {
+                uint laneValue = gl_SubgroupInvocationID;
+                uint lastLane = gl_SubgroupSize - 1u;
+                uint broadcastValue = subgroupBroadcast(laneValue, lastLane);
+            }
+        """.trimIndent()
+
+        val contract = requireNotNull(SpirvNativePrimitiveContract.plan(source))
+        val compilerSource = contract.prepareCompilerSource(source)
+
+        assertTrue(contract.requiresCompilerAdapter)
+        assertContains(
+            compilerSource,
+            "#define subgroupBroadcast SM_SPIRV_CROSS_NATIVE_subgroupBroadcast",
+        )
+        assertContains(
+            compilerSource,
+            "uint SM_SPIRV_CROSS_NATIVE_subgroupBroadcast(uint value, uint id)",
         )
     }
 

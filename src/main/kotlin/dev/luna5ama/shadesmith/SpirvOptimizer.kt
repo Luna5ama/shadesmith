@@ -221,6 +221,12 @@ internal class SpirvOptimizer(
         val emission = phase(request, SpirvRoundTripPhase.RESTORE, requestDirectory) {
             SpirvFinalEmitter.emit(request, results)
         }
+        val restorationDiagnostic = requestDirectory.resolve("native-primitive-restorations.txt")
+        if (emission.restorationDiagnostics.isEmpty()) {
+            Files.deleteIfExists(restorationDiagnostic)
+        } else {
+            restorationDiagnostic.writeText(emission.restorationDiagnostics.joinToString("\n", postfix = "\n"))
+        }
         val finalValidationInvocations = if (
             emission.mode == SpirvEmissionMode.OPTIMIZED && request.structuralPlan != null
         ) {
@@ -327,8 +333,18 @@ internal class SpirvOptimizer(
                 sourceContracts = module.irisContracts,
             )
         }
+        val plannedNativeContract = phase(
+            request,
+            SpirvRoundTripPhase.PATCH_INPUT,
+            moduleDirectory,
+            moduleSourceName,
+        ) {
+            SpirvNativePrimitiveContract.plan(patch.compilerSource)
+        }
+        val compilerSource = plannedNativeContract?.prepareCompilerSource(patch.compilerSource)
+            ?: patch.compilerSource
         val compilerPath = moduleDirectory.resolve("compiler.glsl")
-        compilerPath.writeText(patch.compilerSource)
+        compilerPath.writeText(compilerSource)
 
         val toolchain = if (processRunner == null) {
             SpirvToolchain(
@@ -348,18 +364,87 @@ internal class SpirvOptimizer(
         }
 
         val optimizedSpirv = moduleDirectory.resolve("optimized.spv")
-        val optimizeInvocation = toolchain.optimizeInvocation(request.stage, originalSpirv, optimizedSpirv)
+        val optimizeInvocation = if (plannedNativeContract?.requiresCompilerAdapter == true) {
+            toolchain.optimizeCrossAdapterInvocation(request.stage, originalSpirv, optimizedSpirv)
+        } else {
+            toolchain.optimizeInvocation(request.stage, originalSpirv, optimizedSpirv)
+        }
         phase(request, SpirvRoundTripPhase.OPTIMIZE, moduleDirectory, moduleSourceName) {
             toolchain.execute(optimizeInvocation)
         }
 
+        val originalPrimitiveInventory = phase(
+            request,
+            SpirvRoundTripPhase.OPTIMIZE,
+            moduleDirectory,
+            moduleSourceName,
+        ) {
+            SpirvBinaryInventory.read(originalSpirv)
+        }
+        val optimizedPrimitiveInventory = phase(
+            request,
+            SpirvRoundTripPhase.OPTIMIZE,
+            moduleDirectory,
+            moduleSourceName,
+        ) {
+            SpirvBinaryInventory.read(optimizedSpirv)
+        }
+        val nativeContract = plannedNativeContract.takeIf {
+            it?.requiresCompilerAdapter == true || 5297 in optimizedPrimitiveInventory.capabilities
+        }
+        var crossCompileInvocation: SpirvInvocation? = null
+        var crossOptimizeInvocation: SpirvInvocation? = null
+        val crossInput = if (
+            nativeContract == null ||
+            !nativeContract.requiresCrossAdapter ||
+            5297 !in optimizedPrimitiveInventory.capabilities
+        ) {
+            optimizedSpirv
+        } else {
+            val crossCompilerPath = moduleDirectory.resolve("cross-compiler.glsl")
+            crossCompilerPath.writeText(nativeContract.prepareCrossSource(patch.compilerSource))
+            val crossOriginalSpirv = moduleDirectory.resolve("cross-input.spv")
+            crossCompileInvocation = toolchain.compileInvocation(request.stage, crossCompilerPath, crossOriginalSpirv)
+            phase(request, SpirvRoundTripPhase.COMPILE, moduleDirectory, moduleSourceName) {
+                toolchain.execute(requireNotNull(crossCompileInvocation))
+            }
+            val crossOptimizedSpirv = moduleDirectory.resolve("cross-optimized.spv")
+            crossOptimizeInvocation = toolchain.optimizeCrossAdapterInvocation(
+                request.stage,
+                crossOriginalSpirv,
+                crossOptimizedSpirv,
+            )
+            phase(request, SpirvRoundTripPhase.OPTIMIZE, moduleDirectory, moduleSourceName) {
+                toolchain.execute(requireNotNull(crossOptimizeInvocation))
+            }
+            crossOptimizedSpirv
+        }
+        val vulkanCrossSemantics = optimizedPrimitiveInventory.requiresVulkanCrossSemantics
         val decompiledPath = moduleDirectory.resolve("decompiled.glsl")
-        val decompileInvocation = toolchain.decompileInvocation(request.stage, optimizedSpirv, decompiledPath)
+        val decompileInvocation = toolchain.decompileInvocation(
+            request.stage,
+            crossInput,
+            decompiledPath,
+            vulkanSemantics = vulkanCrossSemantics,
+        )
         phase(request, SpirvRoundTripPhase.DECOMPILE, moduleDirectory, moduleSourceName) {
             toolchain.execute(decompileInvocation)
         }
 
-        val semanticSource = decompiledPath.readText()
+        val rawSemanticSource = decompiledPath.readText()
+        var nativeRestorationFailure: String? = null
+        val semanticSource = if (nativeContract == null) {
+            rawSemanticSource
+        } else {
+            when (val restoration = nativeContract.restoreCrossOutput(rawSemanticSource)) {
+                is SpirvNativePrimitiveRestoration.Restored -> restoration.source
+                is SpirvNativePrimitiveRestoration.Preserved -> {
+                    nativeRestorationFailure = restoration.reason
+                    rawSemanticSource
+                }
+            }
+        }
+        moduleDirectory.resolve("decompiled-native.glsl").writeText(semanticSource)
         val compilerCore = phase(request, SpirvRoundTripPhase.RESTORE, moduleDirectory, moduleSourceName) {
             patcher.restoreCore(semanticSource, patch)
         }
@@ -372,7 +457,7 @@ internal class SpirvOptimizer(
         }
         val internalCoreSource: String
         val crossBridgeSettings: List<ShaderSetting>
-        var restorationFailure: String? = null
+        var restorationFailure: String? = nativeRestorationFailure
         when (bridge) {
             is SpirvSettingBridgeRestoration.Restored -> {
                 internalCoreSource = bridge.source
@@ -468,9 +553,10 @@ internal class SpirvOptimizer(
                     moduleSourceName,
                 )
             }
-            validationPatch.compilerSource
+            nativeContract?.prepareCompilerSource(validationPatch.compilerSource)
+                ?: validationPatch.compilerSource
         } else {
-            patch.compilerSource
+            compilerSource
         }
         val validationSource = moduleDirectory.resolve("validation.glsl")
         validationSource.writeText(validationCompilerSource)
@@ -488,6 +574,22 @@ internal class SpirvOptimizer(
                 }
             }
         }
+        moduleDirectory.resolve("native-primitives.txt").writeText(
+            buildString {
+                appendLine("cross-semantics: ${if (vulkanCrossSemantics) "vulkan-subgroup" else "opengl"}")
+                appendLine("cross-adapter: ${nativeContract?.primitives?.sorted()?.joinToString(", ") ?: "none"}")
+                appendLine("original")
+                appendLine(originalPrimitiveInventory.render())
+                appendLine("optimized")
+                appendLine(optimizedPrimitiveInventory.render())
+                if (Files.isRegularFile(validationSpirv)) {
+                    appendLine("validation")
+                    appendLine(SpirvBinaryInventory.read(validationSpirv).render())
+                } else {
+                    appendLine("validation: deferred structural recompile")
+                }
+            },
+        )
 
         val emissionCore = phase(request, SpirvRoundTripPhase.RESTORE, moduleDirectory, moduleSourceName) {
             TextureAccessAnalyzer.restoreProbeResources(internalCoreSource, module.resourceMarkers)
@@ -533,6 +635,8 @@ internal class SpirvOptimizer(
             invocations = listOfNotNull(
                 compileInvocation,
                 optimizeInvocation,
+                crossCompileInvocation,
+                crossOptimizeInvocation,
                 decompileInvocation,
                 validationInvocation,
             ),
@@ -710,7 +814,10 @@ internal class SpirvOptimizer(
             }
             val compilerPath = moduleDirectory.resolve("final.glsl")
             val spirvPath = moduleDirectory.resolve("final.spv")
-            compilerPath.writeText(finalPatch.compilerSource)
+            val finalCompilerSource = SpirvNativePrimitiveContract.plan(finalPatch.compilerSource)
+                ?.prepareCompilerSource(finalPatch.compilerSource)
+                ?: finalPatch.compilerSource
+            compilerPath.writeText(finalCompilerSource)
             val toolchain = if (processRunner == null) {
                 SpirvToolchain(
                     moduleDirectory,
@@ -897,7 +1004,12 @@ internal class SpirvOptimizer(
             "compiler.glsl",
             "input.spv",
             "optimized.spv",
+            "cross-compiler.glsl",
+            "cross-input.spv",
+            "cross-optimized.spv",
             "decompiled.glsl",
+            "decompiled-native.glsl",
+            "native-primitives.txt",
             "restored.glsl",
             "validation.glsl",
             "validation.spv",

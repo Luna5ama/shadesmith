@@ -172,6 +172,7 @@ internal class OpenGlShaderPatcher {
 
     fun restoreCore(decompiledSource: String, patch: OpenGlShaderPatch): String {
         var restored = normalizeOutput(patch.irisContracts.stripCompilerArtifacts(decompiledSource))
+        restored = stripVulkanCrossArtifacts(restored, patch)
         patch.generatedLayouts.forEach { generated ->
             val declarations = parseDeclarations(restored)
             val declaration = declarations.singleOrNull { it.key == generated.key }
@@ -189,6 +190,28 @@ internal class OpenGlShaderPatcher {
         restored = restoreDeclarations(restored, patch)
         restored = restoreMissingQualifiers(restored, patch)
         return restored.trimEnd() + "\n"
+    }
+
+    private fun stripVulkanCrossArtifacts(source: String, patch: OpenGlShaderPatch): String {
+        var result = VULKAN_BUILTIN_IDENTIFIER.replace(source) { match ->
+            VULKAN_BUILTIN_RESTORATION.getValue(match.value)
+        }
+        result = LAYOUT_QUALIFIER_REGEX.replace(result) { match ->
+            val items = parseLayoutItems(match.groupValues[1])
+            val descriptorSets = items.filter { it.key == "set" }
+            if (descriptorSets.isEmpty()) return@replace match.value
+            if (descriptorSets.size != 1 || descriptorSets.single().value?.toIntOrNull() != 0) {
+                fail(
+                    patch.sourceName,
+                    patch.stage,
+                    sourceLine(result, match.range.first),
+                    "SPIRV-Cross emitted a non-OpenGL descriptor-set layout ${descriptorSets.map(LayoutItem::original)}",
+                )
+            }
+            val remaining = items.filterNot { it.key == "set" }
+            if (remaining.isEmpty()) "" else "layout(${remaining.joinToString(", ") { it.original }})"
+        }
+        return result
     }
 
     fun restoreContracts(source: String, patch: OpenGlShaderPatch): IrisContractRestoration {
@@ -1233,6 +1256,13 @@ internal class OpenGlShaderPatcher {
             ).toRegex()
         private val WORKGROUP_LAYOUT_REGEX =
             """(?m)^\s*layout\s*\(([^)]*\blocal_size_[xyz]\b[^)]*)\)\s*in\s*;""".toRegex()
+        private val LAYOUT_QUALIFIER_REGEX = "layout\\s*\\(([^)]*)\\)".toRegex()
+        private val VULKAN_BUILTIN_RESTORATION = mapOf(
+            "gl_VertexIndex" to "gl_VertexID",
+            "gl_InstanceIndex" to "gl_InstanceID",
+        )
+        private val VULKAN_BUILTIN_IDENTIFIER =
+            "\\b(?:gl_VertexIndex|gl_InstanceIndex)\\b".toRegex()
         private val STAGE_LAYOUT_REGEX =
             """(?m)^\s*layout\s*\(([^)]*)\)\s*(in|out)\s*;""".toRegex()
         private val MAIN_REGEX = """\bvoid\s+main\s*\(""".toRegex()

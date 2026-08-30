@@ -71,8 +71,199 @@ class SpirvOptimizerTest {
                 listOf("--target-env", "opengl", "--target-env", "spirv1.3"),
             ),
         )
+        assertTrue("--vulkan-semantics" in module.invocations[2].command)
         assertContains(result.source, "#extension GL_KHR_shader_subgroup_arithmetic : require")
+        assertContains(result.source, "subgroupAdd(")
+        assertContains(result.source, "subgroupShuffleXor(")
+        assertContains(result.source, "subgroupBroadcast(")
+        assertContains(result.source, "subgroupClusteredXor(")
+        assertContains(result.source, "subgroupQuadSwapHorizontal(")
+        assertContains(result.source, "subgroupExclusiveAdd(")
+        assertContains(result.source, "subgroupMin(")
+        assertContains(result.source, "subgroupMax(")
+        assertContains(result.source, "subgroupOr(")
+        assertFalse("No extensions available to emulate requested subgroup feature" in result.source)
+        assertFalse("SM_SPIRV_CROSS_NATIVE_" in result.source)
+        assertFalse("shared_lane" in result.source)
+        val optimizedInventory = SpirvBinaryInventory.read(module.optimizedSpirv)
+        val validationInventory = SpirvBinaryInventory.read(module.validationSpirv)
+        assertTrue(optimizedInventory.opcodeCount(SpirvBinaryInventory.OP_GROUP_NON_UNIFORM_SHUFFLE_XOR) > 0)
+        assertTrue(validationInventory.opcodeCount(SpirvBinaryInventory.OP_GROUP_NON_UNIFORM_SHUFFLE_XOR) > 0)
+        assertTrue(optimizedInventory.opcodeCount(SpirvBinaryInventory.OP_GROUP_NON_UNIFORM_SHUFFLE) > 0)
+        assertTrue(validationInventory.opcodeCount(SpirvBinaryInventory.OP_GROUP_NON_UNIFORM_SHUFFLE) > 0)
+        assertTrue(67 in optimizedInventory.capabilities)
+        assertTrue(68 in optimizedInventory.capabilities)
+        assertContains(module.artifactDirectory.resolve("native-primitives.txt").readText(), "vulkan-subgroup")
+        assertContains(
+            module.artifactDirectory.resolve("compiler.glsl").readText(),
+            "SM_SPIRV_CROSS_NATIVE_subgroupBroadcast",
+        )
+        assertContains(
+            module.artifactDirectory.resolve("decompiled-native.glsl").readText(),
+            "subgroupBroadcast",
+        )
         assertTrue(module.validationSpirv.isRegularFile())
+    }
+
+    @Test
+    fun roundTripsPartitionedNvOperationsThroughReversibleCrossAdapter() = withWorkspace { workspace ->
+        val result = SpirvOptimizer(workspace).optimize(
+            SpirvOptimizationRequest("partitioned.csh", ShaderStage.COMPUTE, fixture("partitioned.csh")),
+        )
+        val module = result.modules.single()
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertEquals(
+            listOf(
+                SpirvTool.GLSLANG,
+                SpirvTool.SPIRV_OPT,
+                SpirvTool.GLSLANG,
+                SpirvTool.SPIRV_OPT,
+                SpirvTool.SPIRV_CROSS,
+                SpirvTool.GLSLANG,
+            ),
+            module.invocations.map(SpirvInvocation::tool),
+        )
+        assertTrue("--vulkan-semantics" in module.invocations[4].command)
+        assertFalse("--inline-entry-points-exhaustive" in module.invocations[3].command)
+        assertContains(result.source, "subgroupPartitionNV(")
+        assertContains(result.source, "subgroupPartitionedAddNV(")
+        assertContains(result.source, "subgroupPartitionedMaxNV(")
+        assertFalse("SM_SPIRV_CROSS_NATIVE_" in result.source)
+        assertFalse("shared_lane" in result.source)
+        assertFalse("barrier(" in result.source)
+        assertFalse("atomic" in result.source)
+        val optimizedInventory = SpirvBinaryInventory.read(module.optimizedSpirv)
+        val validationInventory = SpirvBinaryInventory.read(module.validationSpirv)
+        assertTrue(5297 in optimizedInventory.capabilities)
+        assertTrue(5297 in validationInventory.capabilities)
+        assertTrue(
+            optimizedInventory.opcodeCount(SpirvBinaryInventory.OP_GROUP_NON_UNIFORM_PARTITION_NV) > 0,
+        )
+        assertTrue(
+            validationInventory.opcodeCount(SpirvBinaryInventory.OP_GROUP_NON_UNIFORM_PARTITION_NV) > 0,
+        )
+        assertContains(
+            module.artifactDirectory.resolve("cross-compiler.glsl").readText(),
+            "SM_SPIRV_CROSS_NATIVE_subgroupPartitionNV",
+        )
+        assertContains(
+            module.artifactDirectory.resolve("decompiled.glsl").readText(),
+            "SM_SPIRV_CROSS_NATIVE_subgroupPartitionedAddNV",
+        )
+        assertContains(
+            module.artifactDirectory.resolve("decompiled-native.glsl").readText(),
+            "subgroupPartitionedAddNV",
+        )
+        assertContains(
+            module.artifactDirectory.resolve("native-primitives.txt").readText(),
+            "subgroupPartitionedAddNV",
+        )
+    }
+
+    @Test
+    fun roundTripsHybridRaySortWithoutReplacingItsSubgroupPhase() = withWorkspace { workspace ->
+        val result = SpirvOptimizer(workspace).optimize(
+            SpirvOptimizationRequest("ray-sort.csh", ShaderStage.COMPUTE, fixture("ray-sort.csh")),
+        )
+        val module = result.modules.single()
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertContains(result.source, "subgroupShuffleXor(")
+        assertContains(result.source, "shared uint temp[2][128]")
+        assertContains(result.source, "barrier()")
+        assertFalse("SM_SPIRV_CROSS_NATIVE_" in result.source)
+        assertFalse("shared_lane" in result.source)
+        assertTrue(
+            SpirvBinaryInventory.read(module.optimizedSpirv)
+                .opcodeCount(SpirvBinaryInventory.OP_GROUP_NON_UNIFORM_SHUFFLE_XOR) > 0,
+        )
+        assertTrue(
+            SpirvBinaryInventory.read(module.validationSpirv)
+                .opcodeCount(SpirvBinaryInventory.OP_GROUP_NON_UNIFORM_SHUFFLE_XOR) > 0,
+        )
+    }
+
+    @Test
+    fun restoresExactHostConditionalOwnerWhenOptimizationDropsItsNativePrimitiveBranch() {
+        val original = """
+            #version 460 compatibility
+            void main() {
+            #if defined(MC_GL_VENDOR_NVIDIA)
+                uint partition = subgroupPartitionedAddNV(1u, subgroupPartitionNV(0u));
+            #else
+                uint partition = 1u;
+            #endif
+            }
+        """.trimIndent()
+        val optimized = """
+            #version 460 compatibility
+            void main()
+            {
+                uint partition = 1u;
+            }
+        """.trimIndent()
+
+        val restoration = SpirvFinalEmitter.restoreConditionalNativePrimitiveFunctions(original, optimized)
+            as ConditionalNativePrimitiveRestoration.Restored
+
+        assertEquals(1, restoration.restoredFunctions)
+        assertContains(restoration.source, "#if defined(MC_GL_VENDOR_NVIDIA)")
+        assertContains(restoration.source, "subgroupPartitionNV(")
+        assertContains(restoration.source, "subgroupPartitionedAddNV(")
+        assertContains(restoration.diagnostics.single(), "function:main()")
+    }
+
+    @Test
+    fun restoresVulkanCrossLayoutSpecializationDeclarationsToSettingBridges() {
+        val setting = ShaderSetting(
+            name = "SETTING_MODE",
+            type = ShaderSettingType.INT,
+            defaultValue = "2",
+            domain = listOf("1", "2", "3"),
+            presenceToggle = false,
+            specializationId = 7,
+            sourceSlices = listOf("#define SETTING_MODE 2 //[1 2 3]\n"),
+        )
+        val source = """
+            #version 460
+            layout(constant_id = 7) const int SM_SETTING_MODE = 2;
+            int selectedMode() { return SM_SETTING_MODE; }
+        """.trimIndent() + "\n"
+
+        val restored = SpirvSettingBridge.restoreCrossOutput(source, listOf(setting), emptySet())
+            as SpirvSettingBridgeRestoration.Restored
+
+        assertEquals(listOf(setting), restored.settings)
+        assertContains(restored.source, "#define SM_SETTING_MODE SETTING_MODE")
+        assertContains(restored.source, "return SM_SETTING_MODE;")
+        assertFalse("constant_id" in restored.source)
+    }
+
+    @Test
+    fun restoresVulkanCrossSpecializationByIdWhenCrossUsesASourceAlias() {
+        val setting = ShaderSetting(
+            name = "SETTING_MODE",
+            type = ShaderSettingType.INT,
+            defaultValue = "2",
+            domain = listOf("1", "2", "3"),
+            presenceToggle = false,
+            specializationId = 7,
+            sourceSlices = listOf("#define SETTING_MODE 2 //[1 2 3]\n"),
+        )
+        val source = """
+            #version 460
+            layout(constant_id = 7) const int MODE = 2;
+            int selectedMode() { return MODE; }
+        """.trimIndent() + "\n"
+
+        val restored = SpirvSettingBridge.restoreCrossOutput(source, listOf(setting), emptySet())
+            as SpirvSettingBridgeRestoration.Restored
+
+        assertEquals(listOf(setting), restored.settings)
+        assertContains(restored.source, "#define SM_SETTING_MODE SETTING_MODE")
+        assertContains(restored.source, "return SM_SETTING_MODE;")
+        assertFalse("constant_id" in restored.source)
     }
 
     @Test

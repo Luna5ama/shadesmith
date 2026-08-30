@@ -43,14 +43,47 @@ internal object SpirvSettingBridge {
         var result = removeRanges(source, blocks.map { it.range })
         val settingByCompilerName = settings.associateBy { it.compilerName }
         val declarationRanges = mutableMapOf<Int, MutableList<IntRange>>()
+        val emittedAliases = mutableMapOf<String, ShaderSetting>()
         physicalLineRanges(result).forEach { range ->
             val line = result.substring(range).trimEnd('\r', '\n')
-            val match = CROSS_SETTING_DECLARATION.matchEntire(line) ?: return@forEach
-            val setting = settingByCompilerName[match.groupValues[2]] ?: return@forEach
-            val id = match.groupValues[3].toInt()
-            if (match.groupValues[1] == setting.type.glslName && id == setting.specializationId) {
+            val macroDeclaration = CROSS_SETTING_DECLARATION.matchEntire(line)
+            if (macroDeclaration != null) {
+                val id = macroDeclaration.groupValues[3].toInt()
+                val setting = settingById[id] ?: return@forEach
+                if (macroDeclaration.groupValues[1] != setting.type.glslName) {
+                    return SpirvSettingBridgeRestoration.Preserved(
+                        "SPIRV-Cross specialization declaration changed type for ID $id",
+                    )
+                }
+                val emittedName = macroDeclaration.groupValues[2]
+                emittedAliases[emittedName]?.takeIf { it != setting }?.let {
+                    return SpirvSettingBridgeRestoration.Preserved(
+                        "SPIRV-Cross reused specialization alias $emittedName for multiple IDs",
+                    )
+                }
+                emittedAliases[emittedName] = setting
                 declarationRanges.getOrPut(id, ::mutableListOf) += range
+                return@forEach
             }
+            val layoutDeclaration = CROSS_LAYOUT_SETTING_DECLARATION.matchEntire(line) ?: return@forEach
+            val id = layoutDeclaration.groupValues[1].toInt()
+            val setting = settingById[id]
+                ?: return SpirvSettingBridgeRestoration.Preserved(
+                    "SPIRV-Cross emitted unowned layout specialization ID $id",
+                )
+            if (layoutDeclaration.groupValues[2] != setting.type.glslName) {
+                return SpirvSettingBridgeRestoration.Preserved(
+                    "SPIRV-Cross layout specialization declaration changed for ${setting.compilerName}",
+                )
+            }
+            val emittedName = layoutDeclaration.groupValues[3]
+            emittedAliases[emittedName]?.takeIf { it != setting }?.let {
+                return SpirvSettingBridgeRestoration.Preserved(
+                    "SPIRV-Cross reused specialization alias $emittedName for multiple IDs",
+                )
+            }
+            emittedAliases[emittedName] = setting
+            declarationRanges.getOrPut(id, ::mutableListOf) += range
         }
         declarationRanges.entries.firstOrNull { it.value.size > 1 }?.let { (id, _) ->
             val setting = settingById.getValue(id)
@@ -66,6 +99,11 @@ internal object SpirvSettingBridge {
                 setting.specializationId in tokenIds
         }
         result = removeRanges(result, declarationRanges.values.flatten())
+        emittedAliases.forEach { (emittedName, setting) ->
+            if (emittedName != setting.compilerName) {
+                result = identifierRegex(emittedName).replace(result, setting.compilerName)
+            }
+        }
         result = CROSS_TOKEN.replace(result) { match ->
             settingById[match.groupValues[1].toInt()]?.compilerName ?: match.value
         }
@@ -327,6 +365,11 @@ internal object SpirvSettingBridge {
         "[\\t ]*const[\\t ]+([A-Za-z_][A-Za-z0-9_]*)[\\t ]+([A-Za-z_][A-Za-z0-9_]*)" +
             "[\\t ]*=[\\t ]*SPIRV_CROSS_CONSTANT_ID_([0-9]+)[\\t ]*;[^\\r\\n]*",
     )
+    private val CROSS_LAYOUT_SETTING_DECLARATION = Regex(
+        "[\\t ]*layout[\\t ]*\\([\\t ]*constant_id[\\t ]*=[\\t ]*([0-9]+)[\\t ]*\\)[\\t ]*" +
+            "const[\\t ]+([A-Za-z_][A-Za-z0-9_]*)[\\t ]+([A-Za-z_][A-Za-z0-9_]*)" +
+            "[\\t ]*=[^;\\r\\n]+;[^\\r\\n]*",
+    )
     private val CROSS_RESTORED_SETTING_DECLARATION = Regex(
         "[\\t ]*const[\\t ]+([A-Za-z_][A-Za-z0-9_]*)[\\t ]+([A-Za-z_][A-Za-z0-9_]*)" +
             "[\\t ]*=[\\t ]*([A-Za-z_][A-Za-z0-9_]*)[\\t ]*;[^\\r\\n]*",
@@ -342,7 +385,19 @@ internal data class SpirvFinalEmission(
     val optimizedEntities: Int,
     val restoredEntities: Int,
     val restoredBytes: Int,
+    val restorationDiagnostics: List<String> = emptyList(),
 )
+
+internal sealed interface ConditionalNativePrimitiveRestoration {
+    data class Restored(
+        val source: String,
+        val restoredFunctions: Int,
+        val restoredBytes: Int,
+        val diagnostics: List<String>,
+    ) : ConditionalNativePrimitiveRestoration
+
+    data class Preserved(val reason: String) : ConditionalNativePrimitiveRestoration
+}
 
 internal object SpirvFinalEmitter {
     fun emit(
@@ -425,10 +480,20 @@ internal object SpirvFinalEmitter {
             is SpirvSettingBridgeRestoration.Restored -> bridges.source
             is SpirvSettingBridgeRestoration.Preserved -> return preserved(request, bridges.reason)
         }
+        val nativeComplete = when (
+            val native = restoreConditionalNativePrimitiveFunctions(
+                request.source,
+                restored,
+                modules.first().irisContracts,
+            )
+        ) {
+            is ConditionalNativePrimitiveRestoration.Restored -> native
+            is ConditionalNativePrimitiveRestoration.Preserved -> return preserved(request, native.reason)
+        }
         val dependencyComplete = when (
             val dependencies = restoreMissingSourceConstants(
                 request,
-                restored,
+                nativeComplete.source,
                 structuralPlan.restorationPlan,
                 modules.first().irisContracts,
             )
@@ -503,8 +568,9 @@ internal object SpirvFinalEmitter {
             request,
             finalSource,
             convergence.optimizedEntities,
-            convergence.restoredEntities,
-            convergence.restoredBytes,
+            convergence.restoredEntities + nativeComplete.restoredFunctions,
+            convergence.restoredBytes + nativeComplete.restoredBytes,
+            nativeComplete.diagnostics,
         )
     }
 
@@ -514,6 +580,7 @@ internal object SpirvFinalEmitter {
         optimizedEntities: Int = structuralEntities(source).size,
         restoredEntities: Int = 0,
         restoredBytes: Int = 0,
+        restorationDiagnostics: List<String> = emptyList(),
     ): SpirvFinalEmission {
         val artifact = FINAL_SPECIALIZATION_ARTIFACT.find(source)?.value
         return if (artifact == null) {
@@ -524,6 +591,7 @@ internal object SpirvFinalEmitter {
                 optimizedEntities,
                 restoredEntities,
                 restoredBytes,
+                restorationDiagnostics,
             )
         } else {
             preserved(request, "final optimized GLSL still contains specialization artifact '$artifact'")
@@ -538,6 +606,61 @@ internal object SpirvFinalEmitter {
             0,
             0,
             0,
+        )
+    }
+
+    internal fun restoreConditionalNativePrimitiveFunctions(
+        originalSource: String,
+        source: String,
+        irisContracts: IrisShaderContractPlan? = null,
+    ): ConditionalNativePrimitiveRestoration {
+        val originalFunctions = (scanSourceFunctions(originalSource) + scanNamedSourceFunctions(originalSource))
+            .distinctBy(StructuralEntity::identity)
+        val outputFunctions = (scanSourceFunctions(source) + scanNamedSourceFunctions(source))
+            .distinctBy(StructuralEntity::identity)
+            .groupBy(StructuralEntity::identity)
+        val calls = CONDITIONAL_PARTITIONED_PRIMITIVE_CALL.findAll(maskStructuralCode(originalSource)).toList()
+        val owners = nearestConditionalOwnerRanges(originalSource, calls.map { it.range })
+        val replacements = mutableListOf<Pair<IntRange, String>>()
+        val diagnostics = mutableListOf<String>()
+        var restoredBytes = 0
+
+        originalFunctions.forEach { function ->
+            val expected = calls.indices.filter { index ->
+                owners[index] != null && function.range.containsRange(calls[index].range)
+            }.mapTo(sortedSetOf()) { index -> calls[index].groupValues[1] }
+            if (expected.isEmpty()) return@forEach
+            val candidates = outputFunctions[function.identity].orEmpty()
+            if (candidates.isEmpty()) return@forEach
+            if (candidates.size > 1) {
+                return ConditionalNativePrimitiveRestoration.Preserved(
+                    "conditional native primitive owner ${function.identity} has ${candidates.size} optimized matches",
+                )
+            }
+            val output = candidates.single()
+            val actual = CONDITIONAL_PARTITIONED_PRIMITIVE_CALL
+                .findAll(maskStructuralCode(source.substring(output.range)))
+                .mapTo(sortedSetOf()) { it.groupValues[1] }
+            val missing = expected - actual
+            if (missing.isEmpty()) return@forEach
+            val exact = originalSource.substring(function.range)
+            val restored = irisContracts?.replaceHostReferences(exact) ?: exact
+            replacements += output.range to restored
+            restoredBytes += restored.encodeToByteArray().size
+            diagnostics += buildString {
+                append(function.identity)
+                append(": restored exact source owner after optimized GLSL lost conditional native primitives ")
+                append(missing.sorted())
+            }
+        }
+        val result = replacements.sortedByDescending { it.first.first }.fold(source) { current, (range, replacement) ->
+            current.replaceRange(range, replacement)
+        }
+        return ConditionalNativePrimitiveRestoration.Restored(
+            result,
+            replacements.size,
+            restoredBytes,
+            diagnostics,
         )
     }
 
@@ -2849,6 +2972,8 @@ internal object SpirvFinalEmitter {
 
     private val FINAL_SPECIALIZATION_ARTIFACT =
         "\\b(?:constant_id|local_size_[xyz]_id|SPIRV_CROSS_CONSTANT_ID_[0-9]+)\\b".toRegex()
+    private val CONDITIONAL_PARTITIONED_PRIMITIVE_CALL =
+        "\\b(subgroupPartitionNV|subgroupPartitioned[A-Za-z0-9_]*NV)[\\t ]*\\(".toRegex()
     private val ABI_PROLOGUE_DECLARATION =
         "\\b(?:uniform|buffer|shared)\\b|^layout\\s*\\([^)]*(?:std430|std140|binding)".toRegex()
     private val SYMBOLIC_ARRAY_EXTENT =
