@@ -5,6 +5,7 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import java.util.concurrent.Semaphore
 import kotlin.io.path.createDirectories
 import kotlin.io.path.nameWithoutExtension
 import kotlin.io.path.readText
@@ -73,6 +74,7 @@ internal class ShaderPipeline(
     val artifactDirectory: Path = artifactDirectory.toAbsolutePath().normalize()
     private val metrics = PipelineMetrics()
     private val processGate = ExternalProcessGate(parallelism)
+    private val rootExecutionGate = Semaphore(ROOTS_IN_FLIGHT)
     private val capabilities by lazy {
         capabilityProvider?.invoke() ?: OpenGlSpirvCapabilityProbe(
             this.artifactDirectory.resolve("capabilities"),
@@ -109,6 +111,9 @@ internal class ShaderPipeline(
     fun optimize(inputFiles: List<ShaderFile>): List<OptimizedShaderFile> {
         val startedAt = System.nanoTime()
         val orderedFiles = inputFiles.sortedBy(::sourceName)
+        val scheduledFiles = orderedFiles.sortedWith(
+            compareByDescending<ShaderFile> { it.code.length }.thenBy(::sourceName),
+        )
         val duplicateNames = orderedFiles.groupingBy(::sourceName).eachCount().filterValues { it > 1 }.keys
         require(duplicateNames.isEmpty()) { "Duplicate shader source names: ${duplicateNames.sorted()}" }
         if (orderedFiles.isEmpty()) return emptyList()
@@ -116,6 +121,8 @@ internal class ShaderPipeline(
         val activeCache = cache
         val executor = Executors.newFixedThreadPool(minOf(parallelism, orderedFiles.size))
         val moduleExecutor = Executors.newFixedThreadPool(parallelism)
+        val chunks = scheduledFiles.chunked(ROOT_BATCH_SIZE)
+        val chunkExecutor = Executors.newFixedThreadPool(minOf(CHUNKS_IN_FLIGHT, chunks.size))
         val optimizer = SpirvOptimizer(
             artifactDirectory.resolve("round-trip"),
             moduleExecutor = moduleExecutor,
@@ -123,18 +130,23 @@ internal class ShaderPipeline(
             metrics = metrics,
         )
         val work = try {
-            orderedFiles.chunked(ROOT_BATCH_SIZE).flatMap { files ->
-                processFileChunk(files, activeCache, executor, optimizer)
-            }
+            chunkExecutor.invokeAll(
+                chunks.map { files ->
+                    Callable { processFileChunk(files, activeCache, executor, optimizer) }
+                },
+            ).flatMap { future -> future.get() }
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
             throw IllegalStateException("Shader pipeline interrupted", e)
         } finally {
+            chunkExecutor.shutdown()
             executor.shutdown()
             moduleExecutor.shutdown()
         }
 
-        val failures = work.filterIsInstance<ShaderWork.Failure>()
+        val failures = work.filterIsInstance<ShaderWork.Failure>().sortedBy { failure ->
+            sourceName(failure.file)
+        }
         if (failures.isNotEmpty()) {
             val diagnostics = failures.map { describeFailure(it.file, it.exception) }
             writeFailureManifest(diagnostics)
@@ -148,7 +160,10 @@ internal class ShaderPipeline(
             throw ShaderPipelineException(diagnostics, failures.first().exception)
         }
 
-        val executions = work.filterIsInstance<ShaderWork.Success>().map { it.execution }
+        val executionsByName = work.filterIsInstance<ShaderWork.Success>()
+            .map(ShaderWork.Success::execution)
+            .associateBy { execution -> sourceName(execution.result.file) }
+        val executions = orderedFiles.map { file -> executionsByName.getValue(sourceName(file)) }
         val optimized = executions.map { it.result }
         val publications = executions.mapNotNull { it.publication }
         writeBoundaryManifest(optimized)
@@ -202,7 +217,10 @@ internal class ShaderPipeline(
         val executions = executor.invokeAll(
             successfulPreparations.mapIndexed { preparationIndex, preparation ->
                 Callable {
+                    var acquired = false
                     try {
+                        rootExecutionGate.acquire()
+                        acquired = true
                         ShaderWork.Success(
                             executePreparation(
                                 preparation,
@@ -212,6 +230,8 @@ internal class ShaderPipeline(
                         )
                     } catch (e: Exception) {
                         ShaderWork.Failure(preparation.file, e)
+                    } finally {
+                        if (acquired) rootExecutionGate.release()
                     }
                 }
             },
@@ -847,9 +867,11 @@ internal class ShaderPipeline(
     )
 
     companion object {
-        private const val DEFAULT_PARALLELISM = 10
-        private const val MAX_PARALLELISM = 10
-        private const val ROOT_BATCH_SIZE = 2
+        private const val DEFAULT_PARALLELISM = 32
+        private const val MAX_PARALLELISM = 32
+        private const val ROOT_BATCH_SIZE = 16
+        private const val ROOTS_IN_FLIGHT = 16
+        private const val CHUNKS_IN_FLIGHT = 2
         private const val PIPELINE_CACHE_CONTRACT = "shadesmith-compiler-copy-structural-round-trip-v1"
         private const val ROOT_DERIVED_PLAN_CONTRACT = "$PIPELINE_CACHE_CONTRACT\nroot-derived-plan-v2"
         private const val HOST_INTEGRATION_REASON =

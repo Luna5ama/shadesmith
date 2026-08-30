@@ -7,6 +7,7 @@ import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorCompletionService
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlin.io.path.createDirectories
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
@@ -548,15 +549,25 @@ internal class SpirvOptimizer(
         val finalDirectory = requestDirectory.resolve("final-structural-validation")
         finalDirectory.createDirectories()
         finalDirectory.resolve("emitted.glsl").writeText(source)
+        val validationModules = modules.distinctBy { module ->
+            requireNotNull(module.structuralSignature).canonical
+        }
         val varying = ShaderVaryingStructuralSlots.from(
-            modules.map { requireNotNull(it.structuralSignature) },
+            validationModules.map { requireNotNull(it.structuralSignature) },
         )
         val materializer = ShaderCompilerCopyMaterializer(
             finalDirectory.resolve("cc"),
             processGate = processGate,
             metrics = metrics,
         )
-        return modules.mapIndexed { index, module ->
+        data class FinalValidationCandidate(
+            val index: Int,
+            val module: SpirvModuleResult,
+            val signature: ShaderStructuralSignature,
+            val selectedSource: String,
+            val compilerPlan: ShaderCompilerCopyPlan,
+        )
+        val candidates = validationModules.mapIndexed { index, module ->
             val signature = requireNotNull(module.structuralSignature) {
                 "${request.sourceName} final structural validation is missing ${module.name} signature metadata"
             }
@@ -588,30 +599,49 @@ internal class SpirvOptimizer(
                 request.source,
                 selectedStructuralSource,
             )
-            val compilerCandidateSource = phase(
+            val compilerPlan = phase(
                 request,
                 SpirvRoundTripPhase.VALIDATE,
                 finalDirectory,
                 "${request.sourceName}#${module.name}",
             ) {
-                ShaderCompilerCopyPlanner.plan(
+                val plan = ShaderCompilerCopyPlanner.plan(
                     selectedSource,
                     "${request.sourceName}#${module.name}",
-                ).compilerCandidateSource.let(module.irisContracts::restoreRequiredCompilerPrelude)
-            }
-            val preprocessedSource = phase(
-                request,
-                SpirvRoundTripPhase.VALIDATE,
-                finalDirectory,
-                "${request.sourceName}#${module.name}",
-            ) {
-                materializer.materializeSource(
-                    request.sourceName,
-                    request.stage,
-                    compilerCandidateSource,
-                    "v${index.toString().padStart(3, '0')}",
+                )
+                plan.copy(
+                    compilerSource = module.irisContracts.restoreRequiredCompilerPrelude(plan.compilerCandidateSource),
                 )
             }
+            FinalValidationCandidate(index, module, signature, selectedSource, compilerPlan)
+        }
+        val preprocessedSources = phase(
+            request,
+            SpirvRoundTripPhase.VALIDATE,
+            finalDirectory,
+            request.sourceName,
+        ) {
+            materializer.materializeBatch(
+                candidates.map { candidate ->
+                    ShaderCompilerCopyMaterializationRequest(
+                        request.sourceName,
+                        request.stage,
+                        candidate.compilerPlan,
+                        TextureAccessProbe(candidate.selectedSource, emptyList(), TextureAccess()),
+                        "v${candidate.index.toString().padStart(3, '0')}",
+                    )
+                },
+            ).map { materialization ->
+                when (materialization) {
+                    is ShaderCompilerCopyMaterialization.Success -> materialization.module.source
+                    is ShaderCompilerCopyMaterialization.Failure -> throw materialization.exception
+                }
+            }
+        }
+        fun validateModule(candidate: FinalValidationCandidate, preprocessedSource: String): SpirvInvocation {
+            val module = candidate.module
+            val signature = candidate.signature
+            val selectedSource = candidate.selectedSource
             val compilerMacroSource = restoreMissingCompilerMacros(preprocessedSource, selectedSource)
             val materialized = phase(
                 request,
@@ -623,12 +653,6 @@ internal class SpirvOptimizer(
             }
             val moduleDirectory = finalDirectory.resolve(safeName(module.name))
             moduleDirectory.createDirectories()
-            moduleDirectory.resolve("selected-structural.glsl").writeText(selectedStructuralSource)
-            moduleDirectory.resolve("selected.glsl").writeText(selectedSource)
-            moduleDirectory.resolve("compiler-candidate.glsl").writeText(compilerCandidateSource)
-            moduleDirectory.resolve("preprocessed-raw.glsl").writeText(preprocessedSource)
-            moduleDirectory.resolve("preprocessed.glsl").writeText(compilerMacroSource)
-            moduleDirectory.resolve("materialized.glsl").writeText(materialized)
             val actualSignature = ShaderStructuralSignatureExtractor.extract(
                 request.stage,
                 materialized,
@@ -707,7 +731,40 @@ internal class SpirvOptimizer(
             ) {
                 toolchain.execute(invocation)
             }
-            invocation
+            return invocation
+        }
+        if (candidates.size == 1) return listOf(validateModule(candidates.single(), preprocessedSources.single()))
+        val executor = Executors.newFixedThreadPool(minOf(FINAL_VALIDATION_PARALLELISM, candidates.size))
+        val completion = ExecutorCompletionService<IndexedValue<SpirvInvocation>>(executor)
+        val futures = candidates.mapIndexed { index, candidate ->
+            completion.submit(Callable {
+                IndexedValue(index, validateModule(candidate, preprocessedSources[index]))
+            })
+        }
+        val invocations = MutableList<SpirvInvocation?>(candidates.size) { null }
+        return try {
+            repeat(candidates.size) {
+                val future = completion.take()
+                try {
+                    val invocation = future.get()
+                    invocations[invocation.index] = invocation.value
+                } catch (e: ExecutionException) {
+                    futures.filterNot { it.isDone }.forEach { it.cancel(true) }
+                    val cause = e.cause
+                    when (cause) {
+                        is RuntimeException -> throw cause
+                        is Error -> throw cause
+                        else -> throw IllegalStateException("Final structural validation task failed", cause)
+                    }
+                }
+            }
+            invocations.map { requireNotNull(it) }
+        } catch (e: InterruptedException) {
+            futures.filterNot { it.isDone }.forEach { it.cancel(true) }
+            Thread.currentThread().interrupt()
+            throw IllegalStateException("Final structural validation interrupted", e)
+        } finally {
+            executor.shutdownNow()
         }
     }
 
@@ -833,6 +890,7 @@ internal class SpirvOptimizer(
     }
 
     companion object {
+        private const val FINAL_VALIDATION_PARALLELISM = 8
         private val INVALID_PATH_CHAR = """[^A-Za-z0-9._-]""".toRegex()
         private val MODULE_ARTIFACT_NAMES = listOf(
             "input.glsl",

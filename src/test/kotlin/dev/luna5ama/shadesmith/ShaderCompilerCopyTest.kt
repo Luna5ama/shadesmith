@@ -1,5 +1,6 @@
 package dev.luna5ama.shadesmith
 
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.readText
@@ -769,6 +770,28 @@ class ShaderCompilerCopyTest {
     }
 
     @Test
+    fun compilerCopyUsesBoundedArtifactPathsAndReportsProcessStartupFailures() = withWorkspace { workspace ->
+        val source = "#version 460 compatibility\nvoid main() {}\n"
+        val sourceName = "gbuffers_particles_translucent_".repeat(8) + ".fsh"
+        val exception = assertFailsWith<ShaderCompilerCopyException> {
+            ShaderCompilerCopyMaterializer(
+                workspace,
+                processRunner = ClangProcessRunner { _, _, _, _ -> throw IOException("path too long") },
+            ).materialize(
+                sourceName,
+                ShaderStage.FRAGMENT,
+                ShaderCompilerCopyPlanner.plan(source, sourceName),
+                TextureAccessProbe(source, emptyList(), TextureAccess()),
+                "final-structural-validation-module-with-a-long-name",
+            )
+        }
+
+        assertTrue(exception.artifactDirectory.fileName.toString().length <= 20)
+        assertContains(exception.message.orEmpty(), "unable to start clang: path too long")
+        assertIs<IOException>(exception.cause)
+    }
+
+    @Test
     fun materializesHostConditionalsAndUnconditionalTokenPasteOnce() = withWorkspace { workspace ->
         val source = """
             #version 460 compatibility
@@ -891,6 +914,69 @@ class ShaderCompilerCopyTest {
     }
 
     @Test
+    fun deduplicatesIdenticalCompilerCopiesInsideOneBatch() = withWorkspace { workspace ->
+        val metrics = PipelineMetrics()
+        val copyRunner = ClangProcessRunner { command, _, stdout, _ ->
+            val inputs = command.filter { it.endsWith("clang-input.glsl") }.map(Path::of)
+            stdout.writeText(inputs.joinToString("\n") { it.readText() })
+            0
+        }
+        val source = "#version 460 compatibility\n#define VALUE 3\nvoid main() { int value = VALUE; }\n"
+        val probe = TextureAccessProbe(source, emptyList(), TextureAccess())
+        val requests = (0 until 45).map { index ->
+            ShaderCompilerCopyMaterializationRequest(
+                "duplicate-$index.csh",
+                ShaderStage.COMPUTE,
+                ShaderCompilerCopyPlanner.plan(source, "duplicate-$index.csh"),
+                probe,
+            )
+        }
+        val results = ShaderCompilerCopyMaterializer(
+            workspace,
+            processRunner = copyRunner,
+            metrics = metrics,
+        ).materializeBatch(requests)
+
+        assertEquals(45, results.size)
+        assertTrue(results.all { it is ShaderCompilerCopyMaterialization.Success })
+        assertEquals(1, metrics.snapshot().compilerModules)
+        assertEquals(1, metrics.snapshot().clangProcesses)
+    }
+
+    @Test
+    fun boundsCompilerCopyCacheWithoutChangingResults() = withWorkspace { workspace ->
+        var executions = 0
+        val copyRunner = ClangProcessRunner { command, _, stdout, _ ->
+            executions++
+            stdout.writeText(Path.of(command.last()).readText())
+            0
+        }
+        val source = "#version 460 compatibility\nvoid main() {}\n"
+        val probe = TextureAccessProbe(source, emptyList(), TextureAccess())
+        val materializer = ShaderCompilerCopyMaterializer(
+            workspace,
+            processRunner = copyRunner,
+            cacheCharacterBudget = 0,
+        )
+
+        val first = materializer.materialize(
+            "first.csh",
+            ShaderStage.COMPUTE,
+            ShaderCompilerCopyPlanner.plan(source, "first.csh"),
+            probe,
+        )
+        val second = materializer.materialize(
+            "second.csh",
+            ShaderStage.COMPUTE,
+            ShaderCompilerCopyPlanner.plan(source, "second.csh"),
+            probe,
+        )
+
+        assertEquals(first.source, second.source)
+        assertEquals(2, executions)
+    }
+
+    @Test
     fun retriesFailedBatchAsSinglesAndAttributesTheExactCompilerCopy() = withWorkspace { workspace ->
         val metrics = PipelineMetrics()
         val copyRunner = ClangProcessRunner { command, _, stdout, stderr ->
@@ -933,6 +1019,11 @@ class ShaderCompilerCopyTest {
         assertContains(failure.message.orEmpty(), "clang exited with code 9")
         assertEquals("failed compiler copy stdout", failure.artifactDirectory.resolve("clang.stdout.log").readText())
         assertEquals("failed compiler copy stderr", failure.artifactDirectory.resolve("clang.stderr.log").readText())
+        assertTrue(
+            workspace.resolve("batches").toFile().walkTopDown()
+                .filter { it.name == "clang.stderr.log" }
+                .any { it.readText() == "batch failed" },
+        )
         assertEquals(3, metrics.snapshot().clangProcesses)
     }
 

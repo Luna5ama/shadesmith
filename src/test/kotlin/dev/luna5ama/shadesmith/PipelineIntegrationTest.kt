@@ -50,6 +50,8 @@ class PipelineIntegrationTest {
 
         assertEquals(0, run().cacheHits)
         assertEquals(1, run().cacheHits)
+        shadersProperties.writeText("program.composite.enabled=true\n# unrelated property still belongs to the cache contract\n")
+        assertEquals(0, run().cacheHits)
         shadersProperties.writeText("#if SETTING_UNUSED\nprogram.composite.enabled=true\n#endif\n")
         assertEquals(0, run().cacheHits)
     }

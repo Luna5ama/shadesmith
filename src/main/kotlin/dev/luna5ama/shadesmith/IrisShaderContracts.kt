@@ -172,17 +172,12 @@ internal data class IrisShaderContractPlan(
     }
 
     fun replaceHostReferences(source: String): String {
-        var result = source
-        compilerHostNames.forEach { (sourceName, compilerName) ->
-            result = replaceCodeIdentifier(result, sourceName, compilerName)
+        val replacements = buildMap {
+            putAll(compilerHostNames)
+            derivedMacros.forEach { macro -> put(macro.sourceName, macro.compilerName) }
+            putAll(compilerDynamicNames)
         }
-        derivedMacros.forEach { macro ->
-            result = replaceCodeIdentifier(result, macro.sourceName, macro.compilerName)
-        }
-        compilerDynamicNames.forEach { (sourceName, compilerName) ->
-            result = replaceCodeIdentifier(result, sourceName, compilerName)
-        }
-        return result
+        return replaceCodeIdentifiers(source, replacements)
     }
 
     fun sourceDynamicName(compilerName: String): String? =
@@ -642,15 +637,18 @@ internal object IrisShaderContractExtractor {
             if (atom.mask) maskRanges += atom.range
         }
 
-        var compilerSource = maskRanges.distinct().fold(source) { value, range ->
-            value.replaceRange(range, maskSource(value.substring(range)))
-        }
+        val compilerIdentifierReplacements = linkedMapOf<String, String>()
         derivedMacros.forEach { derived ->
-            compilerSource = replaceCodeIdentifier(compilerSource, derived.sourceName, derived.compilerName)
+            compilerIdentifierReplacements[derived.sourceName] = derived.compilerName
         }
         localAnalysis?.axisMacros.orEmpty().forEach { (name, axis) ->
-            compilerSource = replaceCodeIdentifier(compilerSource, name, "int(gl_WorkGroupSize.$axis)")
+            compilerIdentifierReplacements[name] = "int(gl_WorkGroupSize.$axis)"
         }
+        compilerIdentifierReplacements.putAll(hostCompilerNames)
+        var compilerSource = replaceCodeIdentifiers(
+            maskSourceRanges(source, maskRanges),
+            compilerIdentifierReplacements,
+        )
 
         val extensionLines = compilerExtensionLines(directives)
         val compilerPrelude = buildString {
@@ -680,13 +678,6 @@ internal object IrisShaderContractExtractor {
             }
             hostCompilerAnalysis.declarations.forEach(::appendLine)
             localAnalysis?.contract?.let { append(it.compilerLayout) }
-        }
-        hostCompilerNames.forEach { (name, compilerName) ->
-            compilerSource = replaceCodeIdentifier(
-                compilerSource,
-                name,
-                compilerName,
-            )
         }
         val dynamicTopLevel = lowerDynamicTopLevelConstants(
             compilerSource,
@@ -1357,9 +1348,7 @@ private fun predicateAt(
             PreprocessorDirectiveKind.ELSE -> prior.joinToString(" && ") { "!($it)" }
             else -> (prior.map { "!($it)" } + directiveCondition(current.directive)).joinToString(" && ")
         }
-        predicate.takeIf { expression ->
-            settings.keys.any { identifierRegex(it).containsMatchIn(expression) }
-        }
+        predicate.takeIf { expression -> IDENTIFIER.findAll(expression).any { it.value in settings } }
     }
     return ContractPredicate(expressions)
 }
@@ -1414,14 +1403,11 @@ private fun isDirectiveOnlyConditional(
     group: ContractConditionalGroup,
     directives: List<ContractDirective>,
 ): Boolean {
-    var remaining = source.substring(group.range)
-    directives.filter { it.range.first >= group.range.first && it.range.last <= group.range.last }
-        .sortedByDescending { it.range.first }
-        .forEach { directive ->
-            val relative = (directive.range.first - group.range.first)..(directive.range.last - group.range.first)
-            remaining = remaining.replaceRange(relative, maskSource(remaining.substring(relative)))
-        }
-    return stripComments(remaining).isBlank()
+    val covered = directives.asSequence()
+        .map { it.range }
+        .filter { it.first >= group.range.first && it.last <= group.range.last }
+        .toList()
+    return stripComments(copyOutsideRanges(source, group.range, covered)).isBlank()
 }
 
 private fun isContractOnlyConditional(
@@ -1438,13 +1424,62 @@ private fun isContractOnlyConditional(
             addAll(candidate.delimiters.map { it.range })
             add(requireNotNull(candidate.endif).range)
         }
-    }.distinct().sortedByDescending { it.first }
-    var remaining = source.substring(group.range)
-    covered.forEach { range ->
-        val relative = (range.first - group.range.first)..(range.last - group.range.first)
-        remaining = remaining.replaceRange(relative, maskSource(remaining.substring(relative)))
     }
-    return stripComments(remaining).isBlank()
+    return stripComments(copyOutsideRanges(source, group.range, covered)).isBlank()
+}
+
+private fun maskSourceRanges(source: String, ranges: Collection<IntRange>): String {
+    val merged = mergeRanges(ranges, source.indices)
+    if (merged.isEmpty()) return source
+    return buildString(source.length) {
+        var cursor = 0
+        merged.forEach { range ->
+            append(source, cursor, range.first)
+            for (index in range) {
+                append(if (source[index] == '\r' || source[index] == '\n') source[index] else ' ')
+            }
+            cursor = range.last + 1
+        }
+        append(source, cursor, source.length)
+    }
+}
+
+private fun copyOutsideRanges(source: String, bounds: IntRange, ranges: Collection<IntRange>): String {
+    val merged = mergeRanges(ranges, bounds)
+    if (merged.isEmpty()) return source.substring(bounds)
+    return buildString(bounds.count()) {
+        var cursor = bounds.first
+        merged.forEach { range ->
+            append(source, cursor, range.first)
+            cursor = range.last + 1
+        }
+        append(source, cursor, bounds.last + 1)
+    }
+}
+
+private fun mergeRanges(ranges: Collection<IntRange>, bounds: IntRange): List<IntRange> {
+    if (ranges.isEmpty() || bounds.isEmpty()) return emptyList()
+    val sorted = ranges.asSequence()
+        .mapNotNull { range ->
+            val first = maxOf(range.first, bounds.first)
+            val last = minOf(range.last, bounds.last)
+            if (first <= last) first..last else null
+        }
+        .sortedBy(IntRange::first)
+        .toList()
+    if (sorted.isEmpty()) return emptyList()
+    val merged = ArrayList<IntRange>(sorted.size)
+    var current = sorted.first()
+    sorted.drop(1).forEach { range ->
+        if (range.first <= current.last + 1) {
+            current = current.first..maxOf(current.last, range.last)
+        } else {
+            merged += current
+            current = range
+        }
+    }
+    merged += current
+    return merged
 }
 
 private fun compilerExtensionLines(directives: List<ContractDirective>): List<String> {
@@ -1553,11 +1588,12 @@ private fun convertMacroBody(
     axisMacros: Map<String, Char>,
     derivedMacros: Map<String, String>,
 ): String {
-    var result = stripComments(body).trim()
-    settings.forEach { (name, setting) -> result = identifierRegex(name).replace(result, setting.compilerName) }
-    axisMacros.forEach { (name, axis) -> result = identifierRegex(name).replace(result, "int(gl_WorkGroupSize.$axis)") }
-    derivedMacros.forEach { (name, compilerName) -> result = identifierRegex(name).replace(result, compilerName) }
-    return result
+    val replacements = buildMap {
+        settings.forEach { (name, setting) -> put(name, setting.compilerName) }
+        axisMacros.forEach { (name, axis) -> put(name, "int(gl_WorkGroupSize.$axis)") }
+        putAll(derivedMacros)
+    }
+    return replaceIdentifiers(stripComments(body).trim(), replacements)
 }
 
 private fun renderDerivedDecision(
@@ -1608,13 +1644,29 @@ private fun directivePhysicalRanges(source: String): List<IntRange> {
     return result
 }
 
-private fun replaceCodeIdentifier(source: String, name: String, replacement: String): String {
+private fun replaceIdentifiers(source: String, replacements: Map<String, String>): String {
+    if (replacements.isEmpty()) return source
+    return IDENTIFIER.replace(source) { match -> replacements[match.value] ?: match.value }
+}
+
+private fun replaceCodeIdentifiers(source: String, replacements: Map<String, String>): String {
+    if (replacements.isEmpty()) return source
     val lexical = ContractLexicalMap(source)
     val directiveRanges = directivePhysicalRanges(source)
-    val matches = identifierRegex(name).findAll(source).filter {
-        lexical.isCode(it.range.first) && directiveRanges.none { range -> it.range.first in range }
+    val matches = IDENTIFIER.findAll(source).filter { match ->
+        match.value in replacements && lexical.isCode(match.range.first) &&
+            directiveRanges.none { range -> match.range.first in range }
     }.toList()
-    return matches.asReversed().fold(source) { value, match -> value.replaceRange(match.range, replacement) }
+    if (matches.isEmpty()) return source
+    return buildString(source.length) {
+        var cursor = 0
+        matches.forEach { match ->
+            append(source, cursor, match.range.first)
+            append(replacements.getValue(match.value))
+            cursor = match.range.last + 1
+        }
+        append(source, cursor, source.length)
+    }
 }
 
 private fun lowerDynamicTopLevelConstants(source: String, initialDynamicNames: Set<String>): DynamicTopLevelLowering {
@@ -1856,7 +1908,6 @@ private fun insertAfterVersion(source: String, insertion: String): String {
     return source.substring(0, offset) + prefix + insertion + source.substring(offset)
 }
 
-private fun maskSource(source: String): String = source.map { if (it == '\r' || it == '\n') it else ' ' }.joinToString("")
 private fun normalizeCompilerText(source: String): String = source.replace("\r\n", "\n").replace('\r', '\n').trimEnd() + "\n"
 private fun identifiers(source: String): List<String> = IDENTIFIER.findAll(stripComments(source)).map { it.value }.toList()
 private fun identifierRegex(name: String): Regex = "(?<![A-Za-z0-9_])${Regex.escape(name)}(?![A-Za-z0-9_])".toRegex()

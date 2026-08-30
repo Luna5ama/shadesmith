@@ -15,8 +15,11 @@ Java 21 and these executables must be available on `PATH`:
 Run the fat JAR with an input shader directory and an output shader directory:
 
 ```text
-java -jar shadesmith.jar <input-shaders> <output-shaders>
+java -Xmx6g -jar shadesmith.jar <input-shaders> <output-shaders>
 ```
+
+The bounded cold-path scheduler is validated with a 6 GiB Java heap. Keep that limit when processing the complete
+Alpha Piscium corpus so the JVM collects completed root plans before the total process tree exceeds 8 GiB.
 
 ## Shader pipeline
 
@@ -74,7 +77,7 @@ Shadesmith implementation, hashes of the resolved external tools, and their full
 structural planning are deterministic products of that identity; a verified hit therefore bypasses planning as well as
 all external tools. Missing, incomplete, corrupt, or mismatched entries are recomputed, and failed runs publish nothing.
 
-The cold path uses at most ten external processes concurrently. It retains at most two shader-root plans at once and
-batches up to twenty independent Clang translation units per process; a failed batch is retried per input so diagnostics
-still identify the exact source. Repeated runs reuse verified final GLSL and lifecycle/signature metadata without
-starting Clang, glslang, spirv-opt, or spirv-cross.
+The cold path uses at most 32 external processes concurrently. Two rolling 16-root planning batches feed at most 16
+executing roots, and Clang combines up to twenty independent translation units per process; a failed batch is retried
+per input so diagnostics still identify the exact source. Repeated runs reuse verified final GLSL and
+lifecycle/signature metadata without starting Clang, glslang, spirv-opt, or spirv-cross.

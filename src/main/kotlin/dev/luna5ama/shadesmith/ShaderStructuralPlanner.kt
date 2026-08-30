@@ -359,12 +359,12 @@ internal data class ShaderStructuralCoveragePlan(
                     "or ${rows.size} coverage rows, got ${materialized.size}",
             )
         }
-        data class ModuleKey(val signature: ShaderStructuralSignature, val compilerSource: String)
         data class DistinctModule(
             val rows: MutableList<ShaderStructuralCoverageRow>,
             val module: SpirvCompilerModule,
+            var conservativeAccess: TextureAccess,
         )
-        val distinct = linkedMapOf<ModuleKey, DistinctModule>()
+        val distinct = linkedMapOf<ShaderStructuralSignature, DistinctModule>()
         materializedRows.forEach { (coveredRows, module) ->
             val row = coveredRows.first()
             require(module.name == row.name) {
@@ -376,9 +376,11 @@ internal data class ShaderStructuralCoveragePlan(
                 row.requiredCapabilities,
                 row.localSizeFallback,
             )
-            distinct.getOrPut(ModuleKey(signature, normalizeStructuralText(module.source))) {
-                DistinctModule(mutableListOf(), module)
-            }.rows += coveredRows
+            val distinctModule = distinct.getOrPut(signature) {
+                DistinctModule(mutableListOf(), module, TextureAccess())
+            }
+            distinctModule.rows += coveredRows
+            distinctModule.conservativeAccess += module.conservativeAccess
         }
         if (distinct.size > MAX_STRUCTURAL_MODULES) {
             return ShaderStructuralMaterializationResult.Preserved(
@@ -399,19 +401,18 @@ internal data class ShaderStructuralCoveragePlan(
                         appendLine(row.changedComponents.toString())
                     }
                     appendLine("retained structural modules:")
-                    distinct.keys.forEachIndexed { index, key ->
+                    distinct.entries.forEachIndexed { index, (signature, distinctModule) ->
                         append("  module-")
                         append(index.toString().padStart(3, '0'))
                         append(" signature=")
-                        append(key.signature.canonical.replace('\n', ' '))
+                        append(signature.canonical.replace('\n', ' '))
                         append(" compiler_sha256=")
-                        appendLine(shortHash(key.compilerSource))
+                        appendLine(shortHash(normalizeStructuralText(distinctModule.module.source)))
                     }
                 }.trimEnd(),
             )
         }
-        val modules = distinct.entries.mapIndexed { index, (key, distinctModule) ->
-            val signature = key.signature
+        val modules = distinct.entries.mapIndexed { index, (signature, distinctModule) ->
             val moduleName = "structural-${index.toString().padStart(3, '0')}-${shortHash(signature.canonical)}"
             val representative = distinctModule.rows.first()
             ShaderStructuralModule(
@@ -423,6 +424,7 @@ internal data class ShaderStructuralCoveragePlan(
                     structuralSignature = signature,
                     structuralAssignment = representative.assignment,
                     structuralAssignments = distinctModule.rows.map(ShaderStructuralCoverageRow::assignment).distinct(),
+                    conservativeAccess = distinctModule.conservativeAccess,
                 ),
             )
         }

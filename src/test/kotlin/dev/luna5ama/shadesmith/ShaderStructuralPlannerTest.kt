@@ -928,27 +928,26 @@ class ShaderStructuralPlannerTest {
         val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
             ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE),
         ).plan
-        val materialized = materialize(workspace, source, planned)
+        val materialized = materialize(workspace, source, planned).mapIndexed { index, module ->
+            module.copy(conservativeAccess = TextureAccess(reads = setOf("branch_$index")))
+        }
         val structural = assertIs<ShaderStructuralMaterializationResult.Materialized>(
             planned.deduplicate(materialized),
         ).modules
-        assertEquals(2, structural.size)
+        assertEquals(1, structural.size)
         assertEquals(1, structural.map { it.signature }.toSet().size)
-        val modules = structural.mapIndexed { index, module ->
-            module.module.copy(conservativeAccess = TextureAccess(reads = setOf("branch_$index")))
-        }
+        val modules = structural.map(ShaderStructuralModule::module)
         val result = SpirvOptimizer(workspace.resolve("spirv")).optimize(
             SpirvOptimizationRequest("nested.csh", ShaderStage.COMPUTE, source, modules, planned),
         )
 
         assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
         assertFalse(result.source == source)
-        assertContains(result.source, "SHADESMITH_BRANCH_OWNED_MAIN_BEGIN")
         assertContains(result.source, "uniform float unusedAbi;")
         val prologue = result.source.indexOf("SHADESMITH_BRANCH_OWNED_PROLOGUE_BEGIN")
         assertTrue(prologue < 0 || result.source.indexOf("uniform float unusedAbi;") < prologue)
-        assertEquals(2, result.finalValidationInvocations.size)
-        assertEquals(2, result.modules.size)
+        assertEquals(1, result.finalValidationInvocations.size)
+        assertEquals(1, result.modules.size)
         assertEquals(
             setOf("branch_0", "branch_1"),
             result.modules.map { it.textureAccess }.fold(TextureAccess(), TextureAccess::plus).reads,

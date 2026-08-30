@@ -191,6 +191,31 @@ class SpirvToolchainTest {
     }
 
     @Test
+    fun boundsCompletedToolOutputsWithoutChangingResults() = withWorkspace { workspace ->
+        val cache = SpirvToolResultCache(completedByteBudget = 0)
+        var executions = 0
+        val runner = SpirvProcessRunner { invocation, _, stdoutPath, stderrPath ->
+            executions++
+            stdoutPath.writeText("stdout")
+            stderrPath.writeText("")
+            invocation.output.parent.createDirectories()
+            invocation.output.writeText("SPIR-V:${invocation.input.readText()}")
+            0
+        }
+        fun execute(directoryName: String): String {
+            val directory = workspace.resolve(directoryName).createDirectories()
+            val input = directory.resolve("input.glsl").apply { writeText("same shader") }
+            val output = directory.resolve("output.spv")
+            val toolchain = SpirvToolchain(directory, processRunner = runner, resultCache = cache)
+            toolchain.execute(toolchain.compileInvocation(ShaderStage.COMPUTE, input, output))
+            return output.readText()
+        }
+
+        assertEquals(execute("first"), execute("second"))
+        assertEquals(2, executions)
+    }
+
+    @Test
     fun reportsNonzeroExitWithDurableEvidencePaths() = withWorkspace { workspace ->
         val input = workspace.resolve("input.spv")
         input.writeText("SPIR-V")

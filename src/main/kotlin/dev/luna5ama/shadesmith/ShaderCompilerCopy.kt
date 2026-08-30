@@ -2136,12 +2136,15 @@ internal class ShaderCompilerCopyMaterializer(
     private val processRunner: ClangProcessRunner = SystemClangProcessRunner,
     private val processGate: ExternalProcessGate? = null,
     private val metrics: PipelineMetrics? = null,
+    private val cacheCharacterBudget: Long = DEFAULT_CACHE_CHARACTER_BUDGET,
 ) {
     val workingDirectory: Path = workingDirectory.toAbsolutePath().normalize()
-    private val materializedSourceCache = mutableMapOf<SourceMaterializationKey, String>()
+    private val materializedSourceCache = LinkedHashMap<SourceMaterializationKey, String>(16, 0.75f, true)
+    private var materializedSourceCacheCharacters = 0L
 
     init {
         require(clangExecutable.isNotBlank()) { "clang executable cannot be blank" }
+        require(cacheCharacterBudget >= 0) { "compiler-copy cache character budget cannot be negative" }
         this.workingDirectory.createDirectories()
     }
 
@@ -2218,16 +2221,18 @@ internal class ShaderCompilerCopyMaterializer(
     ): List<SourceMaterialization> {
         if (requests.isEmpty()) return emptyList()
         val results = arrayOfNulls<SourceMaterialization>(requests.size)
-        val pending = mutableListOf<Pair<Int, SourceMaterializationRequest>>()
+        val pending = linkedMapOf<SourceMaterializationKey, MutableList<Pair<Int, SourceMaterializationRequest>>>()
         requests.forEachIndexed { index, request ->
-            val cached = materializedSourceCache[request.cacheKey()]
+            val key = request.cacheKey()
+            val cached = materializedSourceCache[key]
             if (cached == null) {
-                pending += index to request
+                pending.getOrPut(key) { mutableListOf() } += index to request
             } else {
                 results[index] = SourceMaterialization.Success(cached)
             }
         }
-        val materialized = pending.map { it.second }.chunked(CLANG_BATCH_SIZE).flatMap { chunk ->
+        val pendingEntries = pending.entries.toList()
+        val materialized = pendingEntries.map { it.value.first().second }.chunked(CLANG_BATCH_SIZE).flatMap { chunk ->
             val prepared = chunk.map(::prepare)
             if (prepared.size == 1) {
                 listOf(runSingle(prepared.single()))
@@ -2235,14 +2240,38 @@ internal class ShaderCompilerCopyMaterializer(
                 runBatch(prepared) ?: prepared.map(::runSingle)
             }
         }
-        pending.zip(materialized).forEach { (indexed, result) ->
-            val (index, request) = indexed
+        pendingEntries.zip(materialized).forEach { (entry, result) ->
+            val duplicates = entry.value
             if (result is SourceMaterialization.Success) {
-                materializedSourceCache.putIfAbsent(request.cacheKey(), result.source)
+                cacheMaterializedSource(entry.key, result.source)
+                duplicates.forEach { (index, _) -> results[index] = result }
+            } else {
+                val (representativeIndex, _) = duplicates.first()
+                results[representativeIndex] = result
+                duplicates.drop(1).forEach { (index, request) ->
+                    results[index] = runSingle(prepare(request))
+                }
             }
-            results[index] = result
         }
         return results.map { requireNotNull(it) }
+    }
+
+    private fun cacheMaterializedSource(key: SourceMaterializationKey, source: String) {
+        val characters = key.source.length.toLong() + key.pathIdentity.orEmpty().length + source.length
+        if (characters > cacheCharacterBudget) return
+        materializedSourceCache.remove(key)?.let { previous ->
+            materializedSourceCacheCharacters -=
+                key.source.length.toLong() + key.pathIdentity.orEmpty().length + previous.length
+        }
+        materializedSourceCache[key] = source
+        materializedSourceCacheCharacters += characters
+        val iterator = materializedSourceCache.entries.iterator()
+        while (materializedSourceCacheCharacters > cacheCharacterBudget && iterator.hasNext()) {
+            val entry = iterator.next()
+            materializedSourceCacheCharacters -=
+                entry.key.source.length.toLong() + entry.key.pathIdentity.orEmpty().length + entry.value.length
+            iterator.remove()
+        }
     }
 
     private fun SourceMaterializationRequest.cacheKey(): SourceMaterializationKey {
@@ -2260,27 +2289,22 @@ internal class ShaderCompilerCopyMaterializer(
         val source = request.source
         val moduleName = request.moduleName
         val artifactDirectory = workingDirectory.resolve(
-            "${safeName(sourceName)}-${stage.glslangName}-${safeName(moduleName)}-${shortHash(source)}",
+            "cc-${shortHash("$sourceName\u0000${stage.name}\u0000$moduleName\u0000$source")}",
         )
         artifactDirectory.createDirectories()
-        val inputPath = artifactDirectory.resolve("compiler-copy.glsl")
         val clangInputPath = artifactDirectory.resolve("clang-input.glsl")
-        val outputPath = artifactDirectory.resolve("materialized.glsl")
         val stdoutPath = artifactDirectory.resolve("clang.stdout.log")
         val stderrPath = artifactDirectory.resolve("clang.stderr.log")
-        inputPath.writeText(source)
         val protected = protectGlslDirectives(normalizePunctuationTokenPaste(source))
         var marker = "__SHADESMITH_COMPILER_COPY_${shortHash("$sourceName\u0000$moduleName\u0000$source")}__"
         while (marker in protected.source) marker += '_'
         clangInputPath.writeText("${marker}BEGIN\n${protected.source}\n${marker}END\n")
-        Files.deleteIfExists(outputPath)
         Files.writeString(stdoutPath, "")
         Files.writeString(stderrPath, "")
         return PreparedCompilerCopy(
             request,
             artifactDirectory,
             clangInputPath,
-            outputPath,
             stdoutPath,
             stderrPath,
             protected.namespace,
@@ -2299,18 +2323,24 @@ internal class ShaderCompilerCopyMaterializer(
         Files.writeString(stdoutPath, "")
         Files.writeString(stderrPath, "")
         val command = listOf(clangExecutable) + CLANG_ARGUMENTS + prepared.map { it.clangInputPath.absolutePathString() }
-        val exitCode = execute(command, batchDirectory, stdoutPath, stderrPath) ?: return null
+        val exitCode = try {
+            execute(command, batchDirectory, stdoutPath, stderrPath)
+        } catch (e: IOException) {
+            stderrPath.writeText(e.stackTraceToString())
+            return null
+        }
         if (exitCode != 0) return null
         val output = stdoutPath.readText()
         val stderr = stderrPath.readText()
         val parsed = prepared.map { compilerCopy ->
-            parseMaterialized(output, compilerCopy)?.also { source ->
-                compilerCopy.outputPath.writeText(source)
-                compilerCopy.stdoutPath.writeText(source)
-                compilerCopy.stderrPath.writeText(stderr)
-            }
+            parseMaterialized(output, compilerCopy)
         }
         if (parsed.any { it == null }) return null
+        prepared.forEach { compilerCopy ->
+            Files.deleteIfExists(compilerCopy.clangInputPath)
+        }
+        Files.writeString(stdoutPath, "")
+        if (stderr.isEmpty()) Files.writeString(stderrPath, "")
         metrics?.recordCompilerModules(prepared.size)
         return parsed.map { SourceMaterialization.Success(requireNotNull(it)) }
     }
@@ -2328,7 +2358,7 @@ internal class ShaderCompilerCopyMaterializer(
                     prepared.request.stage,
                     prepared.artifactDirectory,
                     command,
-                    "unable to start clang",
+                    "unable to start clang: ${e.message}",
                     e,
                 ),
             )
@@ -2342,17 +2372,6 @@ internal class ShaderCompilerCopyMaterializer(
                     command,
                     "interrupted while running clang",
                     e,
-                ),
-            )
-        }
-        if (exitCode == null) {
-            return SourceMaterialization.Failure(
-                failure(
-                    prepared.request.sourceName,
-                    prepared.request.stage,
-                    prepared.artifactDirectory,
-                    command,
-                    "unable to start clang",
                 ),
             )
         }
@@ -2390,7 +2409,8 @@ internal class ShaderCompilerCopyMaterializer(
                 ),
             )
         }
-        prepared.outputPath.writeText(materialized)
+        Files.deleteIfExists(prepared.clangInputPath)
+        Files.writeString(prepared.stdoutPath, "")
         metrics?.recordCompilerModules(1)
         return SourceMaterialization.Success(materialized)
     }
@@ -2400,16 +2420,12 @@ internal class ShaderCompilerCopyMaterializer(
         workingDirectory: Path,
         stdoutPath: Path,
         stderrPath: Path,
-    ): Int? {
-        return try {
-            metrics?.recordClangProcess()
-            if (processGate == null) {
-                processRunner.execute(command, workingDirectory, stdoutPath, stderrPath)
-            } else {
-                processGate.run { processRunner.execute(command, workingDirectory, stdoutPath, stderrPath) }
-            }
-        } catch (_: IOException) {
-            null
+    ): Int {
+        metrics?.recordClangProcess()
+        return if (processGate == null) {
+            processRunner.execute(command, workingDirectory, stdoutPath, stderrPath)
+        } else {
+            processGate.run { processRunner.execute(command, workingDirectory, stdoutPath, stderrPath) }
         }
     }
 
@@ -2546,7 +2562,6 @@ internal class ShaderCompilerCopyMaterializer(
         val request: SourceMaterializationRequest,
         val artifactDirectory: Path,
         val clangInputPath: Path,
-        val outputPath: Path,
         val stdoutPath: Path,
         val stderrPath: Path,
         val directiveNamespace: String,
@@ -2560,6 +2575,7 @@ internal class ShaderCompilerCopyMaterializer(
 
     companion object {
         internal const val CLANG_BATCH_SIZE = 20
+        internal const val DEFAULT_CACHE_CHARACTER_BUDGET = 128L * 1024L * 1024L
         private val CLANG_ARGUMENTS = listOf("-C", "-E", "-P", "-Wno-microsoft-include", "-x", "c")
 
         internal fun cacheContract(clangExecutable: String): String {

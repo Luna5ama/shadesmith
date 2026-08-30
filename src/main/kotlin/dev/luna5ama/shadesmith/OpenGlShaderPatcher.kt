@@ -115,8 +115,15 @@ internal class OpenGlShaderPatcher {
         var compilerSource = source.replaceRange(version.range, "#version 460 core")
 
         val originalDeclarations = parseDeclarations(source)
-        val declarations = parseDeclarations(compilerSource)
-        rejectUnsupportedDeclarations(compilerSource, declarations, protectedSource.sourceName, stage)
+        val compilerLexicalMap = buildLexicalMap(compilerSource)
+        val declarations = parseDeclarations(compilerSource, compilerLexicalMap)
+        rejectUnsupportedDeclarations(
+            compilerSource,
+            compilerLexicalMap,
+            declarations,
+            protectedSource.sourceName,
+            stage,
+        )
         val generatedLayouts = allocateLayouts(
             compilerSource,
             declarations,
@@ -809,13 +816,14 @@ internal class OpenGlShaderPatcher {
 
     private fun rejectUnsupportedDeclarations(
         source: String,
+        lexicalMap: LexicalMap,
         declarations: List<ParsedDeclaration>,
         sourceName: String,
         stage: ShaderStage,
     ) {
         val parsedRanges = declarations.map { it.range }
         CUSTOM_INTERFACE_BLOCK_REGEX.findAll(source).firstOrNull { match ->
-            isTopLevelCode(source, match.range.first) && parsedRanges.none { match.range.first in it }
+            lexicalMap.isTopLevelCode(match.range.first) && parsedRanges.none { match.range.first in it }
         }?.let {
             fail(
                 sourceName,
@@ -825,7 +833,7 @@ internal class OpenGlShaderPatcher {
             )
         }
         ABI_DECLARATION_CANDIDATE_REGEX.findAll(source).firstOrNull { match ->
-            isTopLevelCode(source, match.range.first) && parsedRanges.none { match.range.first in it }
+            lexicalMap.isTopLevelCode(match.range.first) && parsedRanges.none { match.range.first in it }
         }?.let {
             fail(
                 sourceName,
@@ -836,8 +844,10 @@ internal class OpenGlShaderPatcher {
         }
     }
 
-    private fun parseDeclarations(source: String): List<ParsedDeclaration> {
-        val lexicalMap = buildLexicalMap(source)
+    private fun parseDeclarations(
+        source: String,
+        lexicalMap: LexicalMap = buildLexicalMap(source),
+    ): List<ParsedDeclaration> {
         val topLevelLineStarts = topLevelLineStarts(source, lexicalMap)
         val variables = topLevelLineStarts.mapNotNull { offset ->
             val match = VARIABLE_DECLARATION_REGEX.matchAt(source, offset) ?: return@mapNotNull null
@@ -1101,10 +1111,6 @@ internal class OpenGlShaderPatcher {
         depth[source.length] = braceDepth
         code[source.length] = !blockComment && !lineComment && quote == null
         return LexicalMap(depth, code)
-    }
-
-    private fun isTopLevelCode(source: String, offset: Int): Boolean {
-        return buildLexicalMap(source).isTopLevelCode(offset)
     }
 
     private fun stripComments(source: String): String {

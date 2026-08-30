@@ -141,8 +141,16 @@ internal class SpirvToolException(
     cause,
 )
 
-internal class SpirvToolResultCache {
+internal class SpirvToolResultCache(
+    private val completedByteBudget: Long = DEFAULT_COMPLETED_BYTE_BUDGET,
+) {
     private val entries = ConcurrentHashMap<SpirvToolCacheKey, CompletableFuture<CachedSpirvToolOutput>>()
+    private val completed = ArrayDeque<CompletedSpirvToolCacheEntry>()
+    private var completedBytes = 0L
+
+    init {
+        require(completedByteBudget >= 0) { "SPIR-V tool cache byte budget cannot be negative" }
+    }
 
     fun execute(
         invocation: SpirvInvocation,
@@ -162,11 +170,28 @@ internal class SpirvToolResultCache {
         return try {
             val output = action()
             created.complete(output)
+            retainCompleted(key, created, output)
             CachedSpirvToolExecution(output, cacheHit = false)
         } catch (t: Throwable) {
             created.completeExceptionally(t)
             entries.remove(key, created)
             throw t
+        }
+    }
+
+    private fun retainCompleted(
+        key: SpirvToolCacheKey,
+        future: CompletableFuture<CachedSpirvToolOutput>,
+        output: CachedSpirvToolOutput,
+    ) {
+        val bytes = output.output.size.toLong() + output.stdout.size + output.stderr.size
+        synchronized(completed) {
+            completed += CompletedSpirvToolCacheEntry(key, future, bytes)
+            completedBytes += bytes
+            while (completedBytes > completedByteBudget && completed.isNotEmpty()) {
+                val evicted = completed.removeFirst()
+                if (entries.remove(evicted.key, evicted.future)) completedBytes -= evicted.bytes
+            }
         }
     }
 
@@ -184,7 +209,17 @@ internal class SpirvToolResultCache {
             }
         }
     }
+
+    companion object {
+        internal const val DEFAULT_COMPLETED_BYTE_BUDGET = 512L * 1024L * 1024L
+    }
 }
+
+private data class CompletedSpirvToolCacheEntry(
+    val key: SpirvToolCacheKey,
+    val future: CompletableFuture<CachedSpirvToolOutput>,
+    val bytes: Long,
+)
 
 internal data class CachedSpirvToolExecution(
     val output: CachedSpirvToolOutput,

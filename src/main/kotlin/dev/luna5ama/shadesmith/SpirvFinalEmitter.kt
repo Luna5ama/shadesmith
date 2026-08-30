@@ -105,16 +105,17 @@ internal object SpirvSettingBridge {
         fixedAssignments: Map<String, String>,
         fixedSettings: Set<String>,
     ): String {
-        var result = source
-        settings.sortedByDescending { it.name.length }.forEach { setting ->
-            val bridge = renderBridge(setting)
-            val first = result.indexOf(bridge)
-            require(first >= 0) { "setting bridge ${setting.compilerName} is missing from final GLSL" }
-            require(result.indexOf(bridge, first + bridge.length) < 0) {
+        val bridgeRanges = locateBridges(source, settings)
+        settings.forEach { setting ->
+            val ranges = bridgeRanges.getValue(setting)
+            require(ranges.isNotEmpty()) {
+                "setting bridge ${setting.compilerName} is missing from final GLSL"
+            }
+            require(ranges.size == 1) {
                 "setting bridge ${setting.compilerName} is ambiguous in final GLSL"
             }
-            result = result.removeRange(first, first + bridge.length)
         }
+        val result = removeRanges(source, bridgeRanges.values.flatten())
         val declarations = buildString {
             settings.sortedBy { it.name }.forEach { setting ->
                 if (setting.name in fixedSettings) {
@@ -146,12 +147,16 @@ internal object SpirvSettingBridge {
         restoredSettings: List<ShaderSetting>,
         candidates: List<ShaderSetting>,
     ): SpirvSettingBridgeRestoration {
+        val candidatesByCompilerName = candidates.associateBy { it.compilerName }
+        val referencedCandidates = DECLARATION_IDENTIFIER.findAll(source)
+            .mapNotNullTo(linkedSetOf()) { candidatesByCompilerName[it.value] }
         val required = (restoredSettings + candidates.filter { setting ->
-            identifierRegex(setting.compilerName).containsMatchIn(source)
+            setting in referencedCandidates
         }).distinctBy { it.name }.sortedBy { it.name }
+        val bridgeRanges = locateBridges(source, required)
         val missing = mutableListOf<ShaderSetting>()
         required.forEach { setting ->
-            when (occurrences(source, renderBridge(setting)).size) {
+            when (bridgeRanges.getValue(setting).size) {
                 0 -> missing += setting
                 1 -> Unit
                 else -> return SpirvSettingBridgeRestoration.Preserved(
@@ -171,14 +176,13 @@ internal object SpirvSettingBridge {
         if (settings.isEmpty()) return SpirvSettingBridgeRestoration.Restored(source, emptyList())
         val bridges = settings.sortedBy { it.name }.associateWith(::renderBridge)
         val bridgeRanges = mutableListOf<IntRange>()
-        bridges.forEach { (setting, bridge) ->
-            val occurrences = occurrences(source, bridge)
-            if (occurrences.size != 1) {
+        locateBridges(source, settings).forEach { (setting, ranges) ->
+            if (ranges.size != 1) {
                 return SpirvSettingBridgeRestoration.Preserved(
-                    "setting bridge ${setting.compilerName} is ${if (occurrences.isEmpty()) "missing" else "ambiguous"}",
+                    "setting bridge ${setting.compilerName} is ${if (ranges.isEmpty()) "missing" else "ambiguous"}",
                 )
             }
-            bridgeRanges += occurrences.single()
+            bridgeRanges += ranges.single()
         }
         var result = removeRanges(source, bridgeRanges)
         val definitionSettings = settings.filter { it.controlKind != ShaderControlKind.HOST_PRESENCE }
@@ -239,6 +243,28 @@ internal object SpirvSettingBridge {
         }
     }
 
+    private fun locateBridges(
+        source: String,
+        settings: Collection<ShaderSetting>,
+    ): Map<ShaderSetting, List<IntRange>> {
+        data class BridgePattern(val setting: ShaderSetting, val text: String)
+        val patterns = settings.map { setting -> BridgePattern(setting, renderBridge(setting)) }
+        val byFirstLine = patterns.groupBy { it.text.substringBefore('\n') }
+        val ranges = patterns.associate { it.setting to mutableListOf<IntRange>() }
+        var lineStart = 0
+        while (lineStart < source.length) {
+            val newline = source.indexOf('\n', lineStart).let { if (it < 0) source.length else it }
+            val contentEnd = if (newline > lineStart && source[newline - 1] == '\r') newline - 1 else newline
+            byFirstLine[source.substring(lineStart, contentEnd)].orEmpty().forEach { pattern ->
+                if (source.regionMatches(lineStart, pattern.text, 0, pattern.text.length)) {
+                    ranges.getValue(pattern.setting) += lineStart until lineStart + pattern.text.length
+                }
+            }
+            lineStart = if (newline < source.length) newline + 1 else source.length
+        }
+        return ranges
+    }
+
     private fun physicalLineRanges(source: String): List<IntRange> {
         val result = mutableListOf<IntRange>()
         var start = 0
@@ -275,8 +301,16 @@ internal object SpirvSettingBridge {
     }
 
     private fun removeRanges(source: String, ranges: List<IntRange>): String {
-        return ranges.distinct().sortedByDescending { it.first }.fold(source) { value, range ->
-            value.removeRange(range.first, range.last + 1)
+        val ordered = ranges.distinct().sortedBy { it.first }
+        if (ordered.isEmpty()) return source
+        return buildString(source.length - ordered.sumOf(IntRange::count)) {
+            var cursor = 0
+            ordered.forEach { range ->
+                require(range.first >= cursor) { "overlapping source removal ranges" }
+                append(source, cursor, range.first)
+                cursor = range.last + 1
+            }
+            append(source, cursor, source.length)
         }
     }
 
