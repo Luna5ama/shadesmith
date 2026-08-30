@@ -16,6 +16,27 @@ import kotlin.test.assertTrue
 
 class IrisShaderContractTest {
     @Test
+    fun staticHostHelperSharedWithShaderCodeRemainsInCompilerCopy() {
+        val source = """
+            #version 460 compatibility
+            #define DISPATCH_OFFSET ivec2(8, 1)
+            #define SHADER_OFFSET() DISPATCH_OFFSET
+            const ivec3 workGroups = ivec3(DISPATCH_OFFSET, 1);
+            layout(local_size_x = 1) in;
+            void main() { ivec2 value = SHADER_OFFSET(); }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "shared-host-helper.csh")
+
+        assertTrue(plan.structuralBlockers.isEmpty(), plan.structuralBlockers.toString())
+        val compiler = assertNotNull(plan.compilerSource)
+        assertContains(compiler, "#define DISPATCH_OFFSET ivec2(8, 1)")
+        assertContains(compiler, "#define SHADER_OFFSET() DISPATCH_OFFSET")
+        assertContains(compiler, "ivec2 value = SHADER_OFFSET();")
+        assertFalse("workGroups =" in compiler)
+    }
+
+    @Test
     fun clearVoxelDataRestoresHostDispatchBytesWithoutVariants() {
         val hostContract = """
             #if VOXEL_POOL_SIZE == 256
@@ -149,6 +170,17 @@ class IrisShaderContractTest {
         assertTrue(settingOffset >= 0)
         assertTrue(hostOffset > settingOffset, compiler)
         assertEquals(1, "const int ${setting.compilerName}".toRegex().findAll(compiler).count())
+
+        val replanned = plan.irisContracts.restoreRequiredCompilerPrelude(
+            "#version 460 core\n$COMPILER_MARKER\n" +
+                "layout(constant_id = ${setting.specializationId}) const int ${setting.compilerName} = 2048;\n" +
+                "void main() { int value = SM_IRIS_HOST_shadowMapResolution; }\n",
+        )
+        assertTrue(
+            replanned.indexOf("const int SM_IRIS_HOST_shadowMapResolution") >
+                replanned.indexOf("const int ${setting.compilerName}"),
+            replanned,
+        )
     }
 
     @Test
@@ -231,6 +263,18 @@ class IrisShaderContractTest {
         assertContains(
             compiler,
             "float value = SM_DYNAMIC_SHADOW_MAP_SIZE.x + SM_DYNAMIC_SHADOW_TEXEL_SIZE;",
+        )
+        assertEquals(
+            "const vec2 size = vec2(float(SM_IRIS_HOST_shadowMapResolution));",
+            plan.irisContracts.replaceHostReferences(
+                "const vec2 size = vec2(float(shadowMapResolution));",
+            ),
+        )
+        assertEquals(
+            "float value = SM_DYNAMIC_SHADOW_MAP_SIZE.x + SM_DYNAMIC_SHADOW_TEXEL_SIZE;",
+            plan.irisContracts.replaceHostReferences(
+                "float value = SHADOW_MAP_SIZE.x + SHADOW_TEXEL_SIZE;",
+            ),
         )
         assertFalse("const float SHADOW_TEXEL_SIZE" in compiler)
         assertFalse("const vec2 SHADOW_MAP_SIZE" in compiler)
@@ -392,6 +436,8 @@ class IrisShaderContractTest {
         """.trimIndent() + "\n"
         val optimized = """
             #version 460 core
+            #extension GL_NV_shader_thread_group : require
+            #extension GL_KHR_shader_subgroup_ballot : require
             #if defined(GL_KHR_shader_subgroup_ballot)
             #extension GL_KHR_shader_subgroup_ballot : require
             #elif defined(GL_ARB_shader_ballot)
@@ -410,12 +456,14 @@ class IrisShaderContractTest {
         assertContains(restored, "#extension GL_KHR_shader_subgroup_ballot : require")
         assertContains(restored, "#extension GL_ARB_shader_ballot : require")
         assertContains(restored, "#error No subgroup ballot extension available")
+        assertFalse("GL_NV_shader_thread_group" in restored)
         assertTrue(restored.indexOf("#version") < restored.indexOf("#extension GL_ARB_gpu_shader_int64"))
         assertTrue(restored.indexOf("#extension GL_ARB_gpu_shader_int64") < restored.indexOf("#if defined(GL_KHR_shader_subgroup_ballot)"))
 
         val compiler = plan.prepareCompilerSource(restored)
         assertContains(compiler, "#extension GL_KHR_shader_subgroup_ballot : require")
         assertContains(compiler, "#extension GL_ARB_shader_ballot : require")
+        assertFalse("GL_NV_shader_thread_group" in compiler)
         assertEquals(1, "#extension GL_ARB_gpu_shader_int64 : require".toRegex().findAll(compiler).count())
     }
 
@@ -428,8 +476,9 @@ class IrisShaderContractTest {
             #else
             #extension GL_KHR_shader_subgroup_basic : require
             #endif
+            const int shadowMapResolution = 2048;
             layout(local_size_x = 1) in;
-            void main() {}
+            void main() { int value = shadowMapResolution; }
         """.trimIndent() + "\n"
         val materialized = """
             #version 460 compatibility
@@ -444,6 +493,16 @@ class IrisShaderContractTest {
 
         assertContains(compiler, "#extension GL_KHR_shader_subgroup_basic : require")
         assertFalse("GL_NV_shader_thread_group" in compiler)
+
+        val replanned = contracts.restoreRequiredCompilerPrelude(
+            "#version 460 core\n#extension GL_NV_shader_thread_group : require\n$COMPILER_MARKER\n" +
+                "void main() { int value = SM_IRIS_HOST_shadowMapResolution; }\n",
+        )
+        assertContains(replanned, "#extension GL_KHR_shader_subgroup_basic : require")
+        assertFalse("GL_NV_shader_thread_group" in replanned)
+        assertContains(replanned, "const int SM_IRIS_HOST_shadowMapResolution = 2048;")
+        assertContains(replanned, "layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;")
+        assertEquals(1, "layout\\s*\\([^)]*local_size_".toRegex().findAll(replanned).count())
     }
 
     @Test
@@ -659,6 +718,48 @@ class IrisShaderContractTest {
         assertTrue(capabilities.localSizeId, capabilities.diagnostic)
         assertTrue(Files.isRegularFile(capabilities.probeArtifactDirectory.resolve("local-size-id.spv")))
         assertTrue(Files.isRegularFile(capabilities.probeArtifactDirectory.resolve("local-size-id-validation.spv")))
+    }
+
+    @Test
+    fun branchOwnedMainRegionIsTheAuthoritativeStableAnchor() {
+        val source = """
+            #version 460 compatibility
+            void main() {}
+            // SHADESMITH_BRANCH_OWNED_MAIN_BEGIN
+            #ifdef SETTING_BRANCH
+            void main() {}
+            #else
+            void main() {}
+            #endif
+            // SHADESMITH_BRANCH_OWNED_MAIN_END
+        """.trimIndent()
+
+        val mainAnchors = findStableAnchors(source).filter {
+            it.anchor == IrisSourceAnchor(IrisAnchorKind.FUNCTION, "main")
+        }
+
+        assertEquals(1, mainAnchors.size)
+        assertContains(source.substring(mainAnchors.single().range), "SHADESMITH_BRANCH_OWNED_MAIN_BEGIN")
+    }
+
+    @Test
+    fun settingConditionalMainArmsAreOneMutuallyExclusiveStableAnchor() {
+        val source = """
+            #version 460 compatibility
+            #ifdef SETTING_BRANCH
+            void main() {}
+            #else
+            void main() {}
+            #endif
+        """.trimIndent()
+
+        val mainAnchors = findStableAnchors(source).filter {
+            it.anchor == IrisSourceAnchor(IrisAnchorKind.FUNCTION, "main")
+        }
+
+        assertEquals(1, mainAnchors.size)
+        assertContains(source.substring(mainAnchors.single().range), "#ifdef SETTING_BRANCH")
+        assertContains(source.substring(mainAnchors.single().range), "#else")
     }
 
     private fun epipolarSource(): String = """

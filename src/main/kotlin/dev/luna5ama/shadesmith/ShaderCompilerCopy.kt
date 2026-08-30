@@ -155,15 +155,46 @@ internal object ShaderCompilerCopyPlanner {
         referencedSettings += initialMacroDependencies
             .filter { macro -> macro.settingDependencies.isNotEmpty() && macro.name in identifiers(executableSource) }
             .flatMap { it.settingDependencies }
+        val sourceWithoutDirectives = applyReplacements(
+            sourceWithoutDefinitions,
+            initialProtection.directives.map { directive ->
+                initialSourceMap.directiveRange(directive).let { range ->
+                    Replacement(range.first, range.last + 1, maskSource(sourceWithoutDefinitions.substring(range)))
+                }
+            },
+        )
+        val unresolvedPresenceSettings = referencedSettings.filterTo(sortedSetOf()) { name ->
+            settingCandidates[name].isNullOrEmpty() &&
+                !IDENTIFIER_TOKEN(name).containsMatchIn(maskCommentsAndStrings(sourceWithoutDirectives)) &&
+                initialGroups.filter { name in it.settingDependencies }.flatMap { it.delimiters }.all { branch ->
+                    when (branch.kind) {
+                        PreprocessorDirectiveKind.IFDEF,
+                        PreprocessorDirectiveKind.IFNDEF,
+                        -> branch.macroName == name
+                        PreprocessorDirectiveKind.IF,
+                        PreprocessorDirectiveKind.ELIF,
+                        -> {
+                            val expression = branch.expression.orEmpty()
+                            val withoutDefined = DEFINED_IDENTIFIER.replace(expression) { match ->
+                                if (match.groupValues[1] == name) "1" else match.value
+                            }
+                            !IDENTIFIER_TOKEN(name).containsMatchIn(withoutDefined)
+                        }
+                        else -> true
+                    }
+                }
+        }
 
         val blockers = mutableListOf<ShaderCompilerCopyBlocker>()
         val optionControls = referencedSettings.sorted().mapNotNull { name ->
             val candidates = settingCandidates[name].orEmpty()
             if (candidates.isEmpty()) {
-                blockers += ShaderCompilerCopyBlocker(
-                    firstSettingUseLine(source, initialSourceMap, name),
-                    "setting $name has no scalar option definition in this compiler root",
-                )
+                if (name !in unresolvedPresenceSettings) {
+                    blockers += ShaderCompilerCopyBlocker(
+                        firstSettingUseLine(source, initialSourceMap, name),
+                        "setting $name has no scalar option definition in this compiler root",
+                    )
+                }
                 null
             } else {
                 mergeSettingCandidates(name, candidates)?.also { candidate ->
@@ -179,6 +210,7 @@ internal object ShaderCompilerCopyPlanner {
             initialProtection.directives,
             initialGroups,
             initialMacroDependencies,
+            unresolvedPresenceSettings,
         )
         val controls = (optionControls + hostControls).distinctBy { it.name }.sortedBy { it.name }
         val existingIds = EXISTING_SPECIALIZATION_ID.findAll(source)
@@ -591,6 +623,7 @@ internal object ShaderCompilerCopyPlanner {
         directives: List<PreprocessorDirective>,
         groups: List<ConditionalGroup>,
         macros: List<ShaderMacroDependency>,
+        additionalNames: Set<String> = emptySet(),
     ): List<SettingCandidate> {
         val relevantSlices = buildList {
             groups.filter { it.settingDependencies.isNotEmpty() }.forEach { group ->
@@ -604,9 +637,10 @@ internal object ShaderCompilerCopyPlanner {
         val macroNames = macros.mapTo(hashSetOf()) { it.name }
         val names = relevantSlices.flatMapTo(sortedSetOf()) { slice ->
             DEFINED_IDENTIFIER.findAll(slice).map { it.groupValues[1] }.filterNot {
-                it.startsWith(SETTING_PREFIX) || it.startsWith("GL_") || it in macroNames
+                (it.startsWith(SETTING_PREFIX) && it !in additionalNames) || it.startsWith("GL_") || it in macroNames
             }
         }
+        names += additionalNames
         val definedNames = directives.filter { it.kind == PreprocessorDirectiveKind.DEFINE }
             .mapNotNullTo(hashSetOf()) { it.macroName }
         return names.map { name ->
@@ -755,10 +789,11 @@ internal object ShaderCompilerCopyPlanner {
             return
         }
         if (group.opener.braceDepth == 0) {
-            val functions = branches.map { parseFunctionBranch(it.renderedBody) }
-            val signatures = functions.mapNotNull { it?.normalizedSignature }.distinct()
+            val functions = branches.map { parseFunctionBranches(it.renderedBody) }
+            val signatures = functions.mapNotNull { bundle ->
+                bundle?.map(FunctionBranch::normalizedSignature)
+            }.distinct()
             if (
-                branches.last().directive.kind == PreprocessorDirectiveKind.ELSE &&
                 functions.all { it != null } &&
                 signatures.size == 1
             ) {
@@ -780,7 +815,6 @@ internal object ShaderCompilerCopyPlanner {
             group.structural("setting branch cuts a token, statement, or lexical scope")
             return
         }
-
         val isExpression = branches.last().directive.kind == PreprocessorDirectiveKind.ELSE &&
             branches.all { isCompleteExpression(it.renderedBody) }
         if (isExpression) {
@@ -817,6 +851,29 @@ internal object ShaderCompilerCopyPlanner {
             }
         }
         group.disposition = ShaderConditionalDisposition.CONTROL_FLOW_STATEMENT
+    }
+
+    private fun booleanDerivedComparisonOutsideDomain(
+        expression: String,
+        macros: List<ShaderMacroDependency>,
+    ): Boolean? {
+        return macros.asSequence().filter { macro ->
+            val derived = macro.derivedControl ?: return@filter false
+            derived.kind == ShaderDerivedControlKind.PRESENCE || derived.sourceSlices.mapNotNull { slice ->
+                stripComments(slice.substringAfter(macro.name)).trim().takeIf(String::isNotEmpty)
+            }.let { values -> values.isNotEmpty() && values.all { it == "0" || it == "1" } }
+        }.mapNotNull { macro ->
+            val name = Regex.escape(macro.name)
+            val direct = Regex(
+                "(?<![A-Za-z0-9_])$name(?![A-Za-z0-9_])\\s*(==|!=)\\s*(-?[0-9]+)",
+            ).find(expression)?.let { it.groupValues[1] to it.groupValues[2].toLong() }
+            val reverse = Regex(
+                "(-?[0-9]+)\\s*(==|!=)\\s*(?<![A-Za-z0-9_])$name(?![A-Za-z0-9_])",
+            ).find(expression)?.let { it.groupValues[2] to it.groupValues[1].toLong() }
+            val comparison = direct ?: reverse ?: return@mapNotNull null
+            if (comparison.second in 0L..1L) return@mapNotNull null
+            comparison.first == "!="
+        }.firstOrNull()
     }
 
     private fun buildCompilerSource(
@@ -908,6 +965,15 @@ internal object ShaderCompilerCopyPlanner {
         source: String,
         macros: List<ShaderMacroDependency>,
     ): String {
+        data class GlobalConstant(
+            val range: IntRange,
+            val name: String,
+            val initializer: String,
+            val scalar: Boolean,
+            val nonConstantCall: Boolean,
+            val directlySettingDependent: Boolean,
+        )
+
         val settingDependentMacros = macros.filter { it.settingDependencies.isNotEmpty() }.mapTo(hashSetOf()) { it.name }
         val masked = maskCommentsAndStrings(source)
         var braceDepth = 0
@@ -920,20 +986,43 @@ internal object ShaderCompilerCopyPlanner {
             }
         }
         braceDepths[masked.length] = braceDepth
-        val replacements = GLOBAL_CONST_INITIALIZER.findAll(masked).mapNotNull { match ->
+        val constants = GLOBAL_CONST_INITIALIZER.findAll(masked).mapNotNull { match ->
             if (braceDepths[match.range.first] != 0) return@mapNotNull null
             val semicolon = masked.indexOf(';', match.range.last + 1)
             if (semicolon < 0 || braceDepths[semicolon] != 0) return@mapNotNull null
             val declaration = source.substring(match.range.first, semicolon + 1)
-            val settingDependent = COMPILER_SETTING_PREFIX in declaration ||
+            val settingDependent = COMPILER_SETTING_PREFIX in declaration || COMPILER_HOST_PREFIX in declaration ||
                 identifiers(maskCommentsAndStrings(declaration)).any(settingDependentMacros::contains)
-            if (!settingDependent) return@mapNotNull null
             val scalar = match.groupValues[1] in SCALAR_GLSL_TYPES &&
-                match.groupValues[2].isEmpty() && match.groupValues[3].isEmpty()
-            if (scalar) return@mapNotNull null
-            val start = match.range.first
-            Replacement(start, start + "const".length, " ".repeat("const".length))
+                match.groupValues[2].isEmpty() && match.groupValues[4].isEmpty()
+            val initializer = declaration.substringAfter('=')
+            val nonConstantCall = FUNCTION_CALL.findAll(maskCommentsAndStrings(initializer)).any { call ->
+                call.groupValues[1] !in SCALAR_GLSL_TYPES
+            }
+            GlobalConstant(
+                match.range.first..semicolon,
+                match.groupValues[3],
+                initializer,
+                scalar,
+                nonConstantCall,
+                settingDependent,
+            )
         }.toList()
+        val relaxed = constants.filterTo(linkedSetOf()) {
+            it.directlySettingDependent && (!it.scalar || it.nonConstantCall)
+        }
+        var changed: Boolean
+        do {
+            val relaxedNames = relaxed.mapTo(hashSetOf(), GlobalConstant::name)
+            changed = constants.filterNot(relaxed::contains).any { constant ->
+                identifiers(maskCommentsAndStrings(constant.initializer)).any(relaxedNames::contains) &&
+                    relaxed.add(constant)
+            }
+        } while (changed)
+        val replacements = relaxed.map { constant ->
+            val start = constant.range.first
+            Replacement(start, start + "const".length, " ".repeat("const".length))
+        }
         return applyReplacements(source, replacements)
     }
 
@@ -983,19 +1072,39 @@ internal object ShaderCompilerCopyPlanner {
         return when (group.disposition) {
             ShaderConditionalDisposition.COMPILER_NO_OP -> maskSource(source.substring(group.range))
 
-            ShaderConditionalDisposition.CONTROL_FLOW_STATEMENT -> buildString {
-                branches.forEachIndexed { index, branch ->
-                    if (branch.directive.kind == PreprocessorDirectiveKind.ELSE) {
-                        append("else {\n")
-                    } else {
-                        if (index > 0) append("else ")
-                        append("if (")
-                        append(requireNotNull(convertCondition(branch.directive, settings, macros)))
-                        append(") {\n")
+            ShaderConditionalDisposition.CONTROL_FLOW_STATEMENT -> run {
+                val live = buildList {
+                    branches.forEach { branch ->
+                        val condition = if (branch.directive.kind == PreprocessorDirectiveKind.ELSE) {
+                            null
+                        } else {
+                            requireNotNull(convertCondition(branch.directive, settings, macros))
+                        }
+                        if (condition == "false") return@forEach
+                        add(branch to condition)
+                        if (condition == null || condition == "true") return@buildList
                     }
-                    append(branch.renderedBody)
-                    if (branch.renderedBody.isNotEmpty() && !branch.renderedBody.endsWith('\n')) append('\n')
-                    append("}\n")
+                }
+                if (live.isEmpty()) {
+                    ""
+                } else if (live.first().second == null || live.first().second == "true") {
+                    live.first().first.renderedBody
+                } else {
+                    buildString {
+                        live.forEachIndexed { index, (branch, condition) ->
+                            if (condition == null || condition == "true") {
+                                append("else {\n")
+                            } else {
+                                if (index > 0) append("else ")
+                                append("if (")
+                                append(condition)
+                                append(") {\n")
+                            }
+                            append(branch.renderedBody)
+                            if (branch.renderedBody.isNotEmpty() && !branch.renderedBody.endsWith('\n')) append('\n')
+                            append("}\n")
+                        }
+                    }
                 }
             }
 
@@ -1009,24 +1118,36 @@ internal object ShaderCompilerCopyPlanner {
             }
 
             ShaderConditionalDisposition.CONTROL_FLOW_FUNCTION -> {
-                val functions = branches.map { requireNotNull(parseFunctionBranch(it.renderedBody)) }
+                val functions = branches.map { requireNotNull(parseFunctionBranches(it.renderedBody)) }
                 buildString {
-                    append(functions.first().signature.trimEnd())
-                    append(" {\n")
-                    branches.zip(functions).forEachIndexed { index, (branch, function) ->
-                        if (branch.directive.kind == PreprocessorDirectiveKind.ELSE) {
-                            append("else {\n")
-                        } else {
-                            if (index > 0) append("else ")
-                            append("if (")
-                            append(requireNotNull(convertCondition(branch.directive, settings, macros)))
-                            append(") {\n")
+                    functions.first().indices.forEach { functionIndex ->
+                        append(functions.first()[functionIndex].signature.trimEnd())
+                        append(" {\n")
+                        branches.zip(functions).forEachIndexed { index, (branch, bundle) ->
+                            if (branch.directive.kind == PreprocessorDirectiveKind.ELSE) {
+                                append("else {\n")
+                            } else {
+                                if (index > 0) append("else ")
+                                append("if (")
+                                append(requireNotNull(convertCondition(branch.directive, settings, macros)))
+                                append(") {\n")
+                            }
+                            val function = bundle[functionIndex]
+                            append(function.body)
+                            if (function.body.isNotEmpty() && !function.body.endsWith('\n')) append('\n')
+                            append("}\n")
                         }
-                        append(function.body)
-                        if (function.body.isNotEmpty() && !function.body.endsWith('\n')) append('\n')
+                        if (branches.last().directive.kind != PreprocessorDirectiveKind.ELSE) {
+                            append("else {\n")
+                            append(functions.first()[functionIndex].body)
+                            if (
+                                functions.first()[functionIndex].body.isNotEmpty() &&
+                                !functions.first()[functionIndex].body.endsWith('\n')
+                            ) append('\n')
+                            append("}\n")
+                        }
                         append("}\n")
                     }
-                    append("}\n")
                 }
             }
 
@@ -1106,6 +1227,9 @@ internal object ShaderCompilerCopyPlanner {
         visiting: Set<String> = emptySet(),
         requireBoolean: Boolean = true,
     ): String? {
+        if (requireBoolean) {
+            booleanDerivedComparisonOutsideDomain(raw, macros)?.let { return it.toString() }
+        }
         val macroByName = macros.associateBy { it.name }
         var failed = false
         var expression = raw
@@ -1206,18 +1330,118 @@ internal object ShaderCompilerCopyPlanner {
             value.replaceRange(match.range, replacement)
         }
         if (failed || DEFINED_REMAINS.containsMatchIn(expression)) return null
-        val numericSettings = settings.values.filter {
-            it.type != ShaderSettingType.BOOL && IDENTIFIER_TOKEN(it.compilerName).containsMatchIn(expression)
+        expression = LOGICAL_LEFT_INTEGER.replace(expression) { match ->
+            val value = if (match.groupValues[3].toLong() == 0L) "false" else "true"
+            match.groupValues[1] + match.groupValues[2] + value
         }
-        if (requireBoolean && numericSettings.isNotEmpty() && !COMPARISON_OPERATOR.containsMatchIn(expression)) {
-            val simple = numericSettings.singleOrNull() ?: return null
-            expression = when (expression.trim()) {
-                simple.compilerName -> "${simple.compilerName} != 0"
-                "!${simple.compilerName}" -> "${simple.compilerName} == 0"
-                else -> return null
+        expression = LOGICAL_RIGHT_INTEGER.replace(expression) { match ->
+            val value = if (match.groupValues[3].toLong() == 0L) "false" else "true"
+            match.groupValues[1] + match.groupValues[2] + value
+        }
+        if (requireBoolean) {
+            INTEGER_LITERAL.matchEntire(expression.trim())?.let { literal ->
+                return if (literal.value.toLong() == 0L) "false" else "true"
             }
         }
+        staticBooleanValue(expression)?.let { expression = it.toString() }
+        if (requireBoolean) {
+            expression = coerceNumericBooleanOperands(expression, settings.values) ?: return null
+        }
         return expression
+    }
+
+    private fun coerceNumericBooleanOperands(
+        source: String,
+        settings: Collection<ShaderSetting>,
+    ): String? {
+        val expression = stripOuterBooleanParentheses(source.trim())
+        for (operator in listOf("||", "&&")) {
+            val operands = splitTopLevelBoolean(expression, operator) ?: continue
+            val converted = operands.map { operand ->
+                coerceNumericBooleanOperands(operand, settings) ?: return null
+            }
+            return converted.joinToString(" $operator ", "(", ")")
+        }
+        if (expression.startsWith('!')) {
+            val operand = coerceNumericBooleanOperands(expression.substring(1), settings) ?: return null
+            return "!($operand)"
+        }
+        val numericSettings = settings.filter {
+            it.type != ShaderSettingType.BOOL && IDENTIFIER_TOKEN(it.compilerName).containsMatchIn(expression)
+        }
+        if (numericSettings.isEmpty() || COMPARISON_OPERATOR.containsMatchIn(expression)) return expression
+        val simple = numericSettings.singleOrNull() ?: return null
+        return when (expression) {
+            simple.compilerName -> "${simple.compilerName} != 0"
+            "bool(${simple.compilerName})" -> expression
+            else -> null
+        }
+    }
+
+    private fun staticBooleanValue(source: String): Boolean? {
+        val expression = stripOuterBooleanParentheses(source.trim())
+        when (expression) {
+            "true" -> return true
+            "false" -> return false
+        }
+        INTEGER_LITERAL.matchEntire(expression)?.let { return it.value.toLong() != 0L }
+        splitTopLevelBoolean(expression, "||")?.let { operands ->
+            val values = operands.map(::staticBooleanValue)
+            if (values.any { it == true }) return true
+            if (values.all { it == false }) return false
+            return null
+        }
+        splitTopLevelBoolean(expression, "&&")?.let { operands ->
+            val values = operands.map(::staticBooleanValue)
+            if (values.any { it == false }) return false
+            if (values.all { it == true }) return true
+            return null
+        }
+        if (expression.startsWith('!')) return staticBooleanValue(expression.substring(1))?.not()
+        return null
+    }
+
+    private fun stripOuterBooleanParentheses(source: String): String {
+        var result = source
+        while (result.startsWith('(')) {
+            var depth = 0
+            var close = -1
+            result.forEachIndexed { index, character ->
+                when (character) {
+                    '(' -> depth++
+                    ')' -> {
+                        depth--
+                        if (depth == 0 && close < 0) close = index
+                    }
+                }
+            }
+            if (close != result.lastIndex) break
+            result = result.substring(1, result.lastIndex).trim()
+        }
+        return result
+    }
+
+    private fun splitTopLevelBoolean(source: String, operator: String): List<String>? {
+        val result = mutableListOf<String>()
+        var depth = 0
+        var start = 0
+        var cursor = 0
+        while (cursor <= source.length - operator.length) {
+            when (source[cursor]) {
+                '(' -> depth++
+                ')' -> depth--
+            }
+            if (depth == 0 && source.startsWith(operator, cursor)) {
+                result += source.substring(start, cursor)
+                cursor += operator.length
+                start = cursor
+            } else {
+                cursor++
+            }
+        }
+        if (result.isEmpty()) return null
+        result += source.substring(start)
+        return result
     }
 
     private fun branchSlices(group: ConditionalGroup, source: String, sourceMap: SourceMap): List<ConditionalBranch> {
@@ -1347,9 +1571,27 @@ internal object ShaderCompilerCopyPlanner {
     }
 
     private fun findSourceRegions(source: String, sourceMap: SourceMap): List<ShaderSourceRegion> {
-        val masked = maskCommentsAndStrings(source)
+        val masked = maskGlslRanges(
+            maskCommentsAndStrings(source),
+            0,
+            sourceMap.directives.map(sourceMap::directiveRange),
+        )
         val result = mutableListOf<ShaderSourceRegion>()
         val functionRanges = mutableListOf<IntRange>()
+        val aggregateRanges = scanTopLevelGlslBlocks(source, masked)
+            .filter { it.kind == TopLevelGlslBlockKind.ABI }
+            .map { it.fullRange }
+        aggregateRanges.forEach { range ->
+            val start = range.first + source.substring(range).indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+            result += ShaderSourceRegion(
+                ShaderSourceRegionKind.TOP_LEVEL_DECLARATION,
+                null,
+                sourceMap.lineAt(start),
+                start,
+                range.last + 1,
+                source.substring(start, range.last + 1),
+            )
+        }
         FUNCTION_WITH_OPEN.findAll(masked).forEach { match ->
             val open = masked.indexOf('{', match.range.first)
             val close = matchingBrace(masked, open)
@@ -1379,7 +1621,11 @@ internal object ShaderCompilerCopyPlanner {
                 }
                 ';' -> if (depth == 0) {
                     val start = boundary + masked.substring(boundary, cursor).indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
-                    if (start <= cursor && functionRanges.none { start in it || cursor in it }) {
+                    if (
+                        start <= cursor &&
+                        functionRanges.none { start in it || cursor in it } &&
+                        aggregateRanges.none { start in it || cursor in it }
+                    ) {
                         result += ShaderSourceRegion(
                             ShaderSourceRegionKind.TOP_LEVEL_DECLARATION,
                             null,
@@ -1479,19 +1725,26 @@ internal object ShaderCompilerCopyPlanner {
         }
     }
 
-    private fun parseFunctionBranch(source: String): FunctionBranch? {
+    private fun parseFunctionBranches(source: String): List<FunctionBranch>? {
         val masked = maskCommentsAndStrings(source)
-        val match = FUNCTION_WITH_OPEN.find(masked) ?: return null
-        if (masked.substring(0, match.range.first).isNotBlank()) return null
-        val open = masked.indexOf('{', match.range.first)
-        val close = matchingBrace(masked, open)
-        if (open < 0 || close < 0 || masked.substring(close + 1).isNotBlank()) return null
-        val signature = source.substring(match.range.first, open)
-        return FunctionBranch(
-            signature = signature,
-            normalizedSignature = signature.replace(WHITESPACE, " ").trim(),
-            body = source.substring(open + 1, close),
-        )
+        val result = mutableListOf<FunctionBranch>()
+        var cursor = 0
+        while (cursor < source.length) {
+            val match = FUNCTION_WITH_OPEN.find(masked, cursor) ?: break
+            if (masked.substring(cursor, match.range.first).isNotBlank()) return null
+            val open = masked.indexOf('{', match.range.first)
+            val close = matchingBrace(masked, open)
+            if (open < 0 || close < 0) return null
+            val signature = source.substring(match.range.first, open)
+            result += FunctionBranch(
+                signature = signature,
+                normalizedSignature = signature.replace(WHITESPACE, " ").trim(),
+                body = source.substring(open + 1, close),
+            )
+            cursor = close + 1
+        }
+        if (result.isEmpty() || masked.substring(cursor).isNotBlank()) return null
+        return result
     }
 
     private fun scalarType(value: String): ShaderSettingType? {
@@ -1783,6 +2036,7 @@ internal object ShaderCompilerCopyPlanner {
     )
     private const val SETTING_PREFIX = "SETTING_"
     private const val COMPILER_SETTING_PREFIX = "SM_SETTING_"
+    private const val COMPILER_HOST_PREFIX = "SM_IRIS_HOST_"
     private val SETTING_TOKEN = "\\bSETTING_[A-Za-z0-9_]+\\b".toRegex()
     private val REPLACED_PRESENCE_DIRECTIVE =
         "(?m)^([\\t ]*)#[\\t ]*(ifdef|ifndef)[\\t ]+(\\([^\\r\\n]+\\))([\\t ]*(?://[^\\r\\n]*)?)$".toRegex()
@@ -1799,19 +2053,27 @@ internal object ShaderCompilerCopyPlanner {
     private val DEFINED_IDENTIFIER_BARE = "\\bdefined\\s+([A-Za-z_][A-Za-z0-9_]*)".toRegex()
     private val DEFINED_REMAINS = "\\bdefined\\b".toRegex()
     private val COMPARISON_OPERATOR = "==|!=|<=|>=|<|>".toRegex()
+    private val INTEGER_LITERAL = "[0-9]+".toRegex()
+    private val LOGICAL_LEFT_INTEGER =
+        "(^|&&|\\|\\|)([\\t ]*\\(*[\\t ]*)([0-9]+)(?![A-Za-z0-9_.])(?=[\\t ]*(?:&&|\\|\\|))".toRegex()
+    private val LOGICAL_RIGHT_INTEGER =
+        "(&&|\\|\\|)([\\t ]*)([0-9]+)(?![A-Za-z0-9_.])".toRegex()
     private val CASE_LABEL = "(?m)^[ \\t]*(?:case\\b[^:]*|default)[ \\t]*:".toRegex()
     private val TOKEN_PASTE = "##".toRegex()
     private val CONTROL_STATEMENT = "\\b(?:if|for|while|switch|return|break|continue|discard)\\b".toRegex()
     private val RETURN_SUFFIX = "\\breturn\\s*$".toRegex()
-    private val LOCAL_DECLARATION = "(?:^|[;{}])\\s*(?:(?:const|precise|highp|mediump|lowp)\\s+)*(?:bool|int|uint|float|double|[biud]?vec[234]|d?mat[234](?:x[234])?)\\s+([A-Za-z_][A-Za-z0-9_]*)".toRegex()
+    private val LOCAL_DECLARATION =
+        ("(?:^|[;{}])\\s*(?:(?:const|precise|highp|mediump|lowp)\\s+)*(?:bool|int|uint|float|double|" +
+            "[biud]?vec[234]|d?mat[234](?:x[234])?|[A-Z][A-Za-z0-9_]*)\\s+([A-Za-z_][A-Za-z0-9_]*)").toRegex()
     private val FUNCTION_WITH_OPEN = "(?m)^[ \\t]*(?:[A-Za-z_][A-Za-z0-9_]*[ \\t]+)+([A-Za-z_][A-Za-z0-9_]*)[ \\t]*\\([^;{}]*\\)[ \\t]*\\{".toRegex()
     private val LAYOUT_USE = "\\blayout\\s*\\(".toRegex()
     private val ABI_DECLARATION = "\\b(?:uniform|buffer|in|out|attribute|varying|shared)\\b".toRegex()
     private val ABI_BLOCK_DECLARATION = "\\b(?:uniform|buffer)\\b[^{;]*\\{".toRegex()
     private val GLOBAL_CONST_INITIALIZER =
         ("\\bconst\\s+(?:(?:highp|mediump|lowp|precise)\\s+)*([A-Za-z_][A-Za-z0-9_]*)\\s*" +
-            "((?:\\[[^=;]*])*)\\s+[A-Za-z_][A-Za-z0-9_]*\\s*((?:\\[[^=;]*])*)\\s*=").toRegex()
+            "((?:\\[[^=;]*])*)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*((?:\\[[^=;]*])*)\\s*=").toRegex()
     private val SCALAR_GLSL_TYPES = setOf("bool", "int", "uint", "float", "double")
+    private val FUNCTION_CALL = "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*\\(".toRegex()
     private val VERSION_LINE = "(?m)^[ \\t]*#version\\b[^\\r\\n]*".toRegex()
     private val LINE_ENDING = "\\r\\n|\\n|\\r".toRegex()
 }

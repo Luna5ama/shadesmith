@@ -136,6 +136,37 @@ class ShaderCompilerCopyTest {
     }
 
     @Test
+    fun convertsPreprocessorIntegerTruthValuesWithoutChangingComparisonOperands() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define SETTING_FLAG
+            void main() {
+            #if 0 && defined(SETTING_FLAG)
+                int unreachable = 1;
+            #endif
+            #if SETTING_MODE == 0 && defined(SETTING_FLAG)
+                int value = 1;
+            #else
+                int value = 0;
+            #endif
+            #if SETTING_MODE && SETTING_MODE == 1
+                int mixed = 1;
+            #endif
+            }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "logical-integer.csh")
+
+        assertTrue(plan.structuralBlockers.isEmpty(), plan.structuralBlockers.toString())
+        val compiler = assertNotNull(plan.compilerSource)
+        assertContains(compiler, "SM_SETTING_MODE == 0")
+        assertContains(compiler, "SM_SETTING_MODE != 0")
+        assertFalse("unreachable" in compiler)
+        assertFalse("SM_SETTING_MODE == false" in compiler)
+    }
+
+    @Test
     fun lowersDerivedPresenceAndScalarMacrosWithoutAllocatingExtraIds() {
         val source = """
             #version 460 compatibility
@@ -265,8 +296,15 @@ class ShaderCompilerCopyTest {
             #version 460 compatibility
             #define SETTING_GAIN 1.0 //[1.0 2.0]
             #define SETTING_SIZE 2 //[2 4]
+            #define BRACED_MACRO(value) { value; }
             #define MAKE_TINT(value) vec3(value * SETTING_GAIN)
+            layout(constant_id = 7) const float SM_SETTING_EXTERNAL = 1.0;
+            const vec3 crossTint = vec3(SM_SETTING_EXTERNAL);
+            const float crossTintX = crossTint.x;
+            const int SM_IRIS_HOST_EXTERNAL = int(SM_SETTING_EXTERNAL);
+            const vec2 hostSize = vec2(float(SM_IRIS_HOST_EXTERNAL));
             const float scalarGain = SETTING_GAIN;
+            const float inverseGain = inversesqrt(SETTING_GAIN);
             const int scalarSize = SETTING_SIZE;
             const vec3 tint = vec3(SETTING_GAIN);
             const vec2 offsets[2] = vec2[2](vec2(0.0), vec2(SETTING_GAIN));
@@ -285,6 +323,7 @@ class ShaderCompilerCopyTest {
         assertContains(compiler, "layout(constant_id = 0) const float SM_SETTING_GAIN = 1.0;")
         assertContains(compiler, "layout(constant_id = 1) const int SM_SETTING_SIZE = 2;")
         assertContains(compiler, "#define SM_DYNAMIC_scalarGain (SM_SETTING_GAIN)")
+        assertContains(compiler, "#define SM_DYNAMIC_inverseGain (inversesqrt(SM_SETTING_GAIN))")
         assertContains(compiler, "#define SM_DYNAMIC_scalarSize (SM_SETTING_SIZE)")
         assertContains(compiler, "#define SM_DYNAMIC_tint (vec3(SM_SETTING_GAIN))")
         assertContains(compiler, "      vec2 offsets[2] = vec2[2](vec2(0.0), vec2(SM_SETTING_GAIN));")
@@ -292,6 +331,9 @@ class ShaderCompilerCopyTest {
         assertContains(compiler, "      vec2[3] braceOffsets = { vec2(0.0), vec2(SM_SETTING_GAIN), vec2(2.0) };")
         assertContains(compiler, "      highp vec2[3] preciseTypedOffsets")
         assertContains(compiler, "      vec3 indirectTint = MAKE_TINT(1.0);")
+        assertContains(compiler, "      vec3 crossTint = vec3(SM_SETTING_EXTERNAL);")
+        assertContains(compiler, "      float crossTintX = crossTint.x;")
+        assertContains(compiler, "      vec2 hostSize = vec2(float(SM_IRIS_HOST_EXTERNAL));")
         assertContains(compiler, "float values[SM_SETTING_SIZE];")
         assertContains(compiler, "SM_DYNAMIC_tint.x")
         assertContains(compiler, "SM_DYNAMIC_scalarGain")
@@ -363,6 +405,119 @@ class ShaderCompilerCopyTest {
         )
         assertNull(changedSignature.compilerSource)
         assertTrue(changedSignature.structuralBlockers.any { "ABI shape" in it.reason })
+    }
+
+    @Test
+    fun mergesFunctionBundlesAndSynthesizesAnUnreachableDefaultBranch() {
+        val plan = ShaderCompilerCopyPlanner.plan(
+            """
+                #version 460 compatibility
+                #define SETTING_MODE 0 //[0 1 2]
+                #if SETTING_MODE == 1
+                float evaluate(float value) { return value + 1.0; }
+                vec3 evaluate(vec3 value) { return value + 1.0; }
+                #elif SETTING_MODE == 2
+                float evaluate(float value) { return value + 2.0; }
+                vec3 evaluate(vec3 value) { return value + 2.0; }
+                #endif
+                void main() {
+                    if (SETTING_MODE != 0) {
+                        float value = evaluate(1.0);
+                    }
+                }
+            """.trimIndent(),
+            "function-bundle.csh",
+        )
+
+        assertEquals(ShaderConditionalDisposition.CONTROL_FLOW_FUNCTION, plan.conditionals.single().disposition)
+        val compiler = assertNotNull(plan.compilerSource)
+        assertEquals(2, "\\b(?:float|vec3)\\s+evaluate\\s*\\(".toRegex().findAll(compiler).count())
+        assertContains(compiler, "if (SM_SETTING_MODE == 1)")
+        assertContains(compiler, "else {\n return value + 1.0;")
+    }
+
+    @Test
+    fun lowersInactiveByDefaultLocalDeclarationsButRejectsCrossBranchLeakage() {
+        val inactive = ShaderCompilerCopyPlanner.plan(
+            """
+                #version 460 compatibility
+                //#define SETTING_DEBUG
+                void main() {
+                #ifdef SETTING_DEBUG
+                    float sampleValue = 1.0;
+                    if (sampleValue > 0.0) {}
+                #endif
+                }
+            """.trimIndent(),
+            "inactive-local.csh",
+        )
+        assertEquals(ShaderConditionalDisposition.CONTROL_FLOW_STATEMENT, inactive.conditionals.single().disposition)
+        assertNotNull(inactive.compilerSource)
+
+        val leaked = ShaderCompilerCopyPlanner.plan(
+            """
+                #version 460 compatibility
+                //#define SETTING_FAST
+                void main() {
+                #ifdef SETTING_FAST
+                    float sampleValue = 1.0;
+                #else
+                    float sampleValue = 2.0;
+                #endif
+                    float result = sampleValue;
+                }
+            """.trimIndent(),
+            "leaked-local.csh",
+        )
+        assertNull(leaked.compilerSource)
+        assertContains(leaked.structuralBlockers.single().reason, "leak past the conditional")
+
+        val leakedAcrossSiblingConditions = ShaderCompilerCopyPlanner.plan(
+            """
+                #version 460 compatibility
+                //#define SETTING_FAST
+                void consume(float value) {}
+                void main() {
+                #ifdef SETTING_FAST
+                    float sampleValue = 1.0;
+                #endif
+                #ifdef SETTING_FAST
+                    consume(sampleValue);
+                #endif
+                }
+            """.trimIndent(),
+            "sibling-leaked-local.csh",
+        )
+        assertNull(leakedAcrossSiblingConditions.compilerSource)
+        assertTrue(leakedAcrossSiblingConditions.structuralBlockers.any { "leak past" in it.reason })
+    }
+
+    @Test
+    fun removesDerivedBooleanBranchComparedOutsideItsDomain() {
+        val plan = ShaderCompilerCopyPlanner.plan(
+            """
+                #version 460 compatibility
+                //#define SETTING_REFERENCE
+                #ifdef SETTING_REFERENCE
+                #define USE_REFERENCE 1
+                #else
+                #define USE_REFERENCE 0
+                #endif
+                void main() {
+                #if USE_REFERENCE == 0
+                    int mode = 0;
+                #elif USE_REFERENCE == 1
+                    int mode = 1;
+                #elif USE_REFERENCE == 2
+                    consumeUndefinedName();
+                #endif
+                }
+            """.trimIndent(),
+            "derived-presence-domain.csh",
+        )
+
+        val compiler = assertNotNull(plan.compilerSource)
+        assertFalse("consumeUndefinedName" in compiler)
     }
 
     @Test

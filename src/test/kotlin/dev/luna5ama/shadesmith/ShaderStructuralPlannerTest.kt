@@ -8,6 +8,7 @@ import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class ShaderStructuralPlannerTest {
@@ -48,6 +49,37 @@ class ShaderStructuralPlannerTest {
         ).modules
         assertEquals(3, finalized.size)
         optimizeAll(workspace, independentResources(), ShaderStage.COMPUTE, finalized.map { it.module })
+    }
+
+    @Test
+    fun compactStructuralModulesRetainEveryCoveredAssignment() = withWorkspace { workspace ->
+        val source = """
+            #version 460 compatibility
+            #define SETTING_FORMAT 0 //[0 1 2]
+            #if SETTING_FORMAT == 1
+            layout(r32ui, binding = 0) uniform uimage2D target;
+            #else
+            layout(rgba16f, binding = 0) uniform image2D target;
+            #endif
+            layout(local_size_x = 1) in;
+            void main() {}
+        """.trimIndent()
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(
+                ShaderCompilerCopyPlanner.plan(source, "covered-assignments.csh"),
+                ShaderStage.COMPUTE,
+            ),
+        ).plan
+        val modules = assertIs<ShaderStructuralMaterializationResult.Materialized>(
+            planned.deduplicate(materialize(workspace, source, planned)),
+        ).modules
+
+        assertEquals(2, modules.size)
+        assertEquals(
+            planned.rows.map(ShaderStructuralCoverageRow::assignment).toSet(),
+            modules.flatMap { it.module.structuralAssignments }.toSet(),
+        )
+        assertTrue(modules.any { it.module.structuralAssignments.size == 2 })
     }
 
     @Test
@@ -271,7 +303,7 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
-    fun sharedBindingSlotMergesOtherwiseIndependentStructuralSettings() {
+    fun sharedBindingNumberDoesNotMergeOtherwiseIndependentStructuralSettings() {
         val source = """
             #version 460 compatibility
             //#define SETTING_A
@@ -296,9 +328,12 @@ class ShaderStructuralPlannerTest {
             ),
         ).plan
 
-        assertEquals(1, planned.graph.components.size)
-        assertEquals(listOf("SETTING_A", "SETTING_B"), planned.graph.components.single().settings)
-        assertEquals(4, planned.rows.size)
+        assertEquals(2, planned.graph.components.size)
+        assertEquals(
+            listOf(listOf("SETTING_A"), listOf("SETTING_B")),
+            planned.graph.components.map { it.settings },
+        )
+        assertEquals(3, planned.rows.size)
     }
 
     @Test
@@ -342,6 +377,183 @@ class ShaderStructuralPlannerTest {
         ).modules
         assertEquals(2, modules.size)
         optimizeAll(workspace, source, ShaderStage.COMPUTE, modules.map { it.module })
+    }
+
+    @Test
+    fun structuralStructMembersRestoreTheOwningTopLevelDeclaration() {
+        val source = """
+            #version 460 compatibility
+            //#define SETTING_EXTRA
+            #define BRACED_MACRO(value) { value; }
+            struct Payload {
+                uint value;
+            #ifdef SETTING_EXTRA
+                uint extra;
+            #endif
+            };
+            void main() {}
+        """.trimIndent()
+        val base = ShaderCompilerCopyPlanner.plan(source, "struct-member.csh")
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE),
+        ).plan
+
+        assertEquals(null, planned.restorationPlan.issue)
+        assertEquals(1, planned.restorationPlan.islands.size)
+        assertContains(planned.restorationPlan.islands.single().exactText, "struct Payload")
+    }
+
+    @Test
+    fun structuralFunctionParameterConditionRestoresTheWholeFunction() {
+        val source = """
+            #version 460 compatibility
+            //#define SETTING_ALPHA
+            void filter(
+                out float red,
+            #ifdef SETTING_ALPHA
+                out float alpha,
+            #endif
+                ivec2 position) {
+                red = float(position.x);
+            #ifdef SETTING_ALPHA
+                alpha = 1.0;
+            #endif
+            }
+            void main() {}
+        """.trimIndent()
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(
+                ShaderCompilerCopyPlanner.plan(source, "conditional-parameter.csh"),
+                ShaderStage.COMPUTE,
+            ),
+        ).plan
+
+        assertEquals(null, planned.restorationPlan.issue)
+        val island = planned.restorationPlan.islands.single()
+        assertEquals(ShaderStructuralEntitySlotKind.FUNCTION, island.kind)
+        assertContains(island.exactText, "void filter(")
+        assertTrue(island.exactText.trimEnd().endsWith("}"), island.exactText)
+        assertContains(island.exactText, "out float alpha")
+        assertContains(island.exactText, "red = float(position.x)")
+    }
+
+    @Test
+    fun structuralMaterializationPreservesHostOnlyAncestorDirectives() {
+        val source = """
+            #version 460 compatibility
+            //#define SETTING_WIDE
+            #ifndef INCLUDE_DATA
+            #define INCLUDE_DATA
+            #define DATA_OFFSET ivec2(4, 8)
+            #ifdef SETTING_WIDE
+            layout(rgba16f, binding = 0) uniform image2D target;
+            #else
+            layout(r32f, binding = 0) uniform image2D target;
+            #endif
+            #endif
+            #ifdef SETTING_WIDE
+            #ifndef INCLUDE_DATA
+            #define INCLUDE_DATA
+            #endif
+            #endif
+            layout(local_size_x = 1) in;
+            void main() { ivec2 offset = DATA_OFFSET; }
+        """.trimIndent()
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(
+                ShaderCompilerCopyPlanner.plan(source, "host-ancestor.csh"),
+                ShaderStage.COMPUTE,
+            ),
+        ).plan
+
+        planned.materializationRows().forEach { row ->
+            val compiler = assertNotNull(row.compilerPlan.compilerSource)
+            assertContains(compiler, "#ifndef INCLUDE_DATA")
+            assertContains(compiler, "#define DATA_OFFSET ivec2(4, 8)")
+        }
+    }
+
+    @Test
+    fun promotedEntityUsesItsDerivedMacroStructuralOwner() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #if SETTING_MODE == 1
+            #define USE_OPTIONAL_RESOURCE
+            #endif
+            #ifdef USE_OPTIONAL_RESOURCE
+            layout(rgba16f, binding = 0) uniform image2D target;
+            float optionalValue() { return imageLoad(target, ivec2(0)).x; }
+            #endif
+            #if defined(HOST_EXTENSION)
+            uniform float hostValue;
+            #endif
+            layout(local_size_x = 1) in;
+            void main() {}
+        """.trimIndent()
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(
+                ShaderCompilerCopyPlanner.plan(source, "derived-owner.csh"),
+                ShaderStage.COMPUTE,
+            ),
+        ).plan
+        val entityStart = source.indexOf("float optionalValue()")
+        val entityEnd = source.indexOf('}', entityStart)
+        val owner = assertNotNull(planned.restorationPlan.structuralOwnerRange(source, entityStart..entityEnd))
+        val restored = source.substring(owner)
+
+        assertTrue(restored.startsWith("#ifdef USE_OPTIONAL_RESOURCE"), restored)
+        assertContains(restored, "uniform image2D target")
+        assertContains(restored, "float optionalValue()")
+        assertTrue(restored.trimEnd().endsWith("#endif"), restored)
+        val hostStart = source.indexOf("uniform float hostValue")
+        val hostEnd = source.indexOf(';', hostStart)
+        val hostOwner = assertNotNull(planned.restorationPlan.structuralOwnerRange(source, hostStart..hostEnd))
+        assertEquals(
+            "#if defined(HOST_EXTENSION)\nuniform float hostValue;\n#endif",
+            source.substring(hostOwner).trimEnd(),
+        )
+    }
+
+    @Test
+    fun restoredStructuralEntityKeepsWholeMultilineMacroDependency() = withWorkspace { workspace ->
+        val source = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1 2]
+            #define OPTIONAL_VALUE(value) (\
+                (value) + 1.0)
+            #define ENABLE_TARGET a
+            #ifdef ENABLE_TARGET
+            #if SETTING_MODE == 1
+            #define USE_FLOAT_TARGET
+            #elif SETTING_MODE == 2
+            #define USE_FLOAT_TARGET
+            #endif
+            #define UNUSED_CALLBACK unusedCallback
+            #endif
+            float unusedCallback() { return 0.0; }
+            #ifdef USE_FLOAT_TARGET
+            layout(r32f, binding = 0) uniform image2D target;
+            float optionalValue() { return OPTIONAL_VALUE(1.0); }
+            #else
+            layout(r32ui, binding = 0) uniform uimage2D target;
+            uint optionalValue() { return 1u; }
+            #endif
+            layout(local_size_x = 1) in;
+            void main() {
+            #ifdef USE_FLOAT_TARGET
+                imageStore(target, ivec2(0), vec4(optionalValue()));
+            #else
+                imageStore(target, ivec2(0), uvec4(optionalValue()));
+            #endif
+            }
+        """.trimIndent()
+        val result = optimizeStructural(workspace, "multiline-macro.csh", source, ShaderStage.COMPUTE)
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertContains(result.source, "#define OPTIONAL_VALUE(value) (\\\n    (value) + 1.0)")
+        assertFalse(result.source.contains("float unusedCallback()"), result.source)
+        assertEquals(2, result.finalValidationInvocations.size)
     }
 
     @Test
@@ -514,6 +726,63 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
+    fun optimizedAwayCommonAbiDeclarationIsRestoredBeforeStructuralValidation() = withWorkspace { workspace ->
+        val source = equalStructuralBodies().replace(
+            "layout(local_size_x = 1) in;",
+            "#ifndef UNUSED_ABI_GLSL\n#define UNUSED_ABI_GLSL\n" +
+                "#define unusedAbiAlias unusedAbi\nuniform float unusedAbiAlias;\n#endif\n" +
+                "layout(local_size_x = 1) in;",
+        )
+        val result = optimizeStructural(workspace, "dead-abi.csh", source, ShaderStage.COMPUTE)
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertContains(result.source, "uniform float unusedAbi;")
+        assertTrue(result.source.indexOf("#define unusedAbiAlias unusedAbi") < result.source.indexOf("uniform float unusedAbi;"))
+        assertTrue(result.source.indexOf("uniform float unusedAbi;") < result.source.indexOf("void main"))
+        assertFalse("SHADESMITH_RESTORED_ABI" in result.source)
+        assertEquals(2, result.finalValidationInvocations.size)
+    }
+
+    @Test
+    fun repeatedEquivalentGuardedAbiDeclarationIsDeduplicated() {
+        val source = """
+            #version 460 compatibility
+            #ifndef SKIP_UNIFORMS
+            uniform sampler2D shadowtex0;
+            #endif
+            #ifndef SKIP_UNIFORMS
+            uniform sampler2D shadowtex0;
+            #endif
+            void main() {}
+        """.trimIndent()
+
+        val result = SpirvFinalEmitter.deduplicateDominatedAbiLines(source)
+
+        assertEquals(1, Regex("\\buniform\\s+sampler2D\\s+shadowtex0\\s*;").findAll(result).count())
+    }
+
+    @Test
+    fun optimizedCapabilityFunctionRecoversSimpleOriginalGuard() {
+        val original = """
+            #version 460 compatibility
+            float pow2(float value) { return value * value; }
+            #ifndef NO_HALF
+            float16_t pow2(float16_t value) { return value * value; }
+            #endif
+        """.trimIndent()
+        val optimized = """
+            #version 460 compatibility
+            float pow2(float value) { return value * value; }
+            float16_t pow2(float16_t value) { return value * value; }
+        """.trimIndent()
+
+        val result = SpirvFinalEmitter.restoreSourceFunctionConditionalOwners(original, optimized)
+
+        assertContains(result, "#ifndef NO_HALF\nfloat16_t pow2(float16_t value)")
+        assertEquals(1, Regex("#ifndef NO_HALF").findAll(result).count())
+    }
+
+    @Test
     fun structuralContractsUseDurablePrologueAnchors() {
         val source = equalStructuralBodies()
         val base = ShaderCompilerCopyPlanner.plan(source, "durable-contract.csh")
@@ -526,6 +795,42 @@ class ShaderStructuralPlannerTest {
             assertEquals(IrisSourceAnchor(IrisAnchorKind.FUNCTION, "main"), contract.afterAnchor)
             assertEquals(IrisAnchorPlacement.AFTER_BEFORE, contract.placement)
         }
+    }
+
+    @Test
+    fun restorationTreatsMultipleStructuralMainFunctionsAsOneLogicalAnchor() {
+        val mainAnchor = IrisSourceAnchor(IrisAnchorKind.FUNCTION, "main")
+        val plan = ShaderStructuralRestorationPlan(
+            sourceName = "multi-main.csh",
+            settings = emptyList(),
+            structuralSettings = emptySet(),
+            islands = listOf(
+                ShaderStructuralEntitySlot(
+                    ordinal = 0,
+                    kind = ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION,
+                    canonicalEntity = null,
+                    exactText = "const int restored = 1;\n",
+                    sourceLine = 1,
+                    beforeAnchor = null,
+                    afterAnchor = mainAnchor,
+                    placement = IrisAnchorPlacement.BEFORE_AFTER,
+                ),
+            ),
+            restorationContracts = emptyList(),
+            issue = null,
+        )
+        val source = """
+            #version 460 compatibility
+            #ifdef SETTING_BRANCH
+            void main() {}
+            #else
+            void main() {}
+            #endif
+        """.trimIndent()
+
+        val restored = assertIs<ShaderStructuralRestoration.Restored>(plan.restore(source)).source
+
+        assertTrue(restored.indexOf("const int restored") < restored.indexOf("void main"))
     }
 
     @Test
@@ -560,7 +865,7 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
-    fun coupledAbiControlFlowDoesNotMakeIndependentStructuralValuesPlanSensitive() {
+    fun coupledAbiControlFlowMaterializesOnlyItsStructuralComponent() {
         val source = coupledAbiAndIndependentStructuralUses()
         val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
             ShaderStructuralPlanner.plan(
@@ -572,11 +877,14 @@ class ShaderStructuralPlannerTest {
         assertEquals(2, planned.graph.components.size)
         assertEquals(5, planned.rows.size)
         assertEquals(3, planned.materializationRows().size)
+        val materializedSettings = linkedSetOf<String>()
         planned.rows.forEach { row ->
             val compiler = requireNotNull(row.compilerPlan.compilerSource)
-            assertContains(compiler, "SM_SETTING_SHAPE")
-            assertFalse("SM_SETTING_FORMAT" in compiler)
+            val rowSettings = listOf("FORMAT", "SHAPE").filter { "SM_STRUCT_SETTING_$it" in compiler }
+            assertTrue(rowSettings.size <= 1)
+            materializedSettings += rowSettings
         }
+        assertEquals(setOf("FORMAT"), materializedSettings)
     }
 
     @Test
@@ -611,8 +919,11 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
-    fun nestedStructuralIslandRetainsSameAbiRowsAndUnionsLifecycleBeforeExactFallback() = withWorkspace { workspace ->
-        val source = nestedLeakedLocal()
+    fun nestedStructuralIslandRetainsSameAbiRowsAndUnionsLifecycleInOptimizedOutput() = withWorkspace { workspace ->
+        val source = nestedLeakedLocal().replace(
+            "layout(local_size_x = 1) in;",
+            "uniform float unusedAbi;\nlayout(local_size_x = 1) in;",
+        )
         val base = ShaderCompilerCopyPlanner.plan(source, "nested.csh")
         val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
             ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE),
@@ -630,14 +941,42 @@ class ShaderStructuralPlannerTest {
             SpirvOptimizationRequest("nested.csh", ShaderStage.COMPUTE, source, modules, planned),
         )
 
-        assertEquals(SpirvEmissionMode.PRESERVED_SOURCE, result.emissionMode)
-        assertEquals(source, result.source)
-        assertContains(result.fallbackReason.orEmpty(), "would leave no optimized executable entity")
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertFalse(result.source == source)
+        assertContains(result.source, "SHADESMITH_BRANCH_OWNED_MAIN_BEGIN")
+        assertContains(result.source, "uniform float unusedAbi;")
+        val prologue = result.source.indexOf("SHADESMITH_BRANCH_OWNED_PROLOGUE_BEGIN")
+        assertTrue(prologue < 0 || result.source.indexOf("uniform float unusedAbi;") < prologue)
+        assertEquals(2, result.finalValidationInvocations.size)
         assertEquals(2, result.modules.size)
         assertEquals(
             setOf("branch_0", "branch_1"),
             result.modules.map { it.textureAccess }.fold(TextureAccess(), TextureAccess::plus).reads,
         )
+    }
+
+    @Test
+    fun symbolicAbiArrayRestoresItsSourceConstantDependencies() {
+        val original = """
+            #version 460 compatibility
+            #define GRID_SIZE 64
+            const int BRICK_SIZE = 16;
+            shared uint spreadLut[GRID_SIZE * BRICK_SIZE];
+            layout(local_size_x = 1) in;
+            void main() { spreadLut[0] = 1u; }
+        """.trimIndent() + "\n"
+        val optimized = """
+            #version 460 compatibility
+            shared uint spreadLut[1024];
+            layout(local_size_x = 1) in;
+            void main() { spreadLut[0] = 1u; }
+        """.trimIndent() + "\n"
+
+        val restored = SpirvFinalEmitter.restoreSymbolicSourceAbiDeclarations(original, optimized)
+
+        assertContains(restored, "const int BRICK_SIZE = 16;")
+        assertContains(restored, "shared uint spreadLut[GRID_SIZE * BRICK_SIZE];")
+        assertFalse("shared uint spreadLut[1024];" in restored)
     }
 
     @Test
@@ -748,12 +1087,12 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
-    fun predictedCompilerModuleCapFailsClosedBeforeMaterialization() {
-        val domain = (0..32).joinToString(" ")
+    fun materializationRowCapFailsClosedBeforeMaterialization() {
+        val domain = (0..64).joinToString(" ")
         val source = buildString {
             appendLine("#version 460 compatibility")
             appendLine("#define SETTING_MODE 0 //[$domain]")
-            repeat(33) { appendLine("#define TYPE_$it float") }
+            repeat(65) { appendLine("#define TYPE_$it float") }
             appendLine("#define CAT_IMPL(a, b) a ## b")
             appendLine("#define CAT(a, b) CAT_IMPL(a, b)")
             appendLine("#define TYPE(value) CAT(TYPE_, value)")
@@ -769,12 +1108,12 @@ class ShaderStructuralPlannerTest {
             ),
         )
 
-        assertContains(result.reason, "structural compiler-module cap exceeded before materialization: 33 > 32")
+        assertContains(result.reason, "structural materialization-row cap exceeded before materialization: 65 > 64")
         assertContains(result.reason, "components:")
         assertContains(result.reason, "SETTING_MODE=[0, 1, 2")
-        assertContains(result.reason, "coverage_rows=33")
+        assertContains(result.reason, "coverage_rows=65")
         assertContains(result.reason, "predicted compiler shapes:")
-        assertContains(result.reason, "shape-032")
+        assertContains(result.reason, "shape-064")
         assertContains(result.reason, "compiler_sha256=")
     }
 

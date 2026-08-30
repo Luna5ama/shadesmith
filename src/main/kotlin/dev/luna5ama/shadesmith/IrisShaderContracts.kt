@@ -89,7 +89,8 @@ internal data class IrisShaderContractPlan(
     val structuralIssues: List<IrisStructuralIssue>,
     private val compilerPrelude: String,
     private val compilerSettings: List<ShaderSetting>,
-    private val compilerHostNames: List<String>,
+    private val compilerHostNames: Map<String, String>,
+    private val compilerDynamicNames: Map<String, String>,
 ) {
     val localSizeSpecializationIds: Set<Int>
         get() = localSize?.specializationIds?.values.orEmpty().toSet()
@@ -119,14 +120,73 @@ internal data class IrisShaderContractPlan(
         return copy(compilerPrelude = materializedPrelude)
     }
 
+    fun restoreRequiredCompilerPrelude(source: String): String {
+        var result = stripTopLevelExtensionDirectives(source)
+        val activeExtensions = compilerPrelude.lineSequence()
+            .takeWhile { EXTENSION_DECLARATION.matches(it) }
+            .joinToString("\n")
+        val version = VERSION_LINE.find(result)
+            ?: throw IllegalArgumentException("$sourceName: compiler source has no #version directive")
+        if (activeExtensions.isNotEmpty()) {
+            result = result.substring(0, version.range.last + 1) + "\n" + activeExtensions +
+                result.substring(version.range.last + 1)
+        }
+        val missingPrelude = (compilerHostNames.values + derivedMacros.map { it.compilerName }).mapNotNull { name ->
+            if (!"\\b${Regex.escape(name)}\\b".toRegex().containsMatchIn(result)) return@mapNotNull null
+            val declaration = compilerHostDeclaration(name)
+            if (declaration.containsMatchIn(result)) return@mapNotNull null
+            declaration.find(compilerPrelude)?.let { it.range.first to it.value.trim() }
+        }.toMutableList()
+        localSize?.let { local ->
+            result = LOCAL_SIZE_LAYOUT.replace(result, "")
+            val offset = compilerPrelude.indexOf(local.compilerLayout)
+            require(offset >= 0) { "$sourceName: compiler prelude is missing the authoritative local-size layout" }
+            missingPrelude += offset to local.compilerLayout.trim()
+        }
+        if (missingPrelude.isNotEmpty()) {
+            val marker = result.indexOf(COMPILER_MARKER)
+            val markerInsertion = if (marker < 0) {
+                version.range.last + 1
+            } else {
+                result.indexOf('\n', marker).let { if (it < 0) result.length else it + 1 }
+            }
+            val settingInsertion = compilerSettings.mapNotNull { setting ->
+                compilerSettingDeclaration(setting.compilerName).find(result)?.range?.let { it.last + 1 }
+            }.maxOrNull() ?: 0
+            val insertion = maxOf(markerInsertion, settingInsertion)
+            val prefix = if (insertion == 0 || result[insertion - 1] == '\n') "" else "\n"
+            val prelude = missingPrelude.sortedBy { it.first }.joinToString("\n", postfix = "\n") { it.second }
+            result = result.substring(0, insertion) + prefix + prelude +
+                result.substring(insertion)
+        }
+        return normalizeCompilerText(result)
+    }
+
     fun stripCompilerArtifacts(source: String): String {
-        var result = normalizeCompilerText(source)
+        var result = stripTopLevelExtensionDirectives(normalizeCompilerText(source))
         if (localSize != null) result = LOCAL_SIZE_LAYOUT.replace(result, "")
-        compilerHostNames.forEach { name ->
+        compilerHostNames.values.forEach { name ->
             result = compilerHostDeclaration(name).replace(result, "")
         }
         return normalizeCompilerText(result)
     }
+
+    fun replaceHostReferences(source: String): String {
+        var result = source
+        compilerHostNames.forEach { (sourceName, compilerName) ->
+            result = replaceCodeIdentifier(result, sourceName, compilerName)
+        }
+        derivedMacros.forEach { macro ->
+            result = replaceCodeIdentifier(result, macro.sourceName, macro.compilerName)
+        }
+        compilerDynamicNames.forEach { (sourceName, compilerName) ->
+            result = replaceCodeIdentifier(result, sourceName, compilerName)
+        }
+        return result
+    }
+
+    fun sourceDynamicName(compilerName: String): String? =
+        compilerDynamicNames.entries.singleOrNull { it.value == compilerName }?.key
 
     fun forStructuralModule(
         source: String,
@@ -139,6 +199,7 @@ internal data class IrisShaderContractPlan(
             compilerPrelude = modulePlan.compilerPrelude,
             compilerSettings = modulePlan.compilerSettings,
             compilerHostNames = modulePlan.compilerHostNames,
+            compilerDynamicNames = modulePlan.compilerDynamicNames,
         )
         val local = requireNotNull(localSize) { "$sourceName has no local-size contract to specialize" }
         require(local.fallbackRequired) { "$sourceName local-size contract does not require a structural fallback" }
@@ -241,7 +302,7 @@ internal data class IrisShaderContractPlan(
             ?: throw IllegalArgumentException("$sourceName: restored source has no #version directive")
         result = result.replaceRange(version.range, "#version 460 core")
         if (!alreadyCompilerSource) {
-            val compilerValueNames = derivedMacros.map { it.compilerName } + compilerHostNames
+            val compilerValueNames = derivedMacros.map { it.compilerName } + compilerHostNames.values
             compilerValueNames.forEach { name ->
                 val matches = compilerHostDeclaration(name).findAll(result).toList()
                 require(matches.size <= 1) {
@@ -382,6 +443,17 @@ internal object IrisShaderContractExtractor {
         }.forEach { atoms += ContractAtom(IrisSourceContractKind.OPTION_DEFINITION, it.range, mask = false) }
         directives.filter { it.directive.kind == PreprocessorDirectiveKind.EXTENSION }
             .forEach { atoms += ContractAtom(IrisSourceContractKind.EXTENSION, it.range, mask = true) }
+        val extensionRoots = conditionalGroups.filter { it.parentId == null }.filter { group ->
+            atoms.any { atom -> atom.kind == IrisSourceContractKind.EXTENSION && atom.range.first in group.range }
+        }
+        directives.filter { located ->
+            located.directive.kind in setOf(PreprocessorDirectiveKind.DEFINE, PreprocessorDirectiveKind.UNDEF) &&
+                extensionRoots.any { located.range.first in it.range }
+        }.forEach { located ->
+            if (atoms.none { it.range == located.range }) {
+                atoms += ContractAtom(IrisSourceContractKind.CONDITIONAL_CONTRACT, located.range, mask = false)
+            }
+        }
         directives.filter { it.directive.kind == PreprocessorDirectiveKind.PRAGMA }
             .forEach { atoms += ContractAtom(IrisSourceContractKind.PRAGMA, it.range, mask = false) }
         hostDeclarations.forEach { atoms += ContractAtom(IrisSourceContractKind.HOST_DECLARATION, it.range, mask = true) }
@@ -410,13 +482,55 @@ internal object IrisShaderContractExtractor {
         val hostAndLocalGroups = hostAndLocalRanges.mapNotNull { range ->
             conditionalGroups.filter { range.first in it.range }.maxByOrNull { it.depth }
         }.toSet()
-        macroDefinitions.forEach { (name, definitions) ->
-            if (definitions.none { it.group in hostAndLocalGroups }) return@forEach
-            val ownRanges = definitions.map { it.range }
-            val hasNonContractUse = identifierOffsets[name].orEmpty().any { offset ->
+        val directiveRanges = directives.map { it.range }
+        val compilerMacroBodies = directives.filter { located ->
+            located.directive.kind == PreprocessorDirectiveKind.DEFINE && located.directive.macroName != null
+        }.groupBy(
+            { requireNotNull(it.directive.macroName) },
+            { it.directive.macroBody.orEmpty() },
+        )
+        val nonDirectiveIdentifierOffsets = IDENTIFIER.findAll(source)
+            .filter { match ->
+                match.value in compilerMacroBodies && directiveRanges.none { match.range.first in it }
+            }
+            .groupBy({ it.value }, { it.range.first })
+        val codeRequiredMacroNames = nonDirectiveIdentifierOffsets.filterValues { offsets ->
+            offsets.any { offset -> hostAndLocalRanges.none { offset in it } }
+        }.keys.toMutableSet()
+        while (true) {
+            val before = codeRequiredMacroNames.size
+            codeRequiredMacroNames.toList().forEach { name ->
+                compilerMacroBodies[name].orEmpty().forEach { body ->
+                    identifiers(body).filterTo(codeRequiredMacroNames, compilerMacroBodies::containsKey)
+                }
+            }
+            if (codeRequiredMacroNames.size == before) break
+        }
+        fun hasNonContractUse(name: String): Boolean {
+            if (name in codeRequiredMacroNames) return true
+            val ownRanges = macroDefinitions[name].orEmpty().map { it.range }
+            return (identifierOffsets[name].orEmpty() + nonDirectiveIdentifierOffsets[name].orEmpty()).any { offset ->
                 ownRanges.none { offset in it } && hostAndLocalRanges.none { offset in it }
             }
-            if (!hasNonContractUse) collectHelperMacros(name)
+        }
+        val settingDependencyMemo = mutableMapOf<String, Boolean>()
+        fun isSettingDependent(name: String, visiting: MutableSet<String>): Boolean {
+            settingDependencyMemo[name]?.let { return it }
+            if (!visiting.add(name)) return false
+            val result = macroDefinitions[name].orEmpty().any { definition ->
+                definition.predicate.settingNames().isNotEmpty() || identifiers(definition.body).any { identifier ->
+                    identifier in settingsByName || isSettingDependent(identifier, visiting)
+                }
+            }
+            visiting.remove(name)
+            settingDependencyMemo[name] = result
+            return result
+        }
+        macroDefinitions.forEach { (name, definitions) ->
+            if (definitions.none { it.group in hostAndLocalGroups }) return@forEach
+            if (!hasNonContractUse(name) || isSettingDependent(name, linkedSetOf())) {
+                collectHelperMacros(name)
+            }
         }
         while (true) {
             val selectedGroups = helperMacroNames.flatMap { macroDefinitions[it].orEmpty() }
@@ -433,7 +547,10 @@ internal object IrisShaderContractExtractor {
                 .forEach(::collectHelperMacros)
             if (helperMacroNames.size == before) break
         }
-        val helperDefinitions = helperMacroNames.flatMap { macroDefinitions[it].orEmpty() }
+        val compilerContractHelperNames = helperMacroNames.filterTo(linkedSetOf()) { name ->
+            !hasNonContractUse(name) || isSettingDependent(name, linkedSetOf())
+        }
+        val discoveredHelperDefinitions = compilerContractHelperNames.flatMap { macroDefinitions[it].orEmpty() }
             .distinctBy { it.range }
 
         val localAnalysis = analyzeLocalSize(
@@ -446,7 +563,7 @@ internal object IrisShaderContractExtractor {
         )
         val derivedAnalysis = buildDerivedMacros(
             sourceName,
-            helperMacroNames,
+            compilerContractHelperNames,
             macroDefinitions,
             localLayouts,
             hostDeclarations,
@@ -456,6 +573,12 @@ internal object IrisShaderContractExtractor {
             identifierOffsets,
         )
         val derivedMacros = derivedAnalysis.contracts
+        val derivedMacroNames = derivedMacros.mapTo(hashSetOf()) { it.sourceName }
+        val helperDefinitions = discoveredHelperDefinitions.filter { definition ->
+            definition.name in derivedMacroNames ||
+                definition.name in localAnalysis?.axisMacros.orEmpty() ||
+                !hasNonContractUse(definition.name)
+        }
         val hostCompilerAnalysis = buildHostCompilerDeclarations(
             sourceName,
             hostDeclarations,
@@ -478,14 +601,21 @@ internal object IrisShaderContractExtractor {
                         it.kind in CONDITIONAL_CONTRACT_KINDS
                 }
                 if (groupedAtoms.isEmpty()) return@forEach
-                val exactText = synthesizeConditionalContract(source, group, groupedAtoms, conditionalGroups)
+                val exactText = if (isDirectiveOnlyConditional(source, group, directives)) {
+                    source.substring(group.range)
+                } else {
+                    synthesizeConditionalContract(source, group, groupedAtoms, conditionalGroups)
+                }
                 contractDrafts += ContractDraft(
                     IrisSourceContractKind.CONDITIONAL_CONTRACT,
                     group.range,
                     exactText,
                 )
                 consumedAtoms += groupedAtoms
-                if (isContractOnlyConditional(source, group, groupedAtoms, conditionalGroups)) {
+                if (
+                    groupedAtoms.all(ContractAtom::mask) &&
+                    isContractOnlyConditional(source, group, groupedAtoms, conditionalGroups)
+                ) {
                     maskRanges += group.range
                 } else {
                     conditionalGroups.filter { candidate ->
@@ -497,6 +627,7 @@ internal object IrisShaderContractExtractor {
                         }
                         if (
                             candidateAtoms.isNotEmpty() &&
+                            candidateAtoms.all(ContractAtom::mask) &&
                             isContractOnlyConditional(source, candidate, candidateAtoms, conditionalGroups)
                         ) {
                             maskRanges += candidate.range
@@ -557,13 +688,14 @@ internal object IrisShaderContractExtractor {
                 compilerName,
             )
         }
-        compilerSource = lowerDynamicTopLevelConstants(
+        val dynamicTopLevel = lowerDynamicTopLevelConstants(
             compilerSource,
             settings.mapTo(linkedSetOf()) { it.name } +
                 derivedMacros.map { it.compilerName } +
                 hostCompilerNames.values +
                 "gl_WorkGroupSize",
         )
+        compilerSource = dynamicTopLevel.source
         compilerSource = insertAfterVersion(compilerSource, compilerPrelude)
 
         val anchors = findStableAnchors(source)
@@ -641,7 +773,8 @@ internal object IrisShaderContractExtractor {
             structuralIssues,
             compilerPrelude,
             settings,
-            hostCompilerNames.values.toList(),
+            hostCompilerNames,
+            dynamicTopLevel.aliases,
         )
     }
 
@@ -966,6 +1099,11 @@ private data class DynamicTopLevelConstant(
     val indent: String,
 )
 
+private data class DynamicTopLevelLowering(
+    val source: String,
+    val aliases: Map<String, String> = emptyMap(),
+)
+
 private data class ContractSourceReplacement(
     val range: IntRange,
     val text: String,
@@ -1034,6 +1172,10 @@ private class ContractLexicalMap(private val source: String) {
     private val depth = IntArray(source.length + 1)
 
     init {
+        val directiveOffsets = BooleanArray(source.length)
+        directivePhysicalRanges(source).forEach { range ->
+            for (offset in range) directiveOffsets[offset] = true
+        }
         var cursor = 0
         var braceDepth = 0
         var lineComment = false
@@ -1044,6 +1186,11 @@ private class ContractLexicalMap(private val source: String) {
             val next = source.getOrNull(cursor + 1)
             depth[cursor] = braceDepth
             code[cursor] = !lineComment && !blockComment && quote == null
+            if (directiveOffsets[cursor]) {
+                code[cursor] = false
+                cursor++
+                continue
+            }
             if (lineComment) {
                 if (current == '\r' || current == '\n') lineComment = false
                 cursor++
@@ -1262,6 +1409,21 @@ private fun synthesizeConditionalContract(
     }
 }
 
+private fun isDirectiveOnlyConditional(
+    source: String,
+    group: ContractConditionalGroup,
+    directives: List<ContractDirective>,
+): Boolean {
+    var remaining = source.substring(group.range)
+    directives.filter { it.range.first >= group.range.first && it.range.last <= group.range.last }
+        .sortedByDescending { it.range.first }
+        .forEach { directive ->
+            val relative = (directive.range.first - group.range.first)..(directive.range.last - group.range.first)
+            remaining = remaining.replaceRange(relative, maskSource(remaining.substring(relative)))
+        }
+    return stripComments(remaining).isBlank()
+}
+
 private fun isContractOnlyConditional(
     source: String,
     group: ContractConditionalGroup,
@@ -1294,6 +1456,29 @@ private fun compilerExtensionLines(directives: List<ContractDirective>): List<St
             val behavior = if (declarations.any { it.component2() == "require" }) "require" else "enable"
             "#extension $name : $behavior"
         }
+}
+
+private fun stripTopLevelExtensionDirectives(source: String): String {
+    var conditionalDepth = 0
+    return source.split('\n').joinToString("\n") { line ->
+        val directive = DIRECTIVE_NAME.matchEntire(line)?.groupValues?.get(1)?.lowercase()
+        when (directive) {
+            "if", "ifdef", "ifndef" -> {
+                conditionalDepth++
+                line
+            }
+            "endif" -> {
+                conditionalDepth = (conditionalDepth - 1).coerceAtLeast(0)
+                line
+            }
+            "extension" -> if (
+                conditionalDepth == 0 &&
+                EXTENSION_DECLARATION.matchEntire(line.trim())?.groupValues?.get(1)
+                    ?.startsWith("GL_KHR_shader_subgroup_") != true
+            ) "" else line
+            else -> line
+        }
+    }
 }
 
 private fun renderSettingDeclarations(settings: List<ShaderSetting>): String = buildString {
@@ -1402,19 +1587,38 @@ private fun renderDerivedDecision(
     return render(0, assignments)
 }
 
+private fun directivePhysicalRanges(source: String): List<IntRange> {
+    val result = mutableListOf<IntRange>()
+    var continuation = false
+    var offset = 0
+    while (offset < source.length) {
+        val newline = source.indexOfAny(charArrayOf('\r', '\n'), offset)
+        val contentEnd = if (newline < 0) source.length else newline
+        val lineEnd = when {
+            newline < 0 -> source.length
+            source[newline] == '\r' && source.getOrNull(newline + 1) == '\n' -> newline + 2
+            else -> newline + 1
+        }
+        val content = source.substring(offset, contentEnd)
+        val directive = continuation || content.trimStart().startsWith('#')
+        if (directive) result += offset until lineEnd
+        continuation = directive && content.trimEnd().endsWith('\\')
+        offset = lineEnd
+    }
+    return result
+}
+
 private fun replaceCodeIdentifier(source: String, name: String, replacement: String): String {
     val lexical = ContractLexicalMap(source)
-    val directiveLines = PreprocessorProtection.protect(source, "<compiler-contract>").directives
-    val lines = ContractLineMap(source)
-    val directiveRanges = directiveLines.map(lines::directiveRange)
+    val directiveRanges = directivePhysicalRanges(source)
     val matches = identifierRegex(name).findAll(source).filter {
         lexical.isCode(it.range.first) && directiveRanges.none { range -> it.range.first in range }
     }.toList()
     return matches.asReversed().fold(source) { value, match -> value.replaceRange(match.range, replacement) }
 }
 
-private fun lowerDynamicTopLevelConstants(source: String, initialDynamicNames: Set<String>): String {
-    if (initialDynamicNames.isEmpty()) return source
+private fun lowerDynamicTopLevelConstants(source: String, initialDynamicNames: Set<String>): DynamicTopLevelLowering {
+    if (initialDynamicNames.isEmpty()) return DynamicTopLevelLowering(source)
     val lexical = ContractLexicalMap(source)
     val constants = DYNAMIC_TOP_LEVEL_CONST_START.findAll(source).mapNotNull { match ->
         if (!lexical.isTopLevelCode(match.range.first)) return@mapNotNull null
@@ -1428,7 +1632,7 @@ private fun lowerDynamicTopLevelConstants(source: String, initialDynamicNames: S
             match.groupValues[1],
         )
     }.toList()
-    if (constants.isEmpty()) return source
+    if (constants.isEmpty()) return DynamicTopLevelLowering(source)
 
     val dynamicNames = initialDynamicNames.toMutableSet()
     val lowered = linkedSetOf<DynamicTopLevelConstant>()
@@ -1442,7 +1646,7 @@ private fun lowerDynamicTopLevelConstants(source: String, initialDynamicNames: S
             changed = true
         }
     } while (changed)
-    if (lowered.isEmpty()) return source
+    if (lowered.isEmpty()) return DynamicTopLevelLowering(source)
 
     val occupiedNames = IDENTIFIER.findAll(source).mapTo(linkedSetOf(), MatchResult::value)
     val aliases = lowered.sortedBy { it.name }.associate { constant ->
@@ -1452,10 +1656,8 @@ private fun lowerDynamicTopLevelConstants(source: String, initialDynamicNames: S
         constant.name to alias
     }
     val loweredRanges = lowered.map(DynamicTopLevelConstant::range)
-    val directiveLines = PreprocessorProtection.protect(source, "<dynamic-global-constant>").directives
-    val lineMap = ContractLineMap(source)
-    val directiveRanges = directiveLines.map(lineMap::directiveRange)
-    val shadowRanges = aliases.keys.associateWith { name -> localShadowRanges(source, name, lexical) }
+    val directiveRanges = directivePhysicalRanges(source)
+    val shadowRanges = localShadowRanges(source, aliases.keys, lexical)
     val replacements = mutableListOf<ContractSourceReplacement>()
 
     lowered.forEach { constant ->
@@ -1477,22 +1679,27 @@ private fun lowerDynamicTopLevelConstants(source: String, initialDynamicNames: S
         if (shadowRanges.getValue(match.value).any { offset in it }) return@forEach
         replacements += ContractSourceReplacement(match.range, alias)
     }
-    return replacements.sortedByDescending { it.range.first }.fold(source) { result, replacement ->
-        result.replaceRange(replacement.range, replacement.text)
-    }
+    return DynamicTopLevelLowering(
+        replacements.sortedByDescending { it.range.first }.fold(source) { result, replacement ->
+            result.replaceRange(replacement.range, replacement.text)
+        },
+        aliases,
+    )
 }
 
-private fun localShadowRanges(source: String, name: String, lexical: ContractLexicalMap): List<IntRange> {
-    val escapedName = Regex.escape(name)
-    val declarations = Regex(
-        "(?m)(?:^|[;{}])[\\t ]*" +
-            "(?:(?:const|precise|highp|mediump|lowp|in|out|inout)\\s+)*" +
-            "[A-Za-z_][A-Za-z0-9_]*(?:\\s*\\[[^]\\r\\n]*])?\\s+($escapedName)\\b",
-    ).findAll(source).mapNotNull { match ->
-        val offset = match.groups[1]?.range?.first ?: return@mapNotNull null
-        if (!lexical.isCode(offset) || lexical.isTopLevel(offset)) return@mapNotNull null
-        offset..(lexical.enclosingBlockEnd(offset) ?: return@mapNotNull null)
-    }.toMutableList()
+private fun localShadowRanges(
+    source: String,
+    names: Set<String>,
+    lexical: ContractLexicalMap,
+): Map<String, List<IntRange>> {
+    val declarations = names.associateWith { mutableListOf<IntRange>() }
+    LOCAL_DECLARATION.findAll(source).forEach { match ->
+        val name = match.groups[1]?.value ?: return@forEach
+        if (name !in names) return@forEach
+        val offset = match.groups[1]?.range?.first ?: return@forEach
+        if (!lexical.isCode(offset) || lexical.isTopLevel(offset)) return@forEach
+        declarations.getValue(name) += offset..(lexical.enclosingBlockEnd(offset) ?: return@forEach)
+    }
 
     FUNCTION_START.findAll(source).forEach { function ->
         if (!lexical.isTopLevelCode(function.range.first)) return@forEach
@@ -1501,14 +1708,20 @@ private fun localShadowRanges(source: String, name: String, lexical: ContractLex
         val closeParen = source.lastIndexOf(')', openBrace)
         if (openParen < 0 || closeParen < openParen || openBrace < 0 || openBrace > function.range.last) return@forEach
         val closeBrace = lexical.matchingBlockEnd(openBrace) ?: return@forEach
-        identifierRegex(name).findAll(source, openParen + 1).takeWhile { it.range.first < closeParen }.filter {
-            lexical.isCode(it.range.first)
+        IDENTIFIER.findAll(source, openParen + 1).takeWhile { it.range.first < closeParen }.filter {
+            it.value in names && lexical.isCode(it.range.first)
         }.forEach { match ->
-            declarations += match.range.first..closeBrace
+            declarations.getValue(match.value) += match.range.first..closeBrace
         }
     }
     return declarations
 }
+
+private val LOCAL_DECLARATION = Regex(
+        "(?m)(?:^|[;{}])[\\t ]*" +
+            "(?:(?:const|precise|highp|mediump|lowp|in|out|inout)\\s+)*" +
+            "[A-Za-z_][A-Za-z0-9_]*(?:\\s*\\[[^]\\r\\n]*])?\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+    )
 
 private fun replaceFragmentIdentifiers(source: String, replacements: Map<String, String>): String {
     if (replacements.isEmpty()) return source
@@ -1540,14 +1753,32 @@ internal fun findStableAnchors(source: String): List<LocatedAnchor> {
     val lexical = ContractLexicalMap(source)
     val result = mutableListOf<LocatedAnchor>()
     VERSION_LINE.find(source)?.let { result += LocatedAnchor(IrisSourceAnchor(IrisAnchorKind.VERSION, "version"), it.range) }
-    STABLE_ABI_DECLARATION.findAll(source).filter { lexical.isTopLevelCode(it.range.first) }.forEach { match ->
-        result += LocatedAnchor(
-            IrisSourceAnchor(
-                IrisAnchorKind.DECLARATION,
-                "${match.groupValues[1]}:${match.groupValues[3]}",
-            ),
-            match.range,
-        )
+    var lineOffset = 0
+    while (lineOffset < source.length) {
+        val newline = source.indexOfAny(charArrayOf('\r', '\n'), lineOffset)
+        val contentEnd = if (newline < 0) source.length else newline
+        val lineEnd = when {
+            newline < 0 -> source.length
+            source[newline] == '\r' && source.getOrNull(newline + 1) == '\n' -> newline + 2
+            else -> newline + 1
+        }
+        val line = source.substring(lineOffset, contentEnd)
+        val firstCode = line.indexOfFirst { !it.isWhitespace() }
+        if (
+            firstCode >= 0 && lexical.isTopLevelCode(lineOffset + firstCode) &&
+            ("uniform" in line || " in " in line || " out " in line)
+        ) {
+            STABLE_ABI_DECLARATION.find(line)?.let { match ->
+                result += LocatedAnchor(
+                    IrisSourceAnchor(
+                        IrisAnchorKind.DECLARATION,
+                        "${match.groupValues[1]}:${match.groupValues[3]}",
+                    ),
+                    (lineOffset + match.range.first)..(lineOffset + match.range.last),
+                )
+            }
+        }
+        lineOffset = lineEnd
     }
     FUNCTION_START.findAll(source).filter {
         lexical.isTopLevelCode(it.range.first) && it.groupValues[1] == "main"
@@ -1576,7 +1807,43 @@ internal fun findStableAnchors(source: String): List<LocatedAnchor> {
             )
         }
     }
+    val branchBegin = source.indexOf("// SHADESMITH_BRANCH_OWNED_MAIN_BEGIN")
+    val branchEnd = source.indexOf("// SHADESMITH_BRANCH_OWNED_MAIN_END")
+    if (branchBegin >= 0 && branchEnd > branchBegin) {
+        val mainAnchor = IrisSourceAnchor(IrisAnchorKind.FUNCTION, "main")
+        val branchMains = result.filter { it.anchor == mainAnchor && it.range.first in branchBegin..branchEnd }
+        if (branchMains.isNotEmpty()) {
+            result.removeAll { it.anchor == mainAnchor }
+            result += LocatedAnchor(mainAnchor, branchBegin until branchEnd + "// SHADESMITH_BRANCH_OWNED_MAIN_END".length)
+        }
+    }
+    val mainAnchor = IrisSourceAnchor(IrisAnchorKind.FUNCTION, "main")
+    val mainMatches = result.filter { it.anchor == mainAnchor }
+    mutuallyExclusiveMainOwner(source, mainMatches)?.let { owner ->
+        result.removeAll { it.anchor == mainAnchor }
+        result += LocatedAnchor(mainAnchor, owner)
+    }
     return result.sortedBy { it.range.first }
+}
+
+private fun mutuallyExclusiveMainOwner(source: String, matches: List<LocatedAnchor>): IntRange? {
+    if (matches.size < 2) return null
+    val lines = ContractLineMap(source)
+    val directives = PreprocessorProtection.protect(source, "restored shader").directives.map { directive ->
+        ContractDirective(directive, lines.directiveRange(directive))
+    }
+    return buildConditionalGroups(directives).asSequence()
+        .filter { group ->
+            "SETTING_" in group.opener.directive.exactText && matches.all { it.range.first in group.range }
+        }
+        .filter { group ->
+            val arms = matches.map { match ->
+                group.delimiters.indexOfLast { it.range.last < match.range.first }
+            }
+            arms.none { it < 0 } && arms.distinct().size == matches.size
+        }
+        .maxByOrNull { it.depth }
+        ?.range
 }
 
 private fun insertAfterVersion(source: String, insertion: String): String {
@@ -1799,6 +2066,7 @@ private val IRIS_COMMENT_DIRECTIVE =
     "/\\*[\\t ]*(?:DRAWBUFFERS|RENDERTARGETS|SHADOWRES|SHADOWFOV|SHADOWHPL|GAUX4FORMAT):[\\s\\S]*?\\*/".toRegex()
 private val EXTENSION_DECLARATION =
     "#\\s*extension\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*:\\s*(require|enable|warn|disable)".toRegex()
+private val DIRECTIVE_NAME = "[\\t ]*#[\\t ]*([A-Za-z]+)\\b[^\\r\\n]*".toRegex()
 private val FUNCTION_START =
     "(?m)^[\\t ]*(?:[A-Za-z_][A-Za-z0-9_]*[\\t ]+)+([A-Za-z_][A-Za-z0-9_]*)[\\t ]*\\([^;{}]*\\)\\s*\\{".toRegex()
 private val STABLE_ABI_DECLARATION = (

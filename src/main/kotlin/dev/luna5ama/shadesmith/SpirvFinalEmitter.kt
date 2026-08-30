@@ -41,26 +41,43 @@ internal object SpirvSettingBridge {
         }
 
         var result = removeRanges(source, blocks.map { it.range })
-        val restoredSettings = mutableListOf<ShaderSetting>()
-        settings.sortedBy { it.name }.forEach { setting ->
-            val token = "SPIRV_CROSS_CONSTANT_ID_${setting.specializationId}"
-            val declaration = crossSettingDeclaration(setting, token).findAll(result).toList()
-            if (declaration.size > 1) {
-                return SpirvSettingBridgeRestoration.Preserved(
-                    "SPIRV-Cross emitted duplicate declarations for ${setting.compilerName}",
-                )
+        val settingByCompilerName = settings.associateBy { it.compilerName }
+        val declarationRanges = mutableMapOf<Int, MutableList<IntRange>>()
+        physicalLineRanges(result).forEach { range ->
+            val line = result.substring(range).trimEnd('\r', '\n')
+            val match = CROSS_SETTING_DECLARATION.matchEntire(line) ?: return@forEach
+            val setting = settingByCompilerName[match.groupValues[2]] ?: return@forEach
+            val id = match.groupValues[3].toInt()
+            if (match.groupValues[1] == setting.type.glslName && id == setting.specializationId) {
+                declarationRanges.getOrPut(id, ::mutableListOf) += range
             }
-            val used = blocks.any { it.groupValues[1].toInt() == setting.specializationId } ||
-                declaration.isNotEmpty() || identifierRegex(token).containsMatchIn(result)
-            if (!used) return@forEach
-            result = removeRanges(result, declaration.map { it.range })
-            result = identifierRegex(token).replace(result, setting.compilerName)
-            if (crossSettingDeclaration(setting, setting.compilerName).containsMatchIn(result)) {
+        }
+        declarationRanges.entries.firstOrNull { it.value.size > 1 }?.let { (id, _) ->
+            val setting = settingById.getValue(id)
+            return SpirvSettingBridgeRestoration.Preserved(
+                "SPIRV-Cross emitted duplicate declarations for ${setting.compilerName}",
+            )
+        }
+        val tokenIds = CROSS_TOKEN.findAll(result).map { it.groupValues[1].toInt() }.toSet()
+        val blockIds = blocks.mapTo(mutableSetOf()) { it.groupValues[1].toInt() }
+        val restoredSettings = settings.sortedBy { it.name }.filter { setting ->
+            setting.specializationId in blockIds ||
+                setting.specializationId in declarationRanges ||
+                setting.specializationId in tokenIds
+        }
+        result = removeRanges(result, declarationRanges.values.flatten())
+        result = CROSS_TOKEN.replace(result) { match ->
+            settingById[match.groupValues[1].toInt()]?.compilerName ?: match.value
+        }
+        physicalLineRanges(result).forEach { range ->
+            val line = result.substring(range).trimEnd('\r', '\n')
+            val match = CROSS_RESTORED_SETTING_DECLARATION.matchEntire(line) ?: return@forEach
+            val setting = settingByCompilerName[match.groupValues[2]] ?: return@forEach
+            if (match.groupValues[1] == setting.type.glslName && match.groupValues[3] == setting.compilerName) {
                 return SpirvSettingBridgeRestoration.Preserved(
                     "SPIRV-Cross specialization declaration for ${setting.compilerName} has an unsupported shape",
                 )
             }
-            restoredSettings += setting
         }
         localSizeIds.sorted().forEach { id ->
             val token = "SPIRV_CROSS_CONSTANT_ID_$id"
@@ -164,7 +181,9 @@ internal object SpirvSettingBridge {
             bridgeRanges += occurrences.single()
         }
         var result = removeRanges(source, bridgeRanges)
-        val relevantContracts = settings.associateWith { setting ->
+        val definitionSettings = settings.filter { it.controlKind != ShaderControlKind.HOST_PRESENCE }
+        val hostSettings = settings - definitionSettings.toSet()
+        val relevantContracts = definitionSettings.associateWith { setting ->
             contracts.filter { contract -> setting.sourceSlices.any(contract.exactText::contains) }
         }
         relevantContracts.entries.firstOrNull { it.value.isEmpty() }?.let { (setting) ->
@@ -172,18 +191,32 @@ internal object SpirvSettingBridge {
                 "setting definition contract ${setting.name} is missing from final GLSL",
             )
         }
-        val definitionEnds = relevantContracts.values.flatten().distinct().flatMap { contract ->
-            occurrences(result, contract.exactText).map { it.last + 1 }
+        val definitionEnds = relevantContracts.entries.flatMap { (setting, contractsForSetting) ->
+            val contractEnds = contractsForSetting.distinct().flatMap { contract ->
+                occurrences(result, contract.exactText).map { it.last + 1 }
+            }
+            if (contractEnds.isNotEmpty()) {
+                contractEnds
+            } else {
+                setting.sourceSlices.distinct().flatMap { slice ->
+                    occurrences(result, slice).map { it.last + 1 }
+                }
+            }
         }
-        if (definitionEnds.isEmpty()) {
+        if (definitionSettings.isNotEmpty() && definitionEnds.isEmpty()) {
             return SpirvSettingBridgeRestoration.Preserved("setting definition contracts cannot be located in final GLSL")
         }
-        var offset = definitionEnds.max()
-        while (offset < result.length && result[offset] in "\r\n") offset++
-        val insertion = bridges.values.joinToString("")
-        val prefix = if (offset > 0 && result[offset - 1] !in "\r\n") "\n" else ""
-        val suffix = if (offset < result.length && result[offset] !in "\r\n") "\n" else ""
-        result = result.substring(0, offset) + prefix + insertion + suffix + result.substring(offset)
+        if (definitionEnds.isNotEmpty()) {
+            var offset = definitionEnds.max()
+            while (offset < result.length && result[offset] in "\r\n") offset++
+            val insertion = definitionSettings.joinToString("") { bridges.getValue(it) }
+            val prefix = if (offset > 0 && result[offset - 1] !in "\r\n") "\n" else ""
+            val suffix = if (offset < result.length && result[offset] !in "\r\n") "\n" else ""
+            result = result.substring(0, offset) + prefix + insertion + suffix + result.substring(offset)
+        }
+        if (hostSettings.isNotEmpty()) {
+            result = insertAfterVersion(result, hostSettings.joinToString("") { bridges.getValue(it) })
+        }
         return SpirvSettingBridgeRestoration.Restored(result.trimEnd() + "\n", settings.sortedBy { it.name })
     }
 
@@ -206,12 +239,18 @@ internal object SpirvSettingBridge {
         }
     }
 
-    private fun crossSettingDeclaration(setting: ShaderSetting, value: String): Regex {
-        return Regex(
-            "(?m)^[\\t ]*const[\\t ]+${Regex.escape(setting.type.glslName)}[\\t ]+" +
-                "${Regex.escape(setting.compilerName)}[\\t ]*=[\\t ]*${Regex.escape(value)}[\\t ]*;" +
-                "[^\\r\\n]*(?:\\r\\n|\\n|\\r|$)",
-        )
+    private fun physicalLineRanges(source: String): List<IntRange> {
+        val result = mutableListOf<IntRange>()
+        var start = 0
+        while (start < source.length) {
+            var end = start
+            while (end < source.length && source[end] != '\r' && source[end] != '\n') end++
+            if (end < source.length && source[end] == '\r') end++
+            if (end < source.length && source[end] == '\n') end++
+            result += start until end
+            start = end
+        }
+        return result
     }
 
     private fun insertAfterVersion(source: String, insertion: String): String {
@@ -250,7 +289,15 @@ internal object SpirvSettingBridge {
             "^[\\t ]*#define[\\t ]+SPIRV_CROSS_CONSTANT_ID_([0-9]+)[\\t ]+[^\\r\\n]*(?:\\r\\n|\\n|\\r)" +
             "^[\\t ]*#endif[\\t ]*(?:\\r\\n|\\n|\\r|$)",
     )
-    private val CROSS_TOKEN = "\\bSPIRV_CROSS_CONSTANT_ID_[0-9]+\\b".toRegex()
+    private val CROSS_SETTING_DECLARATION = Regex(
+        "[\\t ]*const[\\t ]+([A-Za-z_][A-Za-z0-9_]*)[\\t ]+([A-Za-z_][A-Za-z0-9_]*)" +
+            "[\\t ]*=[\\t ]*SPIRV_CROSS_CONSTANT_ID_([0-9]+)[\\t ]*;[^\\r\\n]*",
+    )
+    private val CROSS_RESTORED_SETTING_DECLARATION = Regex(
+        "[\\t ]*const[\\t ]+([A-Za-z_][A-Za-z0-9_]*)[\\t ]+([A-Za-z_][A-Za-z0-9_]*)" +
+            "[\\t ]*=[\\t ]*([A-Za-z_][A-Za-z0-9_]*)[\\t ]*;[^\\r\\n]*",
+    )
+    private val CROSS_TOKEN = "\\bSPIRV_CROSS_CONSTANT_ID_([0-9]+)\\b".toRegex()
     private val VERSION_LINE = "(?m)^[\\t ]*#version[^\\r\\n]*".toRegex()
 }
 
@@ -279,7 +326,7 @@ internal object SpirvFinalEmitter {
             if (modules.size != 1) {
                 return preserved(request, "multiple compiler modules have no structural restoration plan")
             }
-            return optimizedOrPreserved(request, modules.single().source)
+            return optimizedOrPreserved(request, restoreProbeResources(modules.single().source, modules))
         }
         structuralPlan.restorationPlan.issue?.let { return preserved(request, it) }
         if (modules.any { it.structuralSignature == null }) {
@@ -298,8 +345,11 @@ internal object SpirvFinalEmitter {
                 request,
                 modules.map(SpirvModuleResult::name),
                 restoredCores.map(StructuralStripResult.Restored::source),
+                modules.map { module ->
+                    module.structuralAssignments.ifEmpty { listOf(module.structuralAssignment) }
+                },
                 structuralPlan.restorationPlan,
-                restoredCores.flatMapTo(linkedSetOf()) { it.strippedSymbols },
+                modules.first().irisContracts,
             )
         ) {
             is StructuralConvergence.Converged -> result
@@ -315,22 +365,109 @@ internal object SpirvFinalEmitter {
             structuralPlan.restorationPlan.restorationContracts,
         )
         val contractSource = when (val contracts = restorationContracts.restore(structural)) {
-            is IrisContractRestoration.Restored -> contracts.source
+            is IrisContractRestoration.Restored -> deduplicateUnconditionalDeclarations(contracts.source)
             is IrisContractRestoration.StructuralPreservation -> return preserved(request, contracts.reason)
+        }
+        val bridgeSettings = modules.flatMap(SpirvModuleResult::bridgeSettings)
+            .distinctBy(ShaderSetting::name)
+            .sortedBy(ShaderSetting::name)
+        val completedBridges = when (
+            val completion = SpirvSettingBridge.completeRestoredSettings(
+                contractSource,
+                modules.first().bridgeSettings,
+                bridgeSettings,
+            )
+        ) {
+            is SpirvSettingBridgeRestoration.Restored -> completion.source
+            is SpirvSettingBridgeRestoration.Preserved -> return preserved(request, completion.reason)
         }
         val restored = when (
             val bridges = SpirvSettingBridge.placeAfterDefinitions(
-                contractSource,
-                modules.first().bridgeSettings,
+                completedBridges,
+                bridgeSettings,
                 restorationContracts.contracts,
             )
         ) {
             is SpirvSettingBridgeRestoration.Restored -> bridges.source
             is SpirvSettingBridgeRestoration.Preserved -> return preserved(request, bridges.reason)
         }
+        val dependencyComplete = when (
+            val dependencies = restoreMissingSourceConstants(
+                request,
+                restored,
+                structuralPlan.restorationPlan,
+                modules.first().irisContracts,
+            )
+        ) {
+            is ShaderStructuralRestoration.Restored -> dependencies.source
+            is ShaderStructuralRestoration.Preserved -> return preserved(request, dependencies.reason)
+        }
+        val abiComplete = when (
+            val abi = restoreMissingSourceAbiDeclarations(
+                request,
+                dependencyComplete,
+                structuralPlan.restorationPlan,
+            )
+        ) {
+            is ShaderStructuralRestoration.Restored -> abi.source
+            is ShaderStructuralRestoration.Preserved -> return preserved(request, abi.reason)
+        }
+        val symbolicAbiComplete = restoreSymbolicSourceAbiDeclarations(request.source, abiComplete)
+        val functionComplete = when (
+            val functions = restoreMissingSourceFunctions(
+                request,
+                symbolicAbiComplete,
+                structuralPlan.restorationPlan,
+                modules.first().irisContracts,
+            )
+        ) {
+            is ShaderStructuralRestoration.Restored -> functions.source
+            is ShaderStructuralRestoration.Preserved -> return preserved(request, functions.reason)
+        }
+        val macroComplete = when (
+            val macros = restoreMissingSourceMacros(
+                request,
+                functionComplete,
+                structuralPlan.restorationPlan,
+            )
+        ) {
+            is ShaderStructuralRestoration.Restored -> macros.source
+            is ShaderStructuralRestoration.Preserved -> return preserved(request, macros.reason)
+        }
+        val finalConstants = when (
+            val constants = restoreMissingSourceConstants(
+                request,
+                macroComplete,
+                structuralPlan.restorationPlan,
+                modules.first().irisContracts,
+            )
+        ) {
+            is ShaderStructuralRestoration.Restored -> constants.source
+            is ShaderStructuralRestoration.Preserved -> return preserved(request, constants.reason)
+        }
+        var finalSource = restoreContractHelperFunctions(request, finalConstants)
+        finalSource = splitLateBranchOwnedDeclarations(finalSource)
+        finalSource = relocateBranchOwnedPrologue(finalSource)
+        finalSource = hoistLateDeclarationDependencies(finalSource)
+        finalSource = hoistLateReferencedConstants(finalSource)
+        finalSource = ensureForwardFunctionDeclarations(finalSource)
+        finalSource = relocateSourceAbiDeclarations(request, finalSource)
+        finalSource = hoistLateAbiDeclarations(finalSource)
+        finalSource = relocateUnconditionalLateSourceAbiDeclarations(request, finalSource)
+        finalSource = hoistLateAbiQualifierMacros(finalSource)
+        finalSource = resolveAbiModifierTokens(finalSource, signatures)
+        finalSource = restoreMissingSourceTypeDeclarations(request, finalSource)
+        finalSource = restoreSourceFunctionConditionalOwners(request.source, finalSource)
+        finalSource = relocateUnconditionalAbiFromFunctionOwners(request, finalSource)
+        finalSource = deduplicateUnconditionalDeclarations(finalSource)
+        finalSource = hoistLateAbiQualifierMacros(finalSource)
+        finalSource = deduplicateDominatedAbiLines(finalSource)
+        finalSource = restoreMissingBranchOwnedMain(finalSource, modules, structuralPlan.restorationPlan)
+        finalSource = removeNonBranchOwnedMainFunctions(finalSource)
+        finalSource = restoreProbeResources(finalSource, modules)
         return optimizedOrPreserved(
             request,
-            restored,
+            finalSource,
             convergence.optimizedEntities,
             convergence.restoredEntities,
             convergence.restoredBytes,
@@ -410,11 +547,17 @@ internal object SpirvFinalEmitter {
         request: SpirvOptimizationRequest,
         moduleNames: List<String>,
         sources: List<String>,
+        assignmentGroups: List<List<Map<String, String>>>,
         restorationPlan: ShaderStructuralRestorationPlan,
-        requiredSourceSymbols: Set<String>,
+        irisContracts: IrisShaderContractPlan,
     ): StructuralConvergence {
         val existingSlots = restorationPlan.islands
-        val existingIdentities = existingSlots.flatMapTo(linkedSetOf()) { slot ->
+        val optimizedEntrySlots = existingSlots.filter { slot ->
+            slot.kind == ShaderStructuralEntitySlotKind.FUNCTION &&
+                structuralEntities(slot.exactText).any { it.identity == "function:main()" }
+        }.toSet()
+        val retainedExistingSlots = existingSlots.filterNot(optimizedEntrySlots::contains)
+        val existingIdentities = retainedExistingSlots.flatMapTo(linkedSetOf()) { slot ->
             structuralEntities(slot.exactText).map(StructuralEntity::identity)
         }
         val withoutKnownSlots = sources.map { source -> removeStructuralEntities(source, existingIdentities) }
@@ -432,14 +575,43 @@ internal object SpirvFinalEmitter {
         }
 
         val identities = parsedModules.flatMapTo(sortedSetOf()) { it.keys }
-        val divergent = identities.filterTo(linkedSetOf()) { identity ->
-            parsedModules.map { entities -> entities[identity]?.map(StructuralEntity::semantic) }.distinct().size != 1
-        }
         val sourceEntities = structuralEntities(request.source)
         val sourceByIdentity = sourceEntities.groupBy(StructuralEntity::identity)
+        val retainedSlotReferences = retainedExistingSlots.flatMapTo(linkedSetOf()) { slot ->
+            structuralEntities(slot.exactText).flatMap(StructuralEntity::references)
+        }
+        val optimizedBySymbol = parsedModules.flatMap { module -> module.values.flatten() }
+            .filter { it.symbol != null }
+            .groupBy { requireNotNull(it.symbol) }
+        val reachableIdentities = linkedSetOf<String>()
+        val pendingSymbols = ArrayDeque(retainedSlotReferences)
+        parsedModules.flatMap { it["function:main()"].orEmpty() }.forEach { main ->
+            reachableIdentities += main.identity
+            main.references.forEach(pendingSymbols::addLast)
+        }
+        while (pendingSymbols.isNotEmpty()) {
+            val symbol = pendingSymbols.removeFirst()
+            optimizedBySymbol[symbol].orEmpty().forEach { entity ->
+                if (reachableIdentities.add(entity.identity)) {
+                    entity.references.forEach(pendingSymbols::addLast)
+                }
+            }
+        }
+        val divergent = identities.filterTo(linkedSetOf()) { identity ->
+            parsedModules.map { entities -> entities[identity]?.map(StructuralEntity::semantic) }.distinct().size != 1 &&
+                (
+                    identity in reachableIdentities ||
+                    sourceByIdentity[identity].orEmpty().any { it.symbol in retainedSlotReferences }
+                )
+        }
         val unmappable = divergent.filter { sourceByIdentity[it].isNullOrEmpty() }
-        if (unmappable.isNotEmpty()) {
-            val diagnostics = unmappable.joinToString(", ") { identity ->
+        val unsupportedUnmappable = unmappable.filter { identity ->
+            identity != "function:main()" && parsedModules.any { module ->
+                module[identity].orEmpty().any { it.kind != StructuralEntityKind.DECLARATION }
+            }
+        }
+        if (unsupportedUnmappable.isNotEmpty()) {
+            val diagnostics = unsupportedUnmappable.joinToString(", ") { identity ->
                 val variants = parsedModules.mapIndexed { index, entities ->
                     entities[identity]?.joinToString("\u0000") { it.semantic }?.let(::shortHash)
                         ?.let { "${moduleNames[index]}=$it" }
@@ -453,20 +625,40 @@ internal object SpirvFinalEmitter {
         }
 
         val promoted = divergent.toMutableSet()
-        sourceEntities.filterTo(mutableListOf()) { entity ->
-            entity.symbol in requiredSourceSymbols && entity.identity !in existingIdentities
-        }.mapTo(promoted, StructuralEntity::identity)
         val optimizedIdentities = parsedModules.flatMapTo(hashSetOf()) { it.keys }
+        val optimizedSymbols = parsedModules.flatMapTo(hashSetOf()) { module ->
+            module.values.flatten().mapNotNull(StructuralEntity::symbol)
+        }
+        val missingModuleReferences = withoutKnownSlots.flatMapTo(linkedSetOf()) { source ->
+            structuralReferences(source, null)
+        }.filterTo(linkedSetOf()) { it !in optimizedSymbols }
+        val objectAliases = objectAliases(request.source)
+        sourceEntities.filterTo(mutableListOf()) { entity ->
+            val symbol = entity.symbol
+            symbol in retainedSlotReferences + missingModuleReferences &&
+                (
+                    entity.kind != StructuralEntityKind.DECLARATION ||
+                        resolveObjectAlias(requireNotNull(symbol), objectAliases) !in optimizedSymbols
+                ) &&
+                entity.identity !in existingIdentities
+        }.mapTo(promoted, StructuralEntity::identity)
         var changed: Boolean
         do {
             changed = false
             val promotedSymbols = promoted.flatMapTo(hashSetOf()) { identity ->
                 sourceByIdentity[identity].orEmpty().mapNotNull(StructuralEntity::symbol)
             }
+            val promotedReferences = promoted.flatMapTo(hashSetOf()) { identity ->
+                sourceByIdentity[identity].orEmpty().flatMap(StructuralEntity::references)
+            }
             sourceEntities.forEach { entity ->
                 if (
-                    entity.identity !in promoted && entity.identity in optimizedIdentities &&
-                    entity.references.any(promotedSymbols::contains)
+                    entity.identity !in promoted &&
+                    entity.kind != StructuralEntityKind.DECLARATION &&
+                    (
+                        entity.identity in optimizedIdentities && entity.references.any(promotedSymbols::contains) ||
+                            entity.symbol in promotedReferences
+                    )
                 ) {
                     promoted += entity.identity
                     changed = true
@@ -474,54 +666,191 @@ internal object SpirvFinalEmitter {
             }
         } while (changed)
 
-        val convergedSources = withoutKnownSlots.map { source -> removeStructuralEntities(source, promoted) }
-        val bodies = convergedSources.map(::normalizeSemanticBody)
-        if (bodies.distinct().size != 1) {
-            val diagnostics = moduleNames.zip(bodies).joinToString(", ") { (name, body) ->
-                "$name=${shortHash(body)}"
+        val expandedBranches = sources.indices.flatMap { index ->
+            assignmentGroups[index].map { assignment ->
+                sources[index] to assignment
             }
+        }
+        val branchOwnedMain = if ("function:main()" in promoted) {
+            renderBranchOwnedMain(
+                expandedBranches.map { it.first },
+                expandedBranches.map { it.second },
+                restorationPlan,
+                (unmappable - "function:main()").toSet(),
+            )
+        } else {
+            null
+        }
+        val sourcePromoted = promoted.filterTo(linkedSetOf()) { identity ->
+            identity != "function:main()" && sourceByIdentity[identity].orEmpty().isNotEmpty()
+        }
+        val removalIdentities = promoted + branchOwnedMain?.ownedIdentities.orEmpty()
+        val convergedSources = withoutKnownSlots.map { source -> removeStructuralEntities(source, removalIdentities) }
+        val commonCore = branchOwnedMain?.let { entry ->
+            val core = convergedSources.first().trimEnd()
+            val firstFunction = structuralEntities(core)
+                .firstOrNull { it.kind == StructuralEntityKind.FUNCTION }
+            val withPrologue = if (entry.prologue.isBlank()) {
+                core
+            } else if (firstFunction == null) {
+                "$core\n\n${entry.prologue.trim()}"
+            } else {
+                core.substring(0, firstFunction.range.first) + entry.prologue.trim() + "\n\n" +
+                    core.substring(firstFunction.range.first).trimEnd()
+            }
+            "$withPrologue\n\n${entry.source.trim()}\n"
+        } ?: convergedSources.first().trimEnd() + "\n"
+        data class DynamicSourceSlot(
+            val range: IntRange,
+            val kind: ShaderStructuralEntitySlotKind,
+            val canonicalEntity: String?,
+        )
+        val dynamicEntities = sourcePromoted.flatMap { sourceByIdentity.getValue(it) }
+            .distinctBy { it.identity to it.semantic }
+        val dynamicOwners = restorationPlan.structuralOwnerRanges(
+            request.source,
+            dynamicEntities.map(StructuralEntity::range),
+        )
+        val dynamicConditionalOwners = nearestConditionalOwnerRanges(
+            request.source,
+            dynamicEntities.map(StructuralEntity::range),
+        )
+        val dynamicCandidates = dynamicEntities.indices.map { index ->
+            val entity = dynamicEntities[index]
+            val owner = dynamicOwners[index] ?: dynamicConditionalOwners[index]
+            owner?.let {
+                DynamicSourceSlot(owner, ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION, null)
+            } ?: DynamicSourceSlot(
+                entity.range,
+                if (entity.kind == StructuralEntityKind.FUNCTION) {
+                    ShaderStructuralEntitySlotKind.FUNCTION
+                } else {
+                    ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION
+                },
+                entity.canonical,
+            )
+        }.distinctBy(DynamicSourceSlot::range)
+        val dynamicSlots = dynamicCandidates.filterNot { candidate ->
+            dynamicCandidates.any { other ->
+                other !== candidate && other.range != candidate.range && other.range.containsRange(candidate.range)
+            }
+        }.sortedBy { it.range.first }
+        val retainedSlots = retainedExistingSlots.filterNot { slot ->
+            occurrences(request.source, slot.exactText).singleOrNull()?.let { range ->
+                dynamicSlots.any { it.range.containsRange(range) }
+            } == true
+        }
+        val restoredOwnedIdentities = retainedSlots.flatMapTo(linkedSetOf()) { slot ->
+            structuralEntities(slot.exactText).map(StructuralEntity::identity)
+        }
+        dynamicSlots.flatMapTo(restoredOwnedIdentities) { slot ->
+            structuralEntities(request.source.substring(slot.range)).map(StructuralEntity::identity)
+        }
+        val restorationCore = removeStructuralEntities(
+            commonCore,
+            restoredOwnedIdentities - optimizedRetainedEntityIdentities(
+                commonCore,
+                retainedSlots + dynamicSlots.mapIndexed { index, slot ->
+                    ShaderStructuralEntitySlot(
+                        ordinal = retainedSlots.size + index,
+                        kind = slot.kind,
+                        canonicalEntity = slot.canonicalEntity,
+                        exactText = request.source.substring(slot.range),
+                        sourceLine = sourceLine(request.source, slot.range.first),
+                        beforeAnchor = null,
+                        afterAnchor = null,
+                        placement = IrisAnchorPlacement.AFTER_BEFORE,
+                    )
+                },
+                commonCore + branchOwnedMain?.prologue.orEmpty() + branchOwnedMain?.source.orEmpty(),
+            ),
+        )
+        val dependencySlots = sourceMacroDependencySlots(
+            request.source,
+            restorationCore,
+            retainedSlots.map(ShaderStructuralEntitySlot::exactText) +
+                dynamicSlots.map { request.source.substring(it.range) } +
+                listOfNotNull(branchOwnedMain?.prologue, branchOwnedMain?.source),
+            restorationPlan,
+        )
+        val dependencyOwnedIdentities = dependencySlots.flatMapTo(linkedSetOf()) { slot ->
+            structuralEntities(slot.exactText).map(StructuralEntity::identity)
+        }
+        val dependencyCore = removeStructuralEntities(
+            restorationCore,
+            dependencyOwnedIdentities - optimizedRetainedEntityIdentities(
+                restorationCore,
+                dependencySlots,
+                restorationCore + branchOwnedMain?.prologue.orEmpty() + branchOwnedMain?.source.orEmpty(),
+            ),
+        )
+        val optimized = structuralEntities(dependencyCore)
+        if (optimized.none { it.kind == StructuralEntityKind.FUNCTION } && branchOwnedMain == null) {
             return StructuralConvergence.Preserved(
-                "${request.sourceName}: optimized whole-entity convergence did not close: $diagnostics",
+                buildString {
+                    append("${request.sourceName}: whole-entity restoration would leave no optimized executable entity")
+                    append("; promoted=")
+                    append(promoted.sorted())
+                    append("; slots=")
+                    append(existingSlots.map { slot ->
+                        "${slot.kind}:${slot.canonicalEntity}:${structuralEntities(slot.exactText).map(StructuralEntity::identity)}"
+                    })
+                    append("; structural_settings=")
+                    append(restorationPlan.structuralSettings.sorted())
+                    append("; assignments=")
+                    append(assignmentGroups.flatten().map(Map<String, String>::toSortedMap))
+                    append("; main_counts=")
+                    append(parsedModules.map { it["function:main()"]?.size ?: 0 })
+                },
             )
         }
-        val commonCore = convergedSources.first().trimEnd() + "\n"
-        val optimized = structuralEntities(commonCore)
-        if (optimized.none { it.kind == StructuralEntityKind.FUNCTION }) {
-            return StructuralConvergence.Preserved(
-                "${request.sourceName}: whole-entity restoration would leave no optimized executable entity",
-            )
-        }
-
-        val dynamicEntities = promoted.flatMap { sourceByIdentity.getValue(it) }
-        val macroSlots = sourceMacroDependencySlots(request.source, commonCore, dynamicEntities)
-        val allSlots = reanchorRestorationSlots(
-            request,
-            existingSlots + macroSlots + dynamicEntities.mapIndexed { index, entity ->
+        val restorationCandidates = retainedSlots + dependencySlots + dynamicSlots.mapIndexed { index, slot ->
                 ShaderStructuralEntitySlot(
-                    ordinal = existingSlots.size + macroSlots.size + index,
-                    kind = if (entity.kind == StructuralEntityKind.FUNCTION) {
-                        ShaderStructuralEntitySlotKind.FUNCTION
-                    } else {
-                        ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION
-                    },
-                    canonicalEntity = entity.canonical,
-                    exactText = request.source.substring(entity.range),
-                    sourceLine = sourceLine(request.source, entity.range.first),
+                    ordinal = retainedSlots.size + dependencySlots.size + index,
+                    kind = slot.kind,
+                    canonicalEntity = slot.canonicalEntity,
+                    exactText = request.source.substring(slot.range),
+                    sourceLine = sourceLine(request.source, slot.range.first),
                     beforeAnchor = null,
                     afterAnchor = null,
                     placement = IrisAnchorPlacement.AFTER_BEFORE,
                 )
-            },
+            }
+        val uniqueCandidates = restorationCandidates.distinctBy(ShaderStructuralEntitySlot::exactText)
+        val positionedCandidates = uniqueCandidates.associateWith { slot ->
+            occurrences(request.source, slot.exactText).singleOrNull()
+        }
+        val collapsedCandidates = uniqueCandidates.filterNot { candidate ->
+            val candidateRange = positionedCandidates[candidate] ?: return@filterNot false
+            uniqueCandidates.any { owner ->
+                owner !== candidate && positionedCandidates[owner]?.let { ownerRange ->
+                    ownerRange != candidateRange && ownerRange.containsRange(candidateRange)
+                } == true
+            }
+        }.mapIndexed { index, slot -> slot.copy(ordinal = index) }
+        val anchoredSlots = reanchorRestorationSlots(
+            request,
+            collapsedCandidates,
         ) ?: return StructuralConvergence.Preserved(
-            "${request.sourceName}: promoted entities have no stable restoration anchor",
+            "${request.sourceName}: promoted entities have no stable restoration anchor: " +
+                sourcePromoted.sorted().joinToString() + "; occurrences=" +
+                dynamicSlots.joinToString { slot ->
+                    "${sourceLine(request.source, slot.range.first)}:" +
+                        occurrences(request.source, request.source.substring(slot.range)).size
+                } + "; existing_slots=" + retainedExistingSlots.joinToString { slot ->
+                    "${slot.kind}@${slot.sourceLine}:${slot.exactText.length}:${slot.beforeAnchor}:${slot.afterAnchor}"
+                },
         )
+        val allSlots = anchoredSlots.map { slot ->
+            slot.copy(exactText = irisContracts.replaceHostReferences(slot.exactText))
+        }
         val restoredIdentities = allSlots.flatMapTo(linkedSetOf()) { slot ->
             structuralEntities(slot.exactText).map(StructuralEntity::identity)
         }
         return StructuralConvergence.Converged(
-            source = commonCore,
+            source = dependencyCore,
             restorationPlan = restorationPlan.copy(islands = allSlots, issue = null),
-            optimizedEntities = optimized.size,
+            optimizedEntities = optimized.size + if (branchOwnedMain == null) 0 else 1,
             restoredEntities = restoredIdentities.size + allSlots.count {
                 structuralEntities(it.exactText).isEmpty()
             },
@@ -530,43 +859,1481 @@ internal object SpirvFinalEmitter {
         )
     }
 
+    private fun renderBranchOwnedMain(
+        sources: List<String>,
+        assignments: List<Map<String, String>>,
+        restorationPlan: ShaderStructuralRestorationPlan,
+        branchOwnedDeclarationIdentities: Set<String>,
+    ): BranchOwnedMain? {
+        val entities = sources.map { source ->
+            scanNamedSourceFunctions(source).filter { entity -> entity.symbol == "main" }.singleOrNull() ?: return null
+        }
+        val payloads = sources.indices.map { index ->
+            branchOwnedPayload(sources[index], entities[index], branchOwnedDeclarationIdentities)
+        }
+        val semantics = payloads.map(BranchOwnedPayload::semantic)
+        if (semantics.distinct().size < 2) {
+            return BranchOwnedMain(
+                payloads.first().declarations,
+                payloads.first().entry,
+                payloads.flatMapTo(linkedSetOf()) { it.ownedIdentities },
+            )
+        }
+        val settings = restorationPlan.settings.filter { it.name in restorationPlan.structuralSettings }
+            .associateBy { it.name }
+        val defaults = settings.mapValues { it.value.defaultValue }
+        val defaultIndex = assignments.indexOfFirst { assignment ->
+            defaults.all { (name, value) -> (assignment[name] ?: value) == value }
+        }.takeIf { it >= 0 } ?: assignments.indices.minWithOrNull(
+            compareBy<Int> { index ->
+                settings.count { (name, setting) ->
+                    (assignments[index][name] ?: setting.defaultValue) != setting.defaultValue
+                }
+            }.thenBy { index -> assignments[index].toSortedMap().toString() },
+        ) ?: return null
+        val defaultSemantic = semantics[defaultIndex]
+        val relevant = assignments.indices.filter { semantics[it] != defaultSemantic }
+            .flatMapTo(sortedSetOf()) { index ->
+                settings.keys.filter { name ->
+                    (assignments[index][name] ?: defaults.getValue(name)) != defaults.getValue(name)
+                }
+            }
+        if (relevant.isEmpty()) return null
+        val grouped = semantics.indices.groupBy { semantics[it] }
+        val branches = grouped.entries.filter { it.key != defaultSemantic }.map { (_, indexes) ->
+            val predicates = indexes.map { index ->
+                renderStructuralAssignmentPredicate(assignments[index], relevant, settings)
+            }.distinct().sorted()
+            predicates.joinToString(" || ", "(", ")") { "($it)" } to indexes.first()
+        }.sortedBy { it.first }
+        if (branches.isEmpty()) return null
+        fun renderBlock(begin: String, end: String, payload: (BranchOwnedPayload) -> String): String = buildString {
+            appendLine(begin)
+            branches.forEachIndexed { index, (predicate, payloadIndex) ->
+                append(if (index == 0) "#if " else "#elif ")
+                appendLine(predicate)
+                appendLine(payload(payloads[payloadIndex]).trim())
+            }
+            appendLine("#else")
+            appendLine(payload(payloads[defaultIndex]).trim())
+            appendLine("#endif")
+            append(end)
+        }
+        val prologue = if (payloads.all { it.declarations.isBlank() }) "" else {
+            renderBlock(BRANCH_OWNED_PROLOGUE_BEGIN, BRANCH_OWNED_PROLOGUE_END, BranchOwnedPayload::declarations)
+        }
+        return BranchOwnedMain(
+            prologue,
+            renderBlock(BRANCH_OWNED_MAIN_BEGIN, BRANCH_OWNED_MAIN_END, BranchOwnedPayload::entry),
+            payloads.flatMapTo(linkedSetOf()) { it.ownedIdentities },
+        )
+    }
+
+    private fun branchOwnedPayload(
+        source: String,
+        main: StructuralEntity,
+        branchOwnedDeclarationIdentities: Set<String>,
+    ): BranchOwnedPayload {
+        val declarations = structuralEntities(source).filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION &&
+                (entity.identity in branchOwnedDeclarationIdentities ||
+                    entity.symbol?.let(GENERATED_IDENTIFIER::matches) == true)
+        }
+        val required = main.references.toMutableSet()
+        val selected = linkedSetOf<StructuralEntity>()
+        var changed: Boolean
+        do {
+            changed = false
+            declarations.forEach { declaration ->
+                if (declaration !in selected && declaration.symbol in required) {
+                    selected += declaration
+                    required += declaration.references
+                    changed = true
+                }
+            }
+        } while (changed)
+        val ordered = selected.sortedBy { it.range.first }
+        val declarationSource = ordered.joinToString("\n") { source.substring(it.range) }
+        val entry = source.substring(main.range)
+        val payload = listOf(declarationSource, entry).filter(String::isNotBlank).joinToString("\n")
+        return BranchOwnedPayload(
+            declarations = declarationSource,
+            entry = entry,
+            semantic = normalizeStructuralEntity(payload),
+            ownedIdentities = ordered.mapTo(linkedSetOf()) { it.identity },
+        )
+    }
+
+    private fun renderStructuralAssignmentPredicate(
+        assignment: Map<String, String>,
+        relevant: Set<String>,
+        settings: Map<String, ShaderSetting>,
+    ): String {
+        return relevant.sorted().joinToString(" && ") { name ->
+            val setting = settings.getValue(name)
+            val value = assignment[name] ?: setting.defaultValue
+            if (setting.presenceToggle) {
+                if (value == "true" || value == "1") "defined($name)" else "!defined($name)"
+            } else {
+                "$name == $value"
+            }
+        }
+    }
+
     private fun sourceMacroDependencySlots(
         source: String,
         commonCore: String,
-        entities: List<StructuralEntity>,
+        dependencyTexts: List<String>,
+        restorationPlan: ShaderStructuralRestorationPlan,
     ): List<ShaderStructuralEntitySlot> {
         val definitions = sourceMacroDefinitions(source)
-        val required = entities.flatMapTo(linkedSetOf()) { entity ->
-            DECLARATION_IDENTIFIER.findAll(source.substring(entity.range)).map(MatchResult::value)
-                .filter { it in definitions && restorableSourceMacro(it) }
+        val dependencyIdentifiers = dependencyTexts.flatMapTo(linkedSetOf()) { text ->
+            DECLARATION_IDENTIFIER.findAll(text).map(MatchResult::value)
         }
-        val selected = linkedMapOf<String, SourceMacroDefinition>()
+        val required = dependencyIdentifiers.filterTo(linkedSetOf()) {
+            it in definitions && restorableSourceMacro(it)
+        }
+        val selected = linkedMapOf<String, List<SourceMacroDefinition>>()
         val pending = ArrayDeque(required)
-        while (pending.isNotEmpty()) {
-            val name = pending.removeFirst()
-            if (name in selected) continue
-            val candidates = definitions[name].orEmpty()
-            val minimumDepth = candidates.minOfOrNull(SourceMacroDefinition::depth) ?: continue
-            val definition = candidates.filter { it.depth == minimumDepth }.singleOrNull() ?: continue
-            selected[name] = definition
-            DECLARATION_IDENTIFIER.findAll(definition.value).map(MatchResult::value)
+        var ownedRanges = emptyList<IntRange>()
+        while (true) {
+            while (pending.isNotEmpty()) {
+                val name = pending.removeFirst()
+                if (name in selected) continue
+                val candidates = definitions[name].orEmpty()
+                val minimumDepth = candidates.minOfOrNull(SourceMacroDefinition::depth) ?: continue
+                val shallowest = candidates.filter { it.depth == minimumDepth }
+                selected[name] = shallowest
+                shallowest.asSequence().flatMap { definition ->
+                    DECLARATION_IDENTIFIER.findAll(definition.value).map(MatchResult::value)
+                }
+                    .filter { it in definitions && it !in selected && restorableSourceMacro(it) }
+                    .forEach(pending::addLast)
+            }
+            val definitionRanges = selected.values.flatten().map { definition ->
+                definition.offset until definition.offset + definition.exactText.length
+            }
+            val conditionalOwners = nearestConditionalOwnerRanges(source, definitionRanges)
+            ownedRanges = restorationPlan.structuralOwnerRanges(source, definitionRanges)
+                .zip(conditionalOwners).zip(definitionRanges) { (owner, conditional), definition ->
+                    val enclosing = owner ?: conditional
+                    if (
+                        conditional != null && isIncludeGuardOwner(source, conditional) ||
+                        enclosing != null && isIncludeGuardOwner(source, enclosing)
+                    ) definition else enclosing ?: definition
+                }
+            val ownerDependencies = ownedRanges.asSequence().flatMap { range ->
+                source.substring(range).lineSequence()
+                    .map(String::trimStart)
+                    .filter { line ->
+                        line.startsWith("#if ") || line.startsWith("#if\t") ||
+                            line.startsWith("#ifdef") || line.startsWith("#ifndef") ||
+                            line.startsWith("#elif ") || line.startsWith("#elif\t")
+                    }
+                    .flatMap { line -> DECLARATION_IDENTIFIER.findAll(line).map(MatchResult::value) }
+            }
                 .filter { it in definitions && it !in selected && restorableSourceMacro(it) }
-                .forEach(pending::addLast)
+                .distinct()
+                .toList()
+            if (ownerDependencies.isEmpty()) break
+            ownerDependencies.forEach(pending::addLast)
         }
-        return selected.values.filterNot { commonCore.contains(it.exactText) }
-            .sortedBy(SourceMacroDefinition::offset)
-            .mapIndexed { index, definition ->
+        val macroRanges = ownedRanges.distinct().filterNot { candidate ->
+            ownedRanges.any { owner ->
+                owner != candidate && owner.containsRange(candidate)
+            }
+        }.filterNot { commonCore.contains(source.substring(it)) }.sortedBy(IntRange::first)
+        val macroSlots = macroRanges.mapIndexed { index, range ->
                 ShaderStructuralEntitySlot(
                     ordinal = index,
                     kind = ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION,
                     canonicalEntity = null,
-                    exactText = definition.exactText,
-                    sourceLine = sourceLine(source, definition.offset),
+                    exactText = source.substring(range),
+                    sourceLine = sourceLine(source, range.first),
                     beforeAnchor = null,
                     afterAnchor = null,
                     placement = IrisAnchorPlacement.AFTER_BEFORE,
                 )
             }
+        val declaredSymbols = structuralEntities(commonCore).mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
+        val sourceBraceDepths = structuralBraceDepths(maskStructuralCode(source))
+        val constantSlots = dependencyIdentifiers.filter { it !in declaredSymbols }.mapNotNull { name ->
+            val declaration = sourceConstDefinition(name).findAll(source).singleOrNull() ?: return@mapNotNull null
+            if (sourceBraceDepths[declaration.range.first] != 0) return@mapNotNull null
+            ShaderStructuralEntitySlot(
+                ordinal = 0,
+                kind = ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION,
+                canonicalEntity = null,
+                exactText = declaration.value,
+                sourceLine = sourceLine(source, declaration.range.first),
+                beforeAnchor = null,
+                afterAnchor = null,
+                placement = IrisAnchorPlacement.AFTER_BEFORE,
+            )
+        }
+        val sourceEntities = structuralEntities(source)
+        val coreEntities = structuralEntities(commonCore)
+        val sourceFunctions = sourceEntities.filter { it.kind == StructuralEntityKind.FUNCTION }
+        val sourceFunctionsByName = sourceFunctions.groupBy { it.symbol }
+        val coreFunctionIdentities = coreEntities.filter { it.kind == StructuralEntityKind.FUNCTION }
+            .mapTo(hashSetOf(), StructuralEntity::identity)
+        val coreFunctionNames = coreEntities.filter { it.kind == StructuralEntityKind.FUNCTION }
+            .mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
+        val coreReferences = coreEntities.flatMapTo(linkedSetOf(), StructuralEntity::references)
+        val macroReferences = selected.values.flatten().flatMapTo(linkedSetOf()) { definition ->
+            DECLARATION_IDENTIFIER.findAll(definition.value).map(MatchResult::value)
+        }
+        val requiredFunctions = (dependencyIdentifiers + macroReferences + coreReferences.filter { it !in coreFunctionNames })
+            .filterTo(linkedSetOf()) { it in sourceFunctionsByName }
+        val selectedFunctions = linkedMapOf<String, StructuralEntity>()
+        val pendingFunctions = ArrayDeque(requiredFunctions)
+        while (pendingFunctions.isNotEmpty()) {
+            val name = pendingFunctions.removeFirst()
+            sourceFunctionsByName[name].orEmpty().forEach { function ->
+                if (function.identity in coreFunctionIdentities || function.identity in selectedFunctions) return@forEach
+                selectedFunctions[function.identity] = function
+                function.references.filter { it in sourceFunctionsByName }
+                    .forEach(pendingFunctions::addLast)
+            }
+        }
+        val functionRanges = selectedFunctions.values.map(StructuralEntity::range)
+        val functionConditionalOwners = nearestConditionalOwnerRanges(source, functionRanges)
+        val functionOwnedRanges = restorationPlan.structuralOwnerRanges(source, functionRanges)
+            .zip(functionConditionalOwners).zip(functionRanges) { (owner, conditional), function ->
+                val enclosing = owner ?: conditional
+                if (
+                    conditional != null && isIncludeGuardOwner(source, conditional) ||
+                    enclosing != null && isIncludeGuardOwner(source, enclosing)
+                ) function else enclosing ?: function
+            }
+            .distinct()
+        val sourceDeclarationsByName = sourceEntities.filter { it.kind == StructuralEntityKind.DECLARATION }
+            .groupBy { it.symbol }
+        val coreDeclarationIdentities = coreEntities.filter { it.kind == StructuralEntityKind.DECLARATION }
+            .mapTo(hashSetOf(), StructuralEntity::identity)
+        val coreDeclarationNames = coreEntities.filter { it.kind == StructuralEntityKind.DECLARATION }
+            .mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
+        val selectedDeclarations = linkedMapOf<String, StructuralEntity>()
+        val pendingDeclarations = ArrayDeque(
+            (
+                dependencyIdentifiers + macroReferences +
+                    selectedFunctions.values.flatMapTo(linkedSetOf(), StructuralEntity::references) +
+                    coreReferences.filter { it !in coreDeclarationNames }
+                )
+                .filter { it in sourceDeclarationsByName },
+        )
+        while (pendingDeclarations.isNotEmpty()) {
+            val name = pendingDeclarations.removeFirst()
+            sourceDeclarationsByName[name].orEmpty().forEach { declaration ->
+                if (
+                    declaration.identity in coreDeclarationIdentities ||
+                    declaration.identity in selectedDeclarations
+                ) {
+                    return@forEach
+                }
+                selectedDeclarations[declaration.identity] = declaration
+                declaration.references.filter { it in sourceDeclarationsByName }
+                    .forEach(pendingDeclarations::addLast)
+            }
+        }
+        val declarationRanges = selectedDeclarations.values.map(StructuralEntity::range)
+        val declarationConditionalOwners = nearestConditionalOwnerRanges(source, declarationRanges)
+        val declarationOwnedRanges = restorationPlan.structuralOwnerRanges(source, declarationRanges)
+            .zip(declarationConditionalOwners).zip(declarationRanges) { (owner, conditional), declaration ->
+                val enclosing = owner ?: conditional
+                if (
+                    conditional != null && isIncludeGuardOwner(source, conditional) ||
+                    enclosing != null && isIncludeGuardOwner(source, enclosing)
+                ) declaration else enclosing ?: declaration
+            }
+            .distinct()
+        val dependencyEntityRanges = (functionOwnedRanges + declarationOwnedRanges).distinct().filterNot { candidate ->
+            (functionOwnedRanges + declarationOwnedRanges).any { owner ->
+                owner != candidate && owner.containsRange(candidate)
+            }
+        }
+        val dependencyEntitySlots = dependencyEntityRanges.map { range ->
+            ShaderStructuralEntitySlot(
+                ordinal = 0,
+                kind = ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION,
+                canonicalEntity = null,
+                exactText = source.substring(range),
+                sourceLine = sourceLine(source, range.first),
+                beforeAnchor = null,
+                afterAnchor = null,
+                placement = IrisAnchorPlacement.AFTER_BEFORE,
+            )
+        }
+        return (macroSlots + constantSlots + dependencyEntitySlots)
+            .distinctBy(ShaderStructuralEntitySlot::exactText)
+            .sortedBy(ShaderStructuralEntitySlot::sourceLine)
+            .mapIndexed { index, slot -> slot.copy(ordinal = index) }
+    }
+
+    private fun sourceConstDefinition(name: String): Regex = Regex(
+        "(?m)^[\\t ]*const[\\t ]+[A-Za-z_][A-Za-z0-9_]*(?:[\\t ]*\\[[^\\r\\n;]*])?[\\t ]+" +
+            Regex.escape(name) + "[\\t ]*(?:\\[[^\\r\\n;]*])?[\\t ]*=[^;\\r\\n]*;[^\\r\\n]*" +
+            "(?:\\r\\n|\\n|\\r|$)",
+    )
+
+    private fun restoreMissingSourceConstants(
+        request: SpirvOptimizationRequest,
+        source: String,
+        restorationPlan: ShaderStructuralRestorationPlan,
+        irisContracts: IrisShaderContractPlan,
+    ): ShaderStructuralRestoration {
+        val declared = structuralEntities(source).mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
+        val referenced = DECLARATION_IDENTIFIER.findAll(maskStructuralSource(source))
+            .mapTo(linkedSetOf(), MatchResult::value)
+        val sourceConstants = structuralEntities(request.source).filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION && entity.symbol != null &&
+                sourceConstDefinition(requireNotNull(entity.symbol))
+                    .matches(request.source.substring(entity.range))
+        }.groupBy { requireNotNull(it.symbol) }
+        val slots = referenced.filter { it !in declared }.mapNotNull { name ->
+            val sourceName = irisContracts.sourceDynamicName(name) ?: name
+            val declaration = sourceConstants[sourceName]?.singleOrNull() ?: return@mapNotNull null
+            ShaderStructuralEntitySlot(
+                ordinal = 0,
+                kind = ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION,
+                canonicalEntity = null,
+                exactText = request.source.substring(declaration.range),
+                sourceLine = sourceLine(request.source, declaration.range.first),
+                beforeAnchor = null,
+                afterAnchor = null,
+                placement = IrisAnchorPlacement.AFTER_BEFORE,
+            )
+        }.distinctBy(ShaderStructuralEntitySlot::exactText)
+        if (slots.isEmpty()) return ShaderStructuralRestoration.Restored(source)
+        val anchored = reanchorRestorationSlots(request, slots)
+            ?: return ShaderStructuralRestoration.Preserved(
+                "${request.sourceName}: missing source constants have no stable restoration anchor",
+            )
+        return restorationPlan.copy(
+            islands = anchored.map { slot ->
+                slot.copy(exactText = renderRestoredSourceConstant(slot.exactText, irisContracts))
+            },
+            restorationContracts = emptyList(),
+            issue = null,
+        ).restore(source)
+    }
+
+    private fun restoreMissingSourceAbiDeclarations(
+        request: SpirvOptimizationRequest,
+        source: String,
+        restorationPlan: ShaderStructuralRestorationPlan,
+    ): ShaderStructuralRestoration {
+        val emittedDeclarations = structuralEntities(source)
+            .filter { entity -> entity.kind == StructuralEntityKind.DECLARATION }
+            .mapTo(hashSetOf(), StructuralEntity::identity)
+        val sourceDeclarations = structuralEntities(request.source).filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION &&
+                ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical)
+        }
+        val missing = sourceDeclarations.filter { declaration -> declaration.identity !in emittedDeclarations }
+        if (missing.isEmpty()) return ShaderStructuralRestoration.Restored(source)
+
+        val declarationRanges = missing.map(StructuralEntity::range)
+        val resolvedOwners = abiRestorationOwners(request.source, declarationRanges)
+        val ownedRanges = resolvedOwners.distinct().filterNot { candidate ->
+            resolvedOwners.any { owner ->
+                owner != candidate && owner.containsRange(candidate)
+            }
+        }
+        val slots = ownedRanges.filterNot { range -> source.contains(request.source.substring(range)) }
+            .map { range ->
+                ShaderStructuralEntitySlot(
+                    ordinal = 0,
+                    kind = ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION,
+                    canonicalEntity = null,
+                    exactText = request.source.substring(range),
+                    sourceLine = sourceLine(request.source, range.first),
+                    beforeAnchor = null,
+                    afterAnchor = null,
+                    placement = IrisAnchorPlacement.AFTER_BEFORE,
+                )
+            }
+        if (slots.isEmpty()) return ShaderStructuralRestoration.Restored(source)
+        val anchored = reanchorRestorationSlots(request, slots)
+            ?: return ShaderStructuralRestoration.Preserved(
+                "${request.sourceName}: missing source ABI declarations have no stable restoration anchor",
+            )
+        return restorationPlan.copy(
+            islands = anchored,
+            restorationContracts = emptyList(),
+            issue = null,
+        ).restore(source)
+    }
+
+    internal fun restoreSymbolicSourceAbiDeclarations(
+        originalSource: String,
+        source: String,
+    ): String {
+        val sourceDeclarations = structuralEntities(originalSource).filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION &&
+                ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical) &&
+                SYMBOLIC_ARRAY_EXTENT.containsMatchIn(originalSource.substring(entity.range))
+        }
+        if (sourceDeclarations.isEmpty()) return source
+        val sourceOwners = nearestConditionalOwnerRanges(
+            originalSource,
+            sourceDeclarations.map(StructuralEntity::range),
+        )
+        val uniqueSource = sourceDeclarations.indices.mapNotNull { index ->
+            val declaration = sourceDeclarations[index]
+            val owner = sourceOwners[index]
+            if (owner != null && !isIncludeGuardOwner(originalSource, owner)) return@mapNotNull null
+            declaration
+        }.groupBy(StructuralEntity::identity).mapNotNull { (_, declarations) ->
+            declarations.singleOrNull()
+        }
+        var result = source
+        uniqueSource.forEach { sourceDeclaration ->
+            val outputDeclarations = structuralEntities(result).filter { entity ->
+                entity.kind == StructuralEntityKind.DECLARATION && entity.identity == sourceDeclaration.identity
+            }
+            if (outputDeclarations.isEmpty()) return@forEach
+            val outputOwners = nearestConditionalOwnerRanges(
+                result,
+                outputDeclarations.map(StructuralEntity::range),
+            )
+            val firstIndex = outputDeclarations.indices.minBy { outputDeclarations[it].range.first }
+            val first = outputDeclarations[firstIndex]
+            val owner = outputOwners[firstIndex]
+            val insertionOffset = if (owner != null && !isIncludeGuardOwner(result, owner)) {
+                owner.first
+            } else {
+                first.range.first
+            }
+            val ranges = outputDeclarations.map(StructuralEntity::range)
+            val adjustedOffset = insertionOffset - ranges.filter { it.last < insertionOffset }.sumOf(IntRange::count)
+            val stripped = removeRanges(result, ranges)
+            val declared = structuralEntities(stripped).mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
+            val pending = ArrayDeque(sourceDeclaration.references.filter { it !in declared })
+            val constants = linkedMapOf<String, MatchResult>()
+            while (pending.isNotEmpty()) {
+                val name = pending.removeFirst()
+                if (name in constants) continue
+                val declaration = sourceConstDefinition(name).findAll(originalSource).toList().singleOrNull() ?: continue
+                constants[name] = declaration
+                structuralReferences(declaration.value, name).filter { it !in declared }.forEach(pending::addLast)
+            }
+            val exact = buildString {
+                constants.values.sortedBy { it.range.first }.forEach { declaration ->
+                    append(declaration.value.trimEnd())
+                    append('\n')
+                }
+                append(originalSource.substring(sourceDeclaration.range).trimEnd())
+                append('\n')
+            }
+            result = stripped.substring(0, adjustedOffset) + exact + stripped.substring(adjustedOffset)
+        }
+        return result
+    }
+
+    private fun renderRestoredSourceConstant(
+        declaration: String,
+        irisContracts: IrisShaderContractPlan,
+    ): String {
+        val replaced = irisContracts.replaceHostReferences(declaration)
+        if (replaced == declaration) return declaration
+        val assignment = replaced.indexOf('=')
+        val terminator = replaced.indexOf(';', assignment + 1)
+        if (assignment < 0 || terminator < 0) return replaced
+        val name = DECLARATION_IDENTIFIER.findAll(replaced.substring(0, assignment)).lastOrNull()?.value
+            ?: return replaced
+        val indent = replaced.takeWhile { it == ' ' || it == '\t' }
+        val expression = replaced.substring(assignment + 1, terminator).trim()
+        return "$indent#define $name ($expression)${replaced.substring(terminator + 1)}"
+    }
+
+    private fun restoreMissingSourceFunctions(
+        request: SpirvOptimizationRequest,
+        source: String,
+        restorationPlan: ShaderStructuralRestorationPlan,
+        irisContracts: IrisShaderContractPlan,
+    ): ShaderStructuralRestoration {
+        val reachableIdentifiers = reachableCodeAndMacroIdentifiers(source)
+        val sourceFunctions = (structuralEntities(request.source).filter { entity ->
+            entity.kind == StructuralEntityKind.FUNCTION && entity.symbol != null
+        } + scanSourceFunctions(request.source) + scanNamedSourceFunctions(request.source))
+            .distinctBy(StructuralEntity::identity)
+            .groupBy { requireNotNull(it.symbol) }
+        val outputNames = (scanSourceFunctions(source) + scanNamedSourceFunctions(source))
+            .mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
+        val pending = ArrayDeque(
+            reachableIdentifiers.asSequence()
+                .filter { it !in outputNames && it in sourceFunctions }
+                .toCollection(linkedSetOf()),
+        )
+        val selected = linkedMapOf<String, StructuralEntity>()
+        while (pending.isNotEmpty()) {
+            val name = pending.removeFirst()
+            sourceFunctions[name].orEmpty().forEach { function ->
+                if (function.identity in selected) return@forEach
+                selected[function.identity] = function
+                function.references.filter { it !in outputNames && it in sourceFunctions }
+                    .forEach(pending::addLast)
+            }
+        }
+        if (selected.isEmpty()) return ShaderStructuralRestoration.Restored(source)
+        val functions = selected.values.toList()
+        val conditionalOwners = nearestConditionalOwnerRanges(
+            request.source,
+            functions.map(StructuralEntity::range),
+        )
+        val ranges = functions.indices.map { index -> conditionalOwners[index] ?: functions[index].range }
+            .distinct()
+            .filterNot { candidate ->
+                rangesContainmentOwner(candidate, functions.indices.map { index ->
+                    conditionalOwners[index] ?: functions[index].range
+                })
+            }
+            .sortedBy(IntRange::first)
+        val slots = ranges.mapIndexed { index, range ->
+            ShaderStructuralEntitySlot(
+                ordinal = index,
+                kind = ShaderStructuralEntitySlotKind.FUNCTION,
+                canonicalEntity = null,
+                exactText = request.source.substring(range),
+                sourceLine = sourceLine(request.source, range.first),
+                beforeAnchor = null,
+                afterAnchor = null,
+                placement = IrisAnchorPlacement.AFTER_BEFORE,
+            )
+        }
+        val anchored = reanchorRestorationSlots(request, slots)
+            ?: return ShaderStructuralRestoration.Preserved(
+                "${request.sourceName}: missing source functions have no stable restoration anchor",
+            )
+        return restorationPlan.copy(
+            islands = anchored.map { slot ->
+                slot.copy(exactText = irisContracts.replaceHostReferences(slot.exactText))
+            },
+            restorationContracts = emptyList(),
+            issue = null,
+        ).restore(source)
+    }
+
+    private fun reachableCodeAndMacroIdentifiers(source: String): Set<String> {
+        val result = DECLARATION_IDENTIFIER.findAll(maskStructuralCode(source)).map(MatchResult::value)
+            .toCollection(linkedSetOf())
+        val macros = sourceMacroDefinitions(source)
+        val pending = ArrayDeque(result.filter(macros::containsKey))
+        val visited = hashSetOf<String>()
+        while (pending.isNotEmpty()) {
+            val name = pending.removeFirst()
+            if (!visited.add(name)) continue
+            macros[name].orEmpty().forEach { definition ->
+                DECLARATION_IDENTIFIER.findAll(definition.value).map(MatchResult::value).forEach { identifier ->
+                    result += identifier
+                    if (identifier in macros) pending += identifier
+                }
+            }
+        }
+        return result
+    }
+
+    private fun scanSourceFunctions(source: String): List<StructuralEntity> {
+        return scanTopLevelGlslBlocks(source, maskStructuralCode(source))
+            .filter { it.kind == TopLevelGlslBlockKind.FUNCTION }
+            .mapNotNull { block ->
+                val start = firstNonWhitespace(source, block.fullRange.first, block.prefixRange.last + 1)
+                val range = start..block.fullRange.last
+                val header = normalizeStructuralEntity(source.substring(start, block.prefixRange.last + 1))
+                val function = structuralFunctionIdentity(header) ?: return@mapNotNull null
+                val exact = source.substring(range)
+                StructuralEntity(
+                    range = range,
+                    canonical = header,
+                    identity = function.first,
+                    symbol = function.second,
+                    references = structuralReferences(exact, function.second),
+                    semantic = normalizeStructuralEntity(exact),
+                    kind = StructuralEntityKind.FUNCTION,
+                )
+            }
+    }
+
+    private fun scanNamedSourceFunctions(source: String): List<StructuralEntity> {
+        val masked = maskStructuralCode(source)
+        val braceDepths = structuralBraceDepths(masked)
+        val headerStart = Regex(
+            "(?m)^[\\t ]*(?:[A-Za-z_][A-Za-z0-9_]*[\\t ]+)+([A-Za-z_][A-Za-z0-9_]*)[\\t ]*\\(",
+        )
+        return headerStart.findAll(masked).mapNotNull { match ->
+            if (braceDepths[match.range.first] != 0) return@mapNotNull null
+            val open = masked.indexOf('{', match.range.last + 1)
+            if (open < 0) return@mapNotNull null
+            val semicolon = masked.indexOf(';', match.range.last + 1)
+            if (semicolon in 0 until open) return@mapNotNull null
+            var depth = 0
+            var close = -1
+            for (offset in open until masked.length) {
+                when (masked[offset]) {
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) {
+                            close = offset
+                            break
+                        }
+                    }
+                }
+            }
+            if (close < 0) return@mapNotNull null
+            val range = match.range.first..close
+            val header = normalizeStructuralEntity(source.substring(match.range.first, open))
+            val function = structuralFunctionIdentity(header) ?: return@mapNotNull null
+            val exact = source.substring(range)
+            StructuralEntity(
+                range = range,
+                canonical = header,
+                identity = function.first,
+                symbol = function.second,
+                references = structuralReferences(exact, function.second),
+                semantic = normalizeStructuralEntity(exact),
+                kind = StructuralEntityKind.FUNCTION,
+            )
+        }.toList()
+    }
+
+    internal fun restoreSourceFunctionConditionalOwners(originalSource: String, source: String): String {
+        val originalFunctions = (scanSourceFunctions(originalSource) + scanNamedSourceFunctions(originalSource))
+            .distinctBy(StructuralEntity::identity)
+        val originalOwners = nearestConditionalOwnerRanges(
+            originalSource,
+            originalFunctions.map(StructuralEntity::range),
+        )
+        val owned = originalFunctions.indices.mapNotNull { index ->
+            if (originalFunctions[index].symbol == "main") return@mapNotNull null
+            val owner = originalOwners[index] ?: return@mapNotNull null
+            val opening = simpleConditionalOpening(originalSource.substring(owner)) ?: return@mapNotNull null
+            if ("SETTING_" in opening || "SM_SETTING_" in opening) return@mapNotNull null
+            originalFunctions[index].identity to opening
+        }.toMap()
+        if (owned.isEmpty()) return source
+        val outputFunctions = (scanSourceFunctions(source) + scanNamedSourceFunctions(source))
+            .distinctBy(StructuralEntity::identity)
+        val outputOwners = nearestConditionalOwnerRanges(source, outputFunctions.map(StructuralEntity::range))
+        val replacements = outputFunctions.indices.mapNotNull { index ->
+            val function = outputFunctions[index]
+            val opening = owned[function.identity] ?: return@mapNotNull null
+            val currentOpening = outputOwners[index]?.let { simpleConditionalOpening(source.substring(it)) }
+            if (currentOpening == opening) return@mapNotNull null
+            val exact = source.substring(function.range).trimEnd()
+            function.range to "$opening\n$exact\n#endif"
+        }
+        return replacements.sortedByDescending { it.first.first }.fold(source) { result, (range, replacement) ->
+            result.replaceRange(range, replacement)
+        }
+    }
+
+    private fun relocateUnconditionalAbiFromFunctionOwners(
+        request: SpirvOptimizationRequest,
+        source: String,
+    ): String {
+        val sourceDeclarations = structuralEntities(request.source).filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION &&
+                ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical)
+        }
+        val sourceOwners = nearestConditionalOwnerRanges(
+            request.source,
+            sourceDeclarations.map(StructuralEntity::range),
+        )
+        val unconditionalIdentities = sourceDeclarations.indices.mapNotNullTo(hashSetOf()) { index ->
+            val owner = sourceOwners[index]
+            sourceDeclarations[index].identity.takeIf {
+                owner == null || isIncludeGuardOwner(request.source, owner)
+            }
+        }
+        if (unconditionalIdentities.isEmpty()) return source
+        val declarations = structuralEntities(source).filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION &&
+                entity.identity in unconditionalIdentities &&
+                ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical)
+        }
+        val owners = nearestConditionalOwnerRanges(source, declarations.map(StructuralEntity::range))
+        val relocations = declarations.indices.mapNotNull { index ->
+            val owner = owners[index] ?: return@mapNotNull null
+            if (isIncludeGuardOwner(source, owner)) return@mapNotNull null
+            if (structuralEntities(source.substring(owner)).none { it.kind == StructuralEntityKind.FUNCTION }) {
+                return@mapNotNull null
+            }
+            owner to declarations[index]
+        }.groupBy({ it.first }, { it.second })
+        if (relocations.isEmpty()) return source
+        var result = source
+        relocations.entries.sortedByDescending { it.key.first }.forEach { (owner, ownedDeclarations) ->
+            val insertion = ownedDeclarations.sortedBy { it.range.first }
+                .joinToString("\n", postfix = "\n") { result.substring(it.range).trim() }
+            result = removeRanges(result, ownedDeclarations.map(StructuralEntity::range).distinct())
+            result = result.substring(0, owner.first) + insertion + result.substring(owner.first)
+        }
+        return result
+    }
+
+    private fun simpleConditionalOpening(ownerSource: String): String? {
+        var depth = 0
+        var opening: String? = null
+        ownerSource.lineSequence().forEach { line ->
+            val directive = line.trimStart().substringBefore("//").trim()
+            when {
+                directive.startsWith("#if ") || directive.startsWith("#if\t") ||
+                    directive.startsWith("#ifdef") || directive.startsWith("#ifndef") -> {
+                    if (depth == 0) opening = directive
+                    depth++
+                }
+                directive.startsWith("#elif ") || directive.startsWith("#elif\t") ||
+                    directive.startsWith("#else") -> if (depth == 1) return null
+                directive.startsWith("#endif") -> depth--
+            }
+        }
+        return opening?.takeIf { depth == 0 }
+    }
+
+    private fun rangesContainmentOwner(candidate: IntRange, ranges: List<IntRange>): Boolean {
+        return ranges.any { owner -> owner != candidate && owner.containsRange(candidate) }
+    }
+
+    private fun restoreMissingSourceMacros(
+        request: SpirvOptimizationRequest,
+        source: String,
+        restorationPlan: ShaderStructuralRestorationPlan,
+    ): ShaderStructuralRestoration {
+        val outputMacros = sourceMacroDefinitions(source).keys
+        val sourceMacros = sourceMacroDefinitions(request.source)
+        val pending = ArrayDeque(
+            DECLARATION_IDENTIFIER.findAll(maskStructuralSource(source)).map(MatchResult::value)
+                .filter { it !in outputMacros && it in sourceMacros && restorableSourceMacro(it) }
+                .toCollection(linkedSetOf()),
+        )
+        val selected = linkedSetOf<SourceMacroDefinition>()
+        while (pending.isNotEmpty()) {
+            val name = pending.removeFirst()
+            sourceMacros[name].orEmpty().forEach { definition ->
+                if (!selected.add(definition)) return@forEach
+                DECLARATION_IDENTIFIER.findAll(definition.value).map(MatchResult::value)
+                    .filter { it !in outputMacros && it in sourceMacros && restorableSourceMacro(it) }
+                    .forEach(pending::addLast)
+            }
+        }
+        if (selected.isEmpty()) return ShaderStructuralRestoration.Restored(source)
+        val definitions = selected.sortedBy(SourceMacroDefinition::offset)
+        val definitionRanges = definitions.map { definition ->
+            definition.offset until definition.offset + definition.exactText.length
+        }
+        val conditionalOwners = nearestConditionalOwnerRanges(request.source, definitionRanges)
+        val allRanges = definitions.indices.map { index -> conditionalOwners[index] ?: definitionRanges[index] }
+            .distinct()
+        val ranges = allRanges.filterNot { candidate -> rangesContainmentOwner(candidate, allRanges) }
+            .sortedBy(IntRange::first)
+        val slots = ranges.mapIndexed { index, range ->
+            ShaderStructuralEntitySlot(
+                ordinal = index,
+                kind = ShaderStructuralEntitySlotKind.TOP_LEVEL_REGION,
+                canonicalEntity = null,
+                exactText = request.source.substring(range),
+                sourceLine = sourceLine(request.source, range.first),
+                beforeAnchor = null,
+                afterAnchor = null,
+                placement = IrisAnchorPlacement.AFTER_BEFORE,
+            )
+        }
+        val anchored = reanchorRestorationSlots(request, slots)
+            ?: return ShaderStructuralRestoration.Preserved(
+                "${request.sourceName}: missing source macros have no stable restoration anchor",
+            )
+        return restorationPlan.copy(
+            islands = anchored,
+            restorationContracts = emptyList(),
+            issue = null,
+        ).restore(source)
+    }
+
+    private fun ensureForwardFunctionDeclarations(source: String): String {
+        val entities = structuralEntities(source)
+        val functions = entities.filter { it.kind == StructuralEntityKind.FUNCTION }
+        if (functions.isEmpty()) return source
+        val functionsByName = functions.groupBy { it.symbol }
+        val defined = hashSetOf<String>()
+        val forwardNames = linkedSetOf<String>()
+        var insertionOffset = source.length
+        entities.forEach { entity ->
+            entity.references.forEach { reference ->
+                if (reference !in defined && reference != entity.symbol && reference in functionsByName) {
+                    forwardNames += reference
+                    insertionOffset = minOf(insertionOffset, entity.range.first)
+                }
+            }
+            if (entity.kind == StructuralEntityKind.FUNCTION) entity.symbol?.let(defined::add)
+        }
+        if (forwardNames.isEmpty()) return source
+        val preprocessorDepth = preprocessorDepths(source)
+        val prototypes = forwardNames.flatMap { name ->
+            functionsByName[name].orEmpty().filter { function ->
+                preprocessorDepth[function.range.first] == 0
+            }
+        }.map { function -> function.canonical.trimEnd() + ";" }.distinct()
+        if (prototypes.isEmpty()) return source
+        val insertion = prototypes.joinToString(separator = "\n", postfix = "\n")
+        return source.substring(0, insertionOffset) + insertion + source.substring(insertionOffset)
+    }
+
+    private fun hoistLateDeclarationDependencies(source: String): String {
+        val entities = structuralEntities(source)
+        val depths = preprocessorDepths(source)
+        val declarations = entities.filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION && entity.symbol != null &&
+                depths[entity.range.first] == 0
+        }
+        val declarationsByName = declarations.flatMap { declaration ->
+            declaration.declaredSymbols().map { symbol -> symbol to declaration }
+        }.groupBy({ it.first }, { it.second })
+        val selected = linkedSetOf<StructuralEntity>()
+        var insertionOffset = source.length
+        val pending = ArrayDeque<StructuralEntity>()
+        val namedFunctions = scanNamedSourceFunctions(source)
+        val firstFunction = (entities.filter { it.kind == StructuralEntityKind.FUNCTION } + namedFunctions)
+            .minByOrNull { it.range.first }
+        if (firstFunction != null) {
+            val firstIdentifierOffsets = DECLARATION_IDENTIFIER.findAll(maskStructuralCode(source))
+                .groupingBy(MatchResult::value)
+                .fold(Int.MAX_VALUE) { offset, match -> minOf(offset, match.range.first) }
+            declarations.filter { declaration ->
+                declaration.range.first > firstFunction.range.first &&
+                    (
+                        ABI_PROLOGUE_DECLARATION.containsMatchIn(declaration.canonical) ||
+                            requireNotNull(declaration.symbol).let { symbol ->
+                                firstIdentifierOffsets.getOrDefault(symbol, declaration.range.first) <
+                                    declaration.range.first
+                            }
+                    )
+            }.forEach { declaration ->
+                insertionOffset = minOf(insertionOffset, firstFunction.range.first)
+                pending += declaration
+            }
+        }
+        (entities + namedFunctions).distinctBy(StructuralEntity::range).forEach { consumer ->
+            consumer.references.forEach { reference ->
+                val dependency = declarationsByName[reference]?.singleOrNull() ?: return@forEach
+                if (dependency.range.first > consumer.range.first && dependency.isMovableDeclarationDependency()) {
+                    insertionOffset = minOf(insertionOffset, consumer.range.first)
+                    pending += dependency
+                }
+            }
+        }
+        while (pending.isNotEmpty()) {
+            val dependency = pending.removeFirst()
+            if (!selected.add(dependency)) continue
+            dependency.references.forEach { reference ->
+                declarationsByName[reference].orEmpty().filter { candidate ->
+                    candidate.range.first > insertionOffset && candidate.isMovableDeclarationDependency()
+                }.forEach(pending::addLast)
+            }
+        }
+        if (selected.isEmpty()) return source
+        val ordered = selected.sortedBy { it.range.first }
+        val declarationsText = ordered.joinToString(separator = "\n", postfix = "\n") { entity ->
+            source.substring(entity.range)
+        }
+        val ranges = ordered.map(StructuralEntity::range)
+        val adjustedInsertionOffset = insertionOffset - ranges.filter { it.first < insertionOffset }.sumOf(IntRange::count)
+        val stripped = removeRanges(source, ranges)
+        return stripped.substring(0, adjustedInsertionOffset) + declarationsText +
+            stripped.substring(adjustedInsertionOffset)
+    }
+
+    private fun StructuralEntity.isMovableDeclarationDependency(): Boolean {
+        val declaration = canonical.trimStart()
+        return '=' !in declaration || declaration.startsWith("struct ") ||
+            ABI_PROLOGUE_DECLARATION.containsMatchIn(declaration)
+    }
+
+    private fun StructuralEntity.declaredSymbols(): Set<String> {
+        val symbols = linkedSetOf<String>()
+        symbol?.let(symbols::add)
+        val open = canonical.indexOf('{')
+        val close = canonical.lastIndexOf('}')
+        if (open < 0 || close <= open) return symbols
+        canonical.substring(open + 1, close).split(';').forEach { member ->
+            val head = member.substringBefore('=').trim()
+            if (head.isEmpty()) return@forEach
+            head.split(',').forEach { declarator ->
+                DECLARATION_IDENTIFIER.findAll(declarator.substringBefore('['))
+                    .lastOrNull()?.value?.let(symbols::add)
+            }
+        }
+        return symbols
+    }
+
+    private fun hoistLateReferencedConstants(source: String): String {
+        val entities = structuralEntities(source)
+        val firstFunction = entities.firstOrNull { it.kind == StructuralEntityKind.FUNCTION } ?: return source
+        val depths = preprocessorDepths(source)
+        val constantsByName = entities.filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION && entity.symbol != null &&
+                entity.range.first > firstFunction.range.first && depths[entity.range.first] == 0 &&
+                entity.canonical.startsWith("const ")
+        }.associateBy { requireNotNull(it.symbol) }
+        val pending = ArrayDeque(
+            entities.filter { it.range.first < constantsByName.values.maxOfOrNull { value -> value.range.first } ?: 0 }
+                .flatMapTo(linkedSetOf(), StructuralEntity::references)
+                .filter(constantsByName::containsKey),
+        )
+        val selected = linkedSetOf<StructuralEntity>()
+        while (pending.isNotEmpty()) {
+            val constant = constantsByName[pending.removeFirst()] ?: continue
+            if (!selected.add(constant)) continue
+            constant.references.filter(constantsByName::containsKey).forEach(pending::addLast)
+        }
+        if (selected.isEmpty()) return source
+        val ordered = selected.sortedBy { it.range.first }
+        val selectedSymbols = ordered.mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
+        val insertionOffset = entities.filterNot(selected::contains)
+            .filter { entity -> entity.references.any(selectedSymbols::contains) }
+            .minOfOrNull { it.range.first }
+            ?: return source
+        val declarations = ordered.joinToString(separator = "\n") { source.substring(it.range) } + "\n"
+        val ranges = ordered.map(StructuralEntity::range)
+        val adjustedInsertionOffset = insertionOffset - ranges.filter { it.first < insertionOffset }.sumOf(IntRange::count)
+        val stripped = removeRanges(source, ranges)
+        return stripped.substring(0, adjustedInsertionOffset) + declarations + stripped.substring(adjustedInsertionOffset)
+    }
+
+    private fun restoreContractHelperFunctions(request: SpirvOptimizationRequest, source: String): String {
+        val referenced = reachableCodeAndMacroIdentifiers(source).asSequence()
+            .filter { name -> CONTRACT_HELPER_PREFIXES.any(name::startsWith) }
+            .toCollection(linkedSetOf())
+        if (referenced.isEmpty()) return source
+        val outputFunctions = scanNamedSourceFunctions(source).groupBy(StructuralEntity::symbol)
+        val sourceFunctions = scanNamedSourceFunctions(request.source).groupBy(StructuralEntity::symbol)
+        val missing = referenced.filter { name -> outputFunctions[name].isNullOrEmpty() }
+        val functions = missing.flatMap { name -> sourceFunctions[name].orEmpty() }
+            .distinctBy(StructuralEntity::identity)
+            .sortedBy { it.range.first }
+        if (functions.isEmpty()) return source
+        val insertionOffset = structuralEntities(source).minOfOrNull { it.range.first } ?: return source
+        val insertion = functions.joinToString(separator = "\n", postfix = "\n") { function ->
+            request.source.substring(function.range)
+        }
+        return source.substring(0, insertionOffset) + insertion + source.substring(insertionOffset)
+    }
+
+    private fun splitLateBranchOwnedDeclarations(source: String): String {
+        val begin = source.indexOf(BRANCH_OWNED_MAIN_BEGIN)
+        val end = source.indexOf(BRANCH_OWNED_MAIN_END, begin.coerceAtLeast(0))
+        if (begin < 0 || end < 0) return source
+        val range = source.lineRangeAt(begin).first..source.lineRangeAt(end).last
+        val lines = source.substring(range).lineSequence().toList()
+        data class Branch(val header: String, val content: String)
+        val branches = mutableListOf<Branch>()
+        var header: String? = null
+        val content = mutableListOf<String>()
+        var depth = 0
+        lines.drop(1).dropLast(1).forEach { line ->
+            val directive = line.trimStart()
+            when {
+                directive.startsWith("#if ") || directive.startsWith("#if\t") ||
+                    directive.startsWith("#ifdef") || directive.startsWith("#ifndef") -> {
+                    if (depth == 0) {
+                        header = line
+                    } else {
+                        content += line
+                    }
+                    depth++
+                }
+                (directive.startsWith("#elif ") || directive.startsWith("#elif\t") ||
+                    directive == "#else") && depth == 1 -> {
+                    header?.let { branches += Branch(it, content.joinToString("\n")) }
+                    header = line
+                    content.clear()
+                }
+                directive.startsWith("#endif") -> {
+                    depth--
+                    if (depth == 0) {
+                        header?.let { branches += Branch(it, content.joinToString("\n")) }
+                        header = null
+                        content.clear()
+                    } else {
+                        content += line
+                    }
+                }
+                else -> content += line
+            }
+        }
+        if (branches.isEmpty()) return source
+        data class SplitBranch(val branch: Branch, val prologue: String, val entry: String)
+        val split = branches.map { branch ->
+            val main = BRANCH_MAIN_HEADER.find(branch.content) ?: return source
+            SplitBranch(
+                branch,
+                branch.content.substring(0, main.range.first).trim(),
+                branch.content.substring(main.range.first).trim(),
+            )
+        }
+        if (split.all { it.prologue.isEmpty() }) return source
+        fun render(selectDeclarations: Boolean): String = buildString {
+            split.forEach { splitBranch ->
+                val branch = splitBranch.branch
+                appendLine(branch.header)
+                val text = if (selectDeclarations) splitBranch.prologue else splitBranch.entry
+                if (text.isNotBlank()) appendLine(text)
+            }
+            append("#endif")
+        }
+        val mainBlock = buildString {
+            appendLine(BRANCH_OWNED_MAIN_BEGIN)
+            appendLine(render(false))
+            append(BRANCH_OWNED_MAIN_END)
+        }
+        var result = source.substring(0, range.first) + mainBlock + source.substring(range.last + 1)
+        val prologueEnd = result.indexOf(BRANCH_OWNED_PROLOGUE_END)
+        val declarations = render(true)
+        result = if (prologueEnd >= 0) {
+            result.substring(0, prologueEnd) + declarations + "\n" + result.substring(prologueEnd)
+        } else {
+            result.substring(0, range.first) + BRANCH_OWNED_PROLOGUE_BEGIN + "\n" + declarations + "\n" +
+                BRANCH_OWNED_PROLOGUE_END + "\n" + result.substring(range.first)
+        }
+        return result
+    }
+
+    private fun relocateBranchOwnedPrologue(source: String): String {
+        val begin = source.indexOf(BRANCH_OWNED_PROLOGUE_BEGIN)
+        val end = source.indexOf(BRANCH_OWNED_PROLOGUE_END, begin.coerceAtLeast(0))
+        if (begin < 0 || end < 0) return source
+        val range = source.lineRangeAt(begin).first..source.lineRangeAt(end).last
+        val entry = source.substring(range).trim()
+        val stripped = source.removeRange(range.first, range.last + 1)
+        val firstFunction = (structuralEntities(stripped).filter { it.kind == StructuralEntityKind.FUNCTION } +
+            scanNamedSourceFunctions(stripped)).minByOrNull { it.range.first }
+            ?: return stripped.trimEnd() + "\n\n$entry\n"
+        val owner = nearestConditionalOwnerRanges(stripped, listOf(firstFunction.range)).single()
+        val insertionOffset = owner?.takeUnless { isIncludeGuardOwner(stripped, it) }?.first
+            ?: firstFunction.range.first
+        return stripped.substring(0, insertionOffset) + entry + "\n\n" + stripped.substring(insertionOffset)
+    }
+
+    private fun relocateSourceAbiDeclarations(
+        request: SpirvOptimizationRequest,
+        source: String,
+    ): String {
+        val prologueBegin = source.indexOf(BRANCH_OWNED_PROLOGUE_BEGIN)
+        val prologueEnd = source.indexOf(BRANCH_OWNED_PROLOGUE_END, prologueBegin.coerceAtLeast(0))
+        if (prologueBegin < 0 || prologueEnd < 0) return source
+        val sourceDeclarations = structuralEntities(request.source).filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION &&
+                ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical)
+        }
+        val declarationRanges = sourceDeclarations.map(StructuralEntity::range)
+        val resolvedOwners = abiRestorationOwners(request.source, declarationRanges)
+        val ownerRanges = resolvedOwners.distinct().filterNot { candidate ->
+            resolvedOwners.any { owner ->
+                owner != candidate && owner.containsRange(candidate)
+            }
+        }
+        val relocations = ownerRanges.flatMap { sourceRange ->
+            val exact = request.source.substring(sourceRange)
+            occurrences(source, exact).filter { occurrence ->
+                occurrence.first > prologueBegin && occurrence.last < prologueEnd
+            }.map { occurrence -> sourceRange to occurrence }
+        }.sortedBy { it.first.first }
+        var result = source
+        if (relocations.isNotEmpty()) {
+            val outputRanges = relocations.map { it.second }.distinct().filterNot { candidate ->
+                relocations.any { (_, owner) -> owner != candidate && owner.containsRange(candidate) }
+            }
+            val declarations = relocations.filter { (_, outputRange) -> outputRange in outputRanges }
+                .joinToString("\n") { (sourceRange) -> request.source.substring(sourceRange).trim() }
+            val stripped = removeRanges(result, outputRanges)
+            val insertionOffset = stripped.indexOf(BRANCH_OWNED_PROLOGUE_BEGIN)
+            result = stripped.substring(0, insertionOffset) + declarations + "\n" +
+                stripped.substring(insertionOffset)
+        }
+
+        val remainingBegin = result.indexOf(BRANCH_OWNED_PROLOGUE_BEGIN)
+        val remainingEnd = result.indexOf(BRANCH_OWNED_PROLOGUE_END, remainingBegin.coerceAtLeast(0))
+        if (remainingBegin < 0 || remainingEnd < 0) return result
+        val conditionalOwners = nearestConditionalOwnerRanges(request.source, declarationRanges)
+        data class DeclarationRelocation(
+            val sourceRange: IntRange,
+            val outputRanges: List<IntRange>,
+            val insertion: String?,
+        )
+        val declarationRelocations = declarationRanges.indices.mapNotNull { index ->
+            val sourceRange = declarationRanges[index]
+            val exact = request.source.substring(sourceRange)
+            val found = occurrences(result, exact)
+            val inside = found.filter { occurrence ->
+                occurrence.first > remainingBegin && occurrence.last < remainingEnd
+            }
+            if (inside.isEmpty()) return@mapNotNull null
+            val hasOutside = found.any { occurrence -> occurrence !in inside }
+            val insertion = if (hasOutside) {
+                null
+            } else {
+                renderRelocatedAbiDeclaration(request.source, sourceRange, conditionalOwners[index])
+                    ?: return@mapNotNull null
+            }
+            DeclarationRelocation(sourceRange, inside, insertion)
+        }
+        val individualRanges = declarationRelocations.flatMap(DeclarationRelocation::outputRanges).distinct()
+        val individualInsertions = declarationRelocations.filter { it.insertion != null }
+            .distinctBy(DeclarationRelocation::sourceRange)
+            .sortedBy { it.sourceRange.first }
+            .joinToString("\n") { requireNotNull(it.insertion) }
+        var stripped = removeRanges(result, individualRanges)
+        var insertionOffset = stripped.indexOf(BRANCH_OWNED_PROLOGUE_BEGIN)
+        result = stripped.substring(0, insertionOffset) +
+            individualInsertions.takeIf(String::isNotEmpty)?.plus("\n").orEmpty() +
+            stripped.substring(insertionOffset)
+
+        val identityBegin = result.indexOf(BRANCH_OWNED_PROLOGUE_BEGIN)
+        val identityEnd = result.indexOf(BRANCH_OWNED_PROLOGUE_END, identityBegin.coerceAtLeast(0))
+        if (identityBegin < 0 || identityEnd < 0) return result
+        val sourceByIdentity = sourceDeclarations.groupBy(StructuralEntity::identity)
+        val sourceRangeIndexes = declarationRanges.withIndex().associate { it.value to it.index }
+        val outputDeclarations = structuralEntities(result).filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION &&
+                ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical)
+        }
+        val identityRelocations = outputDeclarations.filter { entity ->
+            entity.range.first > identityBegin && entity.range.last < identityEnd
+        }.mapNotNull { entity ->
+            val candidates = sourceByIdentity[entity.identity].orEmpty()
+            val sourceDeclaration = when (candidates.size) {
+                0 -> return@mapNotNull null
+                1 -> candidates.single()
+                else -> {
+                    val outputIdentifiers = DECLARATION_IDENTIFIER.findAll(result.substring(entity.range))
+                        .mapTo(hashSetOf(), MatchResult::value)
+                    val ranked = candidates.map { candidate ->
+                        val candidateIdentifiers = DECLARATION_IDENTIFIER.findAll(
+                            request.source.substring(candidate.range),
+                        ).mapTo(hashSetOf(), MatchResult::value)
+                        candidate to candidateIdentifiers.intersect(outputIdentifiers).size
+                    }.sortedByDescending { it.second }
+                    ranked.firstOrNull()?.takeIf { best ->
+                        best.second > 0 && ranked.getOrNull(1)?.second != best.second
+                    }?.first ?: return@mapNotNull null
+                }
+            }
+            val hasOutside = outputDeclarations.any { candidate ->
+                candidate.identity == entity.identity &&
+                    (candidate.range.first < identityBegin || candidate.range.last > identityEnd)
+            }
+            val insertion = if (hasOutside) {
+                null
+            } else {
+                val sourceIndex = sourceRangeIndexes[sourceDeclaration.range] ?: return@mapNotNull null
+                renderRelocatedAbiDeclaration(
+                    request.source,
+                    sourceDeclaration.range,
+                    conditionalOwners[sourceIndex],
+                ) ?: return@mapNotNull null
+            }
+            Triple(sourceDeclaration.range, entity.range, insertion)
+        }
+        if (identityRelocations.isEmpty()) return result
+        val identityInsertions = identityRelocations.filter { it.third != null }.distinctBy { it.first }
+            .sortedBy { it.first.first }.joinToString("\n") { requireNotNull(it.third) }
+        stripped = removeRanges(result, identityRelocations.map { it.second }.distinct())
+        insertionOffset = stripped.indexOf(BRANCH_OWNED_PROLOGUE_BEGIN)
+        return stripped.substring(0, insertionOffset) +
+            identityInsertions.takeIf(String::isNotEmpty)?.plus("\n").orEmpty() +
+            stripped.substring(insertionOffset)
+    }
+
+    private fun renderRelocatedAbiDeclaration(
+        source: String,
+        declaration: IntRange,
+        conditionalOwner: IntRange?,
+    ): String? {
+        val exact = source.substring(declaration).trim()
+        if (conditionalOwner == null || isIncludeGuardOwner(source, conditionalOwner)) return exact
+        val ownerSource = source.substring(conditionalOwner)
+        val header = ownerSource.lineSequence().map(String::trim).firstOrNull(String::isNotEmpty)
+            ?: return null
+        if (!header.matches(Regex("^#if(?:def|ndef)?\\b.*$"))) return null
+        if (ownerSource.lineSequence().map(String::trim).any { line -> line.startsWith("#elif") }) return null
+        val elseDirective = Regex("(?m)^[\\t ]*#else[\\t ]*(?://[^\\r\\n]*)?$").find(ownerSource)
+        val selectedHeader = if (
+            elseDirective != null && declaration.first - requireNotNull(conditionalOwner).first > elseDirective.range.first
+        ) {
+            when {
+                header.startsWith("#ifdef ") -> "#ifndef ${header.removePrefix("#ifdef ").trim()}"
+                header.startsWith("#ifndef ") -> "#ifdef ${header.removePrefix("#ifndef ").trim()}"
+                header.startsWith("#if ") -> "#if !(${header.removePrefix("#if ").trim()})"
+                else -> return null
+            }
+        } else {
+            header
+        }
+        return "$selectedHeader\n$exact\n#endif"
+    }
+
+    private fun abiRestorationOwners(
+        source: String,
+        declarations: List<IntRange>,
+    ): List<IntRange> {
+        val conditionalOwners = nearestConditionalOwnerRanges(source, declarations)
+        val distinctOwners = conditionalOwners.filterNotNull().distinct()
+        val includeGuards = distinctOwners.filterTo(hashSetOf()) { owner -> isIncludeGuardOwner(source, owner) }
+        val safeOwners = distinctOwners.filterTo(hashSetOf()) { owner ->
+            owner !in includeGuards && structuralEntities(source.substring(owner)).none { entity ->
+                entity.kind == StructuralEntityKind.FUNCTION
+            }
+        }
+        return declarations.indices.mapNotNull { index ->
+            val owner = conditionalOwners[index] ?: return@mapNotNull declarations[index]
+            when (owner) {
+                in includeGuards -> declarations[index]
+                in safeOwners -> owner
+                else -> null
+            }
+        }
+    }
+
+    private fun isIncludeGuardOwner(source: String, owner: IntRange): Boolean {
+        val directives = source.substring(owner).lineSequence().map(String::trim)
+            .filter(String::isNotEmpty).take(2).toList()
+        val guard = directives.firstOrNull()?.let { line ->
+            Regex("^#ifndef[\\t ]+([A-Za-z_][A-Za-z0-9_]*)$").matchEntire(line)?.groupValues?.get(1)
+        }
+        return guard != null && directives.getOrNull(1)?.matches(
+            Regex("^#define[\\t ]+${Regex.escape(guard)}(?:[\\t ].*)?$"),
+        ) == true
+    }
+
+    private fun resolveAbiModifierTokens(
+        source: String,
+        signatures: List<ShaderStructuralSignature>,
+    ): String {
+        val qualifierSets = signatures.flatMap(ShaderStructuralSignature::resources).mapNotNull { resource ->
+            val identity = structuralDeclarationIdentity(resource)?.first ?: return@mapNotNull null
+            val qualifiers = ABI_MEMORY_QUALIFIER.findAll(resource).mapTo(linkedSetOf(), MatchResult::value)
+            identity to qualifiers
+        }.groupBy({ it.first }, { it.second })
+        val stableQualifiers = qualifierSets.mapNotNull { (identity, variants) ->
+            variants.distinct().singleOrNull()?.let { identity to it }
+        }.toMap()
+        val replacements = structuralEntities(source).mapNotNull { entity ->
+            if (entity.kind != StructuralEntityKind.DECLARATION) return@mapNotNull null
+            val exact = source.substring(entity.range)
+            if (!ABI_MODIFIER_TOKEN.containsMatchIn(exact)) return@mapNotNull null
+            val qualifiers = stableQualifiers[entity.identity] ?: return@mapNotNull null
+            val replacement = qualifiers.joinToString(" ")
+            entity.range to ABI_MODIFIER_TOKEN.replace(exact, replacement)
+        }
+        if (replacements.isEmpty()) return source
+        var result = source
+        replacements.sortedByDescending { it.first.first }.forEach { (range, replacement) ->
+            result = result.replaceRange(range.first, range.last + 1, replacement)
+        }
+        return result
+    }
+
+    private fun restoreMissingSourceTypeDeclarations(
+        request: SpirvOptimizationRequest,
+        source: String,
+    ): String {
+        val outputEntities = structuralEntities(source)
+        val masked = maskStructuralCode(source)
+        val prologueOffset = masked.indexOf(BRANCH_OWNED_PROLOGUE_BEGIN).takeIf { it >= 0 } ?: masked.length
+        val abiOffset = ABI_PROLOGUE_DECLARATION.find(masked.substring(0, prologueOffset))?.range?.first
+            ?: prologueOffset
+        val abiLineOffset = source.lineRangeAt(abiOffset).first
+        val insertionOffset = nearestConditionalOwnerRanges(source, listOf(abiLineOffset..abiLineOffset))
+            .singleOrNull()?.first ?: abiLineOffset
+        val sourceTypes = structuralEntities(request.source).mapNotNull { entity ->
+            if (entity.kind != StructuralEntityKind.DECLARATION) return@mapNotNull null
+            val typeName = STRUCT_DECLARATION_NAME.find(entity.canonical)?.groupValues?.get(1)
+                ?: return@mapNotNull null
+            typeName to entity
+        }.groupBy({ it.first }, { it.second })
+        val outputTypes = outputEntities.mapNotNull { entity ->
+            if (entity.kind != StructuralEntityKind.DECLARATION) return@mapNotNull null
+            val typeName = STRUCT_DECLARATION_NAME.find(entity.canonical)?.groupValues?.get(1)
+                ?: return@mapNotNull null
+            typeName to entity
+        }.groupBy({ it.first }, { it.second })
+        fun requiresRestoration(name: String): Boolean =
+            outputTypes[name].isNullOrEmpty() || outputTypes.getValue(name).any { it.range.first > insertionOffset }
+        val referenced = DECLARATION_IDENTIFIER.findAll(masked).mapTo(linkedSetOf(), MatchResult::value)
+        val pending = ArrayDeque(
+            referenced.filter { name -> requiresRestoration(name) && sourceTypes[name]?.size == 1 },
+        )
+        val selected = linkedMapOf<String, StructuralEntity>()
+        while (pending.isNotEmpty()) {
+            val name = pending.removeFirst()
+            if (name in selected || !requiresRestoration(name)) continue
+            val declaration = sourceTypes[name]?.singleOrNull() ?: continue
+            selected[name] = declaration
+            declaration.references.filter { dependency ->
+                dependency !in selected && requiresRestoration(dependency) && sourceTypes[dependency]?.size == 1
+            }.forEach(pending::addLast)
+        }
+        if (selected.isEmpty()) return source
+        val restoredInstanceIdentities = selected.values.filter { entity ->
+            val typeName = STRUCT_DECLARATION_NAME.find(entity.canonical)?.groupValues?.get(1)
+            typeName != null && entity.symbol != typeName
+        }.mapTo(hashSetOf(), StructuralEntity::identity)
+        val removals = (
+            selected.keys.flatMap { name -> outputTypes[name].orEmpty() } +
+                outputEntities.filter { entity -> entity.identity in restoredInstanceIdentities }
+            ).map(StructuralEntity::range).distinct()
+        val adjustedInsertionOffset = insertionOffset - removals.filter { it.first < insertionOffset }.sumOf(IntRange::count)
+        val stripped = removeRanges(source, removals)
+        val declarations = selected.values.sortedBy { it.range.first }.joinToString("\n", postfix = "\n") { entity ->
+            request.source.substring(entity.range)
+        }
+        return stripped.substring(0, adjustedInsertionOffset) + declarations + stripped.substring(adjustedInsertionOffset)
+    }
+
+    private fun removeNonBranchOwnedMainFunctions(source: String): String {
+        val begin = source.indexOf(BRANCH_OWNED_MAIN_BEGIN)
+        val end = source.indexOf(BRANCH_OWNED_MAIN_END, begin.coerceAtLeast(0))
+        if (begin < 0 || end < 0) return source
+        val removals = scanNamedSourceFunctions(source).filter { entity ->
+            entity.symbol == "main" && (entity.range.first < begin || entity.range.last > end)
+        }.map(StructuralEntity::range)
+        return if (removals.isEmpty()) source else removeRanges(source, removals)
+    }
+
+    private fun restoreMissingBranchOwnedMain(
+        source: String,
+        modules: List<SpirvModuleResult>,
+        restorationPlan: ShaderStructuralRestorationPlan,
+    ): String {
+        val begin = source.indexOf(BRANCH_OWNED_MAIN_BEGIN)
+        val end = source.indexOf(BRANCH_OWNED_MAIN_END, begin.coerceAtLeast(0))
+        if (begin < 0 || end < 0) return source
+        val range = source.lineRangeAt(begin).first..source.lineRangeAt(end).last
+        if (scanNamedSourceFunctions(source.substring(range)).any { it.symbol == "main" }) return source
+        val branches = modules.flatMap { module ->
+            module.structuralAssignments.ifEmpty { listOf(module.structuralAssignment) }.map { assignment ->
+                module.source to assignment
+            }
+        }
+        val restored = renderBranchOwnedMain(
+            branches.map { it.first },
+            branches.map { it.second },
+            restorationPlan,
+            emptySet(),
+        ) ?: return source
+        return source.substring(0, range.first) + restored.source + source.substring(range.last + 1)
+    }
+
+    private fun hoistLateAbiDeclarations(source: String): String {
+        val functions = structuralEntities(source).filter { it.kind == StructuralEntityKind.FUNCTION }
+        val firstFunction = functions.minOfOrNull { it.range.first } ?: return source
+        val candidates = structuralEntities(source).filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION &&
+                entity.range.first > firstFunction &&
+                ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical)
+        }
+        val ownedRanges = abiRestorationOwners(source, candidates.map(StructuralEntity::range))
+        val ranges = ownedRanges.distinct()
+            .filter { it.first > firstFunction }
+            .filterNot { candidate ->
+                ownedRanges.any { owner ->
+                    owner != candidate && owner.containsRange(candidate)
+                }
+            }
+        if (ranges.isEmpty()) return source
+        val insertion = ranges.sortedBy(IntRange::first).joinToString("\n", postfix = "\n") { range ->
+            source.substring(range)
+        }
+        val stripped = removeRanges(source, ranges)
+        val insertionOffset = structuralEntities(stripped).filter { it.kind == StructuralEntityKind.FUNCTION }
+            .minOf { it.range.first }
+        return stripped.substring(0, insertionOffset) + insertion + stripped.substring(insertionOffset)
+    }
+
+    private fun relocateUnconditionalLateSourceAbiDeclarations(
+        request: SpirvOptimizationRequest,
+        source: String,
+    ): String {
+        val firstFunction = structuralEntities(source).filter { it.kind == StructuralEntityKind.FUNCTION }
+            .minOfOrNull { it.range.first } ?: return source
+        val sourceDeclarations = structuralEntities(request.source).filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION &&
+                ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical)
+        }
+        val conditionalOwners = nearestConditionalOwnerRanges(
+            request.source,
+            sourceDeclarations.map(StructuralEntity::range),
+        )
+        val relocations = sourceDeclarations.indices.mapNotNull { index ->
+            if (conditionalOwners[index] != null) return@mapNotNull null
+            val exact = request.source.substring(sourceDeclarations[index].range)
+            val occurrences = occurrences(source, exact)
+            if (occurrences.none { it.first > firstFunction }) return@mapNotNull null
+            exact to occurrences
+        }.distinctBy { it.first }
+        if (relocations.isEmpty()) return source
+        val stripped = removeRanges(source, relocations.flatMap { it.second }.distinct())
+        val insertionOffset = structuralEntities(stripped).filter { it.kind == StructuralEntityKind.FUNCTION }
+            .minOf { it.range.first }
+        val insertion = relocations.joinToString("\n", postfix = "\n") { it.first.trim() }
+        return stripped.substring(0, insertionOffset) + insertion + stripped.substring(insertionOffset)
+    }
+
+    private fun restoreProbeResources(source: String, modules: List<SpirvModuleResult>): String {
+        val markers = modules.flatMap(SpirvModuleResult::resourceMarkers)
+            .distinctBy(TextureResourceMarker::identifier)
+        return if (markers.isEmpty()) source else TextureAccessAnalyzer.restoreProbeResources(source, markers)
+    }
+
+    private fun hoistLateAbiQualifierMacros(source: String): String {
+        val abiDeclarations = structuralEntities(source).filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION &&
+                ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical)
+        }
+        if (abiDeclarations.isEmpty()) return source
+        val definitions = sourceMacroDefinitions(source)
+        val nestedDefinitions = definitions.values.flatten().filter { it.depth != 0 }
+        val nestedOwners = nearestConditionalOwnerRanges(source, nestedDefinitions.map { definition ->
+            definition.offset until definition.offset + definition.exactText.length
+        })
+        val includeGuardDefinitions = nestedDefinitions.filterIndexedTo(hashSetOf()) { index, _ ->
+            nestedOwners[index]?.let { owner -> isIncludeGuardOwner(source, owner) } == true
+        }
+        val insertionOffset = abiDeclarations.minOf { it.range.first }
+        val abiLineIdentifiers = source.lineSequence().filter(ABI_PROLOGUE_DECLARATION::containsMatchIn)
+            .flatMap { line -> DECLARATION_IDENTIFIER.findAll(line).map(MatchResult::value) }
+            .toCollection(linkedSetOf())
+        val stableAbiAliases = objectAliases(source).keys.intersect(abiLineIdentifiers)
+        val pending = ArrayDeque(
+            (abiDeclarations.flatMapTo(linkedSetOf(), StructuralEntity::references) +
+                abiDeclarations.mapNotNull(StructuralEntity::symbol) + abiLineIdentifiers)
+                .filter(definitions::containsKey),
+        )
+        val selectedDefinitions = linkedSetOf<SourceMacroDefinition>()
+        while (pending.isNotEmpty()) {
+            definitions[pending.removeFirst()].orEmpty().forEach { definition ->
+                if (
+                    definition.offset < insertionOffset ||
+                    (definition.depth != 0 && definition !in includeGuardDefinitions &&
+                        definition.name !in stableAbiAliases)
+                ) return@forEach
+                if (!selectedDefinitions.add(definition)) return@forEach
+                DECLARATION_IDENTIFIER.findAll(definition.value).map(MatchResult::value)
+                    .filter(definitions::containsKey)
+                    .forEach(pending::addLast)
+            }
+        }
+        val selected = selectedDefinitions.sortedBy(SourceMacroDefinition::offset)
+        if (selected.isEmpty()) return source
+        val ranges = selected.map { definition ->
+            definition.offset until definition.offset + definition.exactText.length
+        }
+        val insertion = selected.joinToString(separator = "") { it.exactText }.let { value ->
+            if (value.endsWith('\n') || value.endsWith('\r')) value else "$value\n"
+        }
+        val stripped = removeRanges(source, ranges)
+        return stripped.substring(0, insertionOffset) + insertion + stripped.substring(insertionOffset)
     }
 
     private fun sourceMacroDefinitions(source: String): Map<String, List<SourceMacroDefinition>> {
@@ -582,18 +2349,231 @@ internal object SpirvFinalEmitter {
                 else -> newline + 1
             }
             val line = source.substring(offset, contentEnd)
-            val exactText = source.substring(offset, lineEnd)
             val directive = line.trimStart()
             if (directive.startsWith("#endif")) depth = (depth - 1).coerceAtLeast(0)
             MACRO_DEFINITION.matchEntire(line)?.destructured?.let { (name, value) ->
+                var definitionEnd = lineEnd
+                var physicalLine = line
+                while (physicalLine.trimEnd().endsWith('\\') && definitionEnd < source.length) {
+                    val continuationStart = definitionEnd
+                    val continuationNewline = source.indexOfAny(charArrayOf('\r', '\n'), continuationStart)
+                    val continuationContentEnd = if (continuationNewline < 0) source.length else continuationNewline
+                    definitionEnd = when {
+                        continuationNewline < 0 -> source.length
+                        source[continuationNewline] == '\r' &&
+                            source.getOrNull(continuationNewline + 1) == '\n' -> continuationNewline + 2
+                        else -> continuationNewline + 1
+                    }
+                    physicalLine = source.substring(continuationStart, continuationContentEnd)
+                }
+                val exactText = source.substring(offset, definitionEnd)
                 result.getOrPut(name) { mutableListOf() } += SourceMacroDefinition(
                     name,
-                    value,
+                    value + exactText.removePrefix(source.substring(offset, lineEnd)),
                     exactText,
                     offset,
                     depth,
                 )
+                offset = definitionEnd
             }
+            if (
+                directive.startsWith("#if ") || directive.startsWith("#if\t") ||
+                directive.startsWith("#ifdef") || directive.startsWith("#ifndef")
+            ) {
+                depth++
+            }
+            if (offset < lineEnd) offset = lineEnd
+        }
+        return result
+    }
+
+    private fun objectAliases(source: String): Map<String, String> = sourceMacroDefinitions(source).mapNotNull {
+            (name, definitions) ->
+        val targets = definitions.mapNotNull { definition ->
+            DECLARATION_IDENTIFIER.matchEntire(definition.value.trim())?.value
+        }.distinct()
+        name to targets.singleOrNull().orEmpty()
+    }.filter { it.second.isNotEmpty() }.toMap()
+
+    private fun resolveObjectAlias(name: String, aliases: Map<String, String>): String {
+        var result = name
+        val visited = linkedSetOf<String>()
+        while (visited.add(result)) result = aliases[result] ?: break
+        return result
+    }
+
+    private fun deduplicateUnconditionalDeclarations(source: String): String {
+        val aliases = objectAliases(source)
+        val depths = preprocessorDepths(source)
+        val assignedSymbols = optimizedAssignedSymbols(source)
+        val declarationEntities = structuralEntities(source).filter { it.kind == StructuralEntityKind.DECLARATION }
+        val conditionalOwners = nearestConditionalOwnerRanges(source, declarationEntities.map(StructuralEntity::range))
+        val ownerByRange = declarationEntities.indices.associate { index ->
+            declarationEntities[index].range to conditionalOwners[index]
+        }
+        val declarations = declarationEntities
+            .mapNotNull { entity ->
+                val symbol = entity.symbol ?: return@mapNotNull null
+                val typeName = STRUCT_DECLARATION_NAME.find(entity.canonical)?.groupValues?.get(1)
+                val owner = typeName?.let { "struct:$it" } ?: resolveObjectAlias(symbol, aliases)
+                Triple(owner, entity, depths[entity.range.first])
+            }
+        val duplicates = declarations.groupBy { it.first }.values.flatMap { variants ->
+            val typeName = variants.first().first.removePrefix("struct:")
+                .takeIf { variants.first().first.startsWith("struct:") }
+            val instanceDeclarations = typeName?.let { name ->
+                variants.filter { it.second.symbol != name }
+            }.orEmpty()
+            val candidates = instanceDeclarations.ifEmpty { variants }
+            val discarded = variants - candidates.toSet()
+            val physicalDeclarations = candidates.filter { it.second.symbol == it.first }
+            fun resolvedCanonical(candidate: Triple<String, StructuralEntity, Int>): String {
+                val symbol = candidate.second.symbol ?: return candidate.second.canonical
+                return Regex("(?<![A-Za-z0-9_])${Regex.escape(symbol)}(?![A-Za-z0-9_])")
+                    .replace(candidate.second.canonical, candidate.first)
+            }
+            val physicalCanonical = physicalDeclarations.mapTo(hashSetOf(), ::resolvedCanonical)
+            val aliasDuplicates = candidates.filter { candidate ->
+                candidate.second.symbol != candidate.first && resolvedCanonical(candidate) in physicalCanonical
+            }
+            val dominated = candidates.filter { candidate ->
+                val candidateOwner = ownerByRange[candidate.second.range] ?: return@filter false
+                candidates.any { other ->
+                    if (other === candidate || resolvedCanonical(other) != resolvedCanonical(candidate)) {
+                        return@any false
+                    }
+                    val otherOwner = ownerByRange[other.second.range]
+                    other.third == 0 ||
+                        (otherOwner != null && isIncludeGuardOwner(source, otherOwner)) ||
+                        (otherOwner != null && otherOwner != candidateOwner && otherOwner.containsRange(candidateOwner))
+                }
+            }
+            val removedDuplicates = (aliasDuplicates + dominated).toSet()
+            val retainedCandidates = candidates - removedDuplicates
+            val conditional = retainedCandidates.filter { it.third != 0 }
+            val unconditional = retainedCandidates.filter { it.third == 0 }
+            (discarded + removedDuplicates).map { it.second.range } + when {
+                conditional.isNotEmpty() -> unconditional.map { it.second.range }
+                retainedCandidates.first().second.symbol in assignedSymbols -> {
+                    val writable = unconditional.filterNot { it.second.canonical.trimStart().startsWith("const ") }
+                    if (writable.size == 1) {
+                        unconditional.filterNot { it === writable.single() }.map { it.second.range }
+                    } else {
+                        unconditional.drop(1).map { it.second.range }
+                    }
+                }
+                else -> unconditional.drop(1).map { it.second.range }
+            }
+        }
+        return removeRanges(source, duplicates)
+    }
+
+    internal fun deduplicateDominatedAbiLines(source: String): String {
+        data class ConditionalFrame(val opening: String, var branch: String)
+        data class AbiLine(val range: IntRange, val text: String, val path: List<Pair<String, String>>)
+        fun normalizeDirective(value: String): String =
+            value.substringBefore("//").replace(SEMANTIC_WHITESPACE, " ").trim()
+        val frames = mutableListOf<ConditionalFrame>()
+        val declarations = mutableListOf<AbiLine>()
+        var offset = 0
+        while (offset < source.length) {
+            val range = source.lineRangeAt(offset)
+            val line = source.substring(range)
+            val directive = line.trimStart()
+            when {
+                directive.startsWith("#endif") -> if (frames.isNotEmpty()) frames.removeLast()
+                directive.startsWith("#elif ") || directive.startsWith("#elif\t") ||
+                    directive.startsWith("#else") -> if (frames.isNotEmpty()) {
+                    frames.last().branch = normalizeDirective(directive)
+                }
+                directive.startsWith("#if ") || directive.startsWith("#if\t") ||
+                    directive.startsWith("#ifdef") || directive.startsWith("#ifndef") ->
+                    frames += ConditionalFrame(normalizeDirective(directive), "")
+                line.trimEnd().endsWith(';') && ABI_PROLOGUE_DECLARATION.containsMatchIn(line) ->
+                    declarations += AbiLine(
+                        range,
+                        normalizeStructuralEntity(line),
+                        frames.map { it.opening to it.branch },
+                    )
+            }
+            offset = range.last + 1
+        }
+        val duplicates = declarations.groupBy(AbiLine::text).values.flatMap { variants ->
+            variants.filter { candidate ->
+                variants.any { other ->
+                    other !== candidate && (
+                        other.path.size < candidate.path.size &&
+                            candidate.path.take(other.path.size) == other.path ||
+                            other.range.first < candidate.range.first && other.path == candidate.path
+                    )
+                }
+            }.map(AbiLine::range)
+        }
+        return removeRanges(source, duplicates)
+    }
+
+    private fun optimizedRetainedEntityIdentities(
+        optimizedSource: String,
+        restoredSlots: List<ShaderStructuralEntitySlot>,
+        assignmentSource: String = optimizedSource,
+    ): Set<String> {
+        val optimizedEntities = structuralEntities(optimizedSource)
+        val restoredIdentities = restoredSlots.flatMapTo(hashSetOf()) { slot ->
+            structuralEntities(slot.exactText).map(StructuralEntity::identity)
+        }
+        val assignedSymbols = optimizedAssignedSymbols(assignmentSource)
+        val restoredConstIdentities = restoredSlots.flatMapTo(hashSetOf()) { slot ->
+            structuralEntities(slot.exactText).filter { entity ->
+                entity.kind == StructuralEntityKind.DECLARATION &&
+                    entity.canonical.trimStart().startsWith("const ")
+            }.map(StructuralEntity::identity)
+        }
+        val retained = optimizedEntities.filterTo(linkedSetOf()) { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION &&
+                entity.identity in restoredConstIdentities &&
+                entity.symbol in assignedSymbols &&
+                !entity.canonical.trimStart().startsWith("const ")
+        }.mapTo(linkedSetOf(), StructuralEntity::identity)
+        val functions = optimizedEntities.filter { it.kind == StructuralEntityKind.FUNCTION }
+        val bySymbol = functions.filter { it.symbol != null }.groupBy { requireNotNull(it.symbol) }
+        val pending = ArrayDeque<String>()
+        functions.filter { it.identity !in restoredIdentities || it.identity == "function:main()" }
+            .flatMapTo(pending, StructuralEntity::references)
+        val visitedSymbols = linkedSetOf<String>()
+        while (pending.isNotEmpty()) {
+            val symbol = pending.removeFirst()
+            if (!visitedSymbols.add(symbol)) continue
+            bySymbol[symbol].orEmpty().forEach { function ->
+                if (function.identity in restoredIdentities) retained += function.identity
+                function.references.forEach(pending::addLast)
+            }
+        }
+        return retained
+    }
+
+    private fun optimizedAssignedSymbols(source: String): Set<String> {
+        val functions = structuralEntities(source).filter { it.kind == StructuralEntityKind.FUNCTION }
+        if (functions.isEmpty()) return emptySet()
+        return functions.flatMapTo(linkedSetOf()) { function ->
+            ASSIGNED_SYMBOL.findAll(function.semantic).map { match -> match.groupValues[1] }
+        }
+    }
+
+    private fun preprocessorDepths(source: String): IntArray {
+        val result = IntArray(source.length + 1)
+        var depth = 0
+        var offset = 0
+        while (offset < source.length) {
+            val newline = source.indexOfAny(charArrayOf('\r', '\n'), offset)
+            val contentEnd = if (newline < 0) source.length else newline
+            val lineEnd = when {
+                newline < 0 -> source.length
+                source[newline] == '\r' && source.getOrNull(newline + 1) == '\n' -> newline + 2
+                else -> newline + 1
+            }
+            val directive = source.substring(offset, contentEnd).trimStart()
+            if (directive.startsWith("#endif")) depth = (depth - 1).coerceAtLeast(0)
+            for (index in offset until lineEnd) result[index] = depth
             if (
                 directive.startsWith("#if ") || directive.startsWith("#if\t") ||
                 directive.startsWith("#ifdef") || directive.startsWith("#ifndef")
@@ -602,6 +2582,7 @@ internal object SpirvFinalEmitter {
             }
             offset = lineEnd
         }
+        result[source.length] = depth
         return result
     }
 
@@ -615,14 +2596,35 @@ internal object SpirvFinalEmitter {
         if (slots.isEmpty()) return emptyList()
         val located = slots.map { slot ->
             val occurrences = occurrences(request.source, slot.exactText)
-            if (occurrences.size != 1) return null
-            slot to occurrences.single()
+            val lineMatches = occurrences.filter { sourceLine(request.source, it.first) == slot.sourceLine }
+            val selected = when {
+                occurrences.size == 1 -> occurrences.single()
+                lineMatches.size == 1 -> lineMatches.single()
+                else -> return null
+            }
+            slot to selected
         }
         val ranges = located.map { it.second }
         val anchors = findStableAnchors(request.source).filter { anchor ->
             anchor.anchor.kind != IrisAnchorKind.DECLARATION && ranges.none { it.overlaps(anchor.range) }
         }
+        val mainAnchor = anchors.singleOrNull {
+            it.anchor == IrisSourceAnchor(IrisAnchorKind.FUNCTION, "main")
+        }
         return located.sortedBy { it.second.first }.mapIndexed { ordinal, (slot, range) ->
+            val slotEntities = structuralEntities(slot.exactText)
+            val isAbiPrologue = slotEntities.any { entity ->
+                    entity.kind == StructuralEntityKind.DECLARATION &&
+                        ABI_PROLOGUE_DECLARATION.containsMatchIn(entity.canonical)
+                }
+            if (isAbiPrologue && mainAnchor != null) {
+                return@mapIndexed slot.copy(
+                    ordinal = ordinal,
+                    beforeAnchor = null,
+                    afterAnchor = mainAnchor.anchor,
+                    placement = IrisAnchorPlacement.BEFORE_AFTER,
+                )
+            }
             val before = anchors.filter { it.range.last < range.first }.maxByOrNull { it.range.last }
             val after = anchors.filter { it.range.first > range.last }.minByOrNull { it.range.first }
             if (before == null && after == null) return null
@@ -643,8 +2645,23 @@ internal object SpirvFinalEmitter {
 
     private fun normalizedStructuralResidue(source: String): String {
         val entities = structuralEntities(source)
-        val residue = removeRanges(source, entities.map(StructuralEntity::range))
+        val extensionRanges = EXTENSION_DIRECTIVE.findAll(source).map { match ->
+            val owner = nearestConditionalOwnerRanges(source, listOf(match.range)).single()
+            owner ?: source.lineRangeAt(match.range.first)
+        }.toList()
+        val residue = removeRanges(source, entities.map(StructuralEntity::range) + extensionRanges)
         return normalizeSemanticBody(residue)
+    }
+
+    private fun String.lineRangeAt(offset: Int): IntRange {
+        val start = lastIndexOfAny(charArrayOf('\r', '\n'), offset - 1).let { if (it < 0) 0 else it + 1 }
+        val newline = indexOfAny(charArrayOf('\r', '\n'), offset)
+        val end = when {
+            newline < 0 -> length
+            this[newline] == '\r' && getOrNull(newline + 1) == '\n' -> newline + 2
+            else -> newline + 1
+        }
+        return start until end
     }
 
     private fun removeStructuralEntities(source: String, identities: Set<String>): String {
@@ -674,10 +2691,55 @@ internal object SpirvFinalEmitter {
 
     private fun IntRange.overlaps(other: IntRange): Boolean = first <= other.last && other.first <= last
 
+    private fun nearestConditionalOwnerRanges(source: String, ranges: List<IntRange>): List<IntRange?> {
+        if (ranges.isEmpty()) return emptyList()
+        val lineStarts = mutableListOf(0)
+        source.forEachIndexed { index, char ->
+            if (char == '\n' || char == '\r' && source.getOrNull(index + 1) != '\n') lineStarts += index + 1
+        }
+        fun directiveRange(directive: PreprocessorDirective): IntRange {
+            val start = lineStarts.getOrElse(directive.sourceLine - 1) { source.length }
+            val end = lineStarts.getOrElse(directive.endLine) { source.length }
+            return start until end
+        }
+        data class ConditionalStart(val offset: Int, val includeGuard: Boolean)
+        val owners = mutableListOf<IntRange>()
+        val open = ArrayDeque<ConditionalStart>()
+        val directives = PreprocessorProtection.protect(source, "<conditional-owner>").directives
+        directives.forEachIndexed { index, directive ->
+            when (directive.kind) {
+                PreprocessorDirectiveKind.IF,
+                PreprocessorDirectiveKind.IFDEF,
+                PreprocessorDirectiveKind.IFNDEF,
+                -> {
+                    val next = directives.getOrNull(index + 1)
+                    val includeGuard = directive.kind == PreprocessorDirectiveKind.IFNDEF &&
+                        directive.macroName != null && next?.kind == PreprocessorDirectiveKind.DEFINE &&
+                        next.macroName == directive.macroName &&
+                        next.conditionalDepth == directive.conditionalDepth + 1
+                    open.addLast(ConditionalStart(directiveRange(directive).first, includeGuard))
+                }
+                PreprocessorDirectiveKind.ENDIF -> if (open.isNotEmpty()) {
+                    val start = open.removeLast()
+                    if (!start.includeGuard) owners += start.offset..directiveRange(directive).last
+                }
+                else -> Unit
+            }
+        }
+        return ranges.map { range ->
+            owners.filter { it.containsRange(range) }.minByOrNull { it.last - it.first }
+        }
+    }
+
     private fun sourceLine(source: String, offset: Int): Int = source.take(offset).count { it == '\n' } + 1
 
     private fun normalizeSemanticBody(source: String): String {
-        return source.replace(VERSION_LINE, "#version").replace(SEMANTIC_WHITESPACE, " ").trim()
+        return normalizeStructuralEntity(
+            source
+                .replace(SETTING_PRESENCE_BRIDGE, "")
+                .replace(SETTING_VALUE_BRIDGE, "")
+                .replace(VERSION_LINE, "#version"),
+        )
     }
 
     private sealed interface StructuralStripResult {
@@ -700,6 +2762,35 @@ internal object SpirvFinalEmitter {
         data class Preserved(val reason: String) : StructuralConvergence
     }
 
+    private data class BranchOwnedMain(
+        val prologue: String,
+        val source: String,
+        val ownedIdentities: Set<String>,
+    )
+
+    private data class BranchOwnedPayload(
+        val declarations: String,
+        val entry: String,
+        val semantic: String,
+        val ownedIdentities: Set<String>,
+    )
+
+    private val SETTING_PRESENCE_BRIDGE = Regex(
+        "(?m)^[\\t ]*#ifdef[\\t ]+(SETTING_[A-Za-z0-9_]+)[\\t ]*(?:\\r\\n|\\n|\\r)" +
+            "^[\\t ]*#define[\\t ]+SM_\\1[\\t ]+true[\\t ]*(?:\\r\\n|\\n|\\r)" +
+            "^[\\t ]*#else[\\t ]*(?:\\r\\n|\\n|\\r)" +
+            "^[\\t ]*#define[\\t ]+SM_\\1[\\t ]+false[\\t ]*(?:\\r\\n|\\n|\\r)" +
+            "^[\\t ]*#endif[\\t ]*(?:\\r\\n|\\n|\\r|$)",
+    )
+    private const val BRANCH_OWNED_PROLOGUE_BEGIN = "// SHADESMITH_BRANCH_OWNED_PROLOGUE_BEGIN"
+    private const val BRANCH_OWNED_PROLOGUE_END = "// SHADESMITH_BRANCH_OWNED_PROLOGUE_END"
+    private const val BRANCH_OWNED_MAIN_BEGIN = "// SHADESMITH_BRANCH_OWNED_MAIN_BEGIN"
+    private const val BRANCH_OWNED_MAIN_END = "// SHADESMITH_BRANCH_OWNED_MAIN_END"
+    private val BRANCH_MAIN_HEADER = "(?m)^[\\t ]*void[\\t ]+main[\\t ]*\\(".toRegex()
+    private val SETTING_VALUE_BRIDGE = Regex(
+        "(?m)^[\\t ]*#define[\\t ]+SM_(SETTING_[A-Za-z0-9_]+)[\\t ]+\\1[\\t ]*(?:\\r\\n|\\n|\\r|$)",
+    )
+
     private fun shortHash(value: String): String {
         return MessageDigest.getInstance("SHA-256")
             .digest(value.encodeToByteArray())
@@ -709,6 +2800,16 @@ internal object SpirvFinalEmitter {
 
     private val FINAL_SPECIALIZATION_ARTIFACT =
         "\\b(?:constant_id|local_size_[xyz]_id|SPIRV_CROSS_CONSTANT_ID_[0-9]+)\\b".toRegex()
+    private val ABI_PROLOGUE_DECLARATION =
+        "\\b(?:uniform|buffer|shared)\\b|^layout\\s*\\([^)]*(?:std430|std140|binding)".toRegex()
+    private val SYMBOLIC_ARRAY_EXTENT =
+        "\\[[^\\]\\r\\n]*[A-Za-z_][A-Za-z0-9_]*[^\\]\\r\\n]*\\]".toRegex()
+    private val ABI_MODIFIER_TOKEN = "\\b[A-Z][A-Z0-9_]*_MODIFIER\\b".toRegex()
+    private val ABI_MEMORY_QUALIFIER =
+        "\\b(?:readonly|writeonly|coherent|volatile|restrict|uniform|buffer|shared)\\b".toRegex()
+    private val EXTENSION_DIRECTIVE = "(?m)^[\\t ]*#extension\\b[^\\r\\n]*".toRegex()
+    private val CONTRACT_HELPER_PREFIXES = listOf("_textile_")
+    private val STRUCT_DECLARATION_NAME = "^struct\\s+([A-Za-z_][A-Za-z0-9_]*)\\b".toRegex()
     private val VERSION_LINE = "(?m)^[\\t ]*#version[^\\r\\n]*".toRegex()
     private val SEMANTIC_WHITESPACE = "\\s+".toRegex()
     private val MACRO_DEFINITION =
@@ -739,15 +2840,18 @@ private enum class StructuralEntityKind {
 }
 
 private fun structuralEntities(source: String): List<StructuralEntity> {
-    val masked = maskStructuralSource(source)
+    val masked = maskStructuralCode(source)
     val result = mutableListOf<StructuralEntity>()
     var boundary = 0
     var depth = 0
+    var parenthesisDepth = 0
     var functionStart = -1
     var functionHeader = ""
     var cursor = 0
     while (cursor < masked.length) {
         when (masked[cursor]) {
+            '(' -> if (depth == 0) parenthesisDepth++
+            ')' -> if (depth == 0 && parenthesisDepth > 0) parenthesisDepth--
             '{' -> {
                 if (depth == 0) {
                     val start = firstNonWhitespace(masked, boundary, cursor)
@@ -809,7 +2913,12 @@ private fun structuralEntities(source: String): List<StructuralEntity> {
             }
             '\r', '\n' -> if (depth == 0) {
                 val lineStart = source.lastIndexOf('\n', cursor - 1).let { if (it < 0) 0 else it + 1 }
-                if (source.substring(lineStart, cursor).trimStart().startsWith('#')) boundary = cursor + 1
+                if (
+                    parenthesisDepth == 0 &&
+                    source.substring(lineStart, cursor).trimStart().startsWith('#')
+                ) {
+                    boundary = cursor + 1
+                }
             }
         }
         cursor++
@@ -848,9 +2957,17 @@ private fun structuralDeclarationIdentity(declaration: String): Pair<String, Str
         val name = instance ?: BLOCK_NAME.find(declaration)?.groupValues?.get(1) ?: blockName ?: return null
         return "declaration:$name" to name
     }
-    val head = stripLeadingLayouts(declaration).substringBefore('=').substringBefore(';')
+    val head = STRUCTURAL_ARRAY_SUFFIX.replace(
+        stripLeadingLayouts(declaration).substringBefore('=').substringBefore(';'),
+        "",
+    )
     val name = DECLARATION_IDENTIFIER.findAll(head).lastOrNull()?.value ?: return null
-    return "declaration:$name" to name
+    val identity = if (GENERATED_IDENTIFIER.matches(name)) {
+        "generated-declaration:${normalizeStructuralEntity(declaration)}"
+    } else {
+        "declaration:$name"
+    }
+    return identity to name
 }
 
 private fun stripLeadingLayouts(declaration: String): String {
@@ -906,7 +3023,7 @@ private fun normalizeStructuralParameter(parameter: String): String {
 }
 
 private fun structuralReferences(source: String, symbol: String?): Set<String> {
-    return DECLARATION_IDENTIFIER.findAll(maskStructuralSource(source)).map(MatchResult::value)
+    return DECLARATION_IDENTIFIER.findAll(maskStructuralCode(source)).map(MatchResult::value)
         .filterNot { it == symbol || it in STRUCTURAL_KEYWORDS }
         .toCollection(linkedSetOf())
 }
@@ -917,8 +3034,32 @@ private fun firstNonWhitespace(source: String, start: Int, end: Int): Int {
     return cursor
 }
 
-private fun normalizeStructuralEntity(value: String): String =
-    maskStructuralSource(value).replace("\\s+".toRegex(), " ").trim()
+private fun structuralBraceDepths(masked: String): IntArray {
+    val result = IntArray(masked.length + 1)
+    var depth = 0
+    for (index in masked.indices) {
+        result[index] = depth
+        when (masked[index]) {
+            '{' -> depth++
+            '}' -> if (depth > 0) depth--
+        }
+    }
+    result[masked.length] = depth
+    return result
+}
+
+private fun IntRange.containsRange(other: IntRange): Boolean = first <= other.first && last >= other.last
+
+private fun normalizeStructuralEntity(value: String): String = alphaNormalizeGeneratedIdentifiers(
+    maskStructuralSource(value).replace("\\s+".toRegex(), " ").trim(),
+)
+
+private fun alphaNormalizeGeneratedIdentifiers(value: String): String {
+    val names = linkedMapOf<String, String>()
+    return GENERATED_IDENTIFIER.replace(value) { match ->
+        names.getOrPut(match.value) { "_smg${names.size}" }
+    }
+}
 
 private fun maskStructuralSource(source: String): String {
     val result = source.toCharArray()
@@ -979,12 +3120,41 @@ private fun maskStructuralSource(source: String): String {
     return result.concatToString()
 }
 
+private fun maskStructuralCode(source: String): String {
+    val result = maskStructuralSource(source).toCharArray()
+    var continuedDirective = false
+    var offset = 0
+    while (offset < result.size) {
+        val newline = source.indexOfAny(charArrayOf('\r', '\n'), offset)
+        val contentEnd = if (newline < 0) source.length else newline
+        val lineEnd = when {
+            newline < 0 -> source.length
+            source[newline] == '\r' && source.getOrNull(newline + 1) == '\n' -> newline + 2
+            else -> newline + 1
+        }
+        val line = result.concatToString(offset, contentEnd)
+        val directive = continuedDirective || line.trimStart().startsWith('#')
+        if (directive) {
+            continuedDirective = line.trimEnd().endsWith('\\')
+            for (index in offset until contentEnd) result[index] = ' '
+        } else {
+            continuedDirective = false
+        }
+        offset = lineEnd
+    }
+    return result.concatToString()
+}
+
 private val FUNCTION_HEADER =
     "(?s).*?\\b([A-Za-z_][A-Za-z0-9_]*)\\s*\\((.*)\\)\\s*".toRegex()
 private val FUNCTION_PROTOTYPE =
     "(?s)^[A-Za-z_][A-Za-z0-9_\\s\\[\\]]*\\b([A-Za-z_][A-Za-z0-9_]*)\\s*\\((.*)\\)\\s*;$".toRegex()
 private val BLOCK_NAME = "\\b(?:uniform|buffer)\\s+([A-Za-z_][A-Za-z0-9_]*)".toRegex()
 private val DECLARATION_IDENTIFIER = "[A-Za-z_][A-Za-z0-9_]*".toRegex()
+private val ASSIGNED_SYMBOL =
+    "(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)\\s*(?:[+\\-*/%&|^]?=(?!=)|\\+\\+|--)".toRegex()
+private val GENERATED_IDENTIFIER = "(?<![A-Za-z0-9_])_[0-9]+(?![A-Za-z0-9_])".toRegex()
+private val STRUCTURAL_ARRAY_SUFFIX = "\\[[^]]*]".toRegex()
 private val STRUCTURAL_KEYWORDS = setOf(
     "const", "layout", "uniform", "buffer", "in", "out", "inout", "void", "true", "false",
     "if", "else", "for", "while", "do", "switch", "case", "default", "return", "break", "continue",

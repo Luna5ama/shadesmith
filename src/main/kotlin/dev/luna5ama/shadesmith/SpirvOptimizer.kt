@@ -20,6 +20,7 @@ internal data class SpirvCompilerModule(
     val settings: List<ShaderSetting> = emptyList(),
     val structuralSignature: ShaderStructuralSignature? = null,
     val structuralAssignment: Map<String, String> = emptyMap(),
+    val structuralAssignments: List<Map<String, String>> = emptyList(),
 )
 
 internal data class SpirvOptimizationRequest(
@@ -35,6 +36,60 @@ internal enum class SpirvEmissionMode {
     PRESERVED_SOURCE,
 }
 
+internal fun restoreMissingCompilerMacros(source: String, contractSource: String): String {
+    val values = resolveIntegerObjectMacros(contractSource)
+    val aliases = resolveCompilerObjectAliases(contractSource)
+    if (values.isEmpty() && aliases.isEmpty()) return source
+    val defined = COMPILER_MACRO_DEFINITION.findAll(source).mapTo(hashSetOf()) { it.groupValues[1] }
+    val referenced = source.lineSequence().filterNot { it.trimStart().startsWith('#') }
+        .flatMap { line -> COMPILER_IDENTIFIER.findAll(line.substringBefore("//")).map(MatchResult::value) }
+        .filterTo(sortedSetOf()) { (it in values || it in aliases) && it !in defined }
+    if (referenced.isEmpty()) return source
+    val version = COMPILER_VERSION_LINE.find(source)
+        ?: throw IllegalArgumentException("final compiler copy has no #version directive")
+    var offset = version.range.last + 1
+    if (source.getOrNull(offset) == '\r') offset++
+    if (source.getOrNull(offset) == '\n') offset++
+    val bridges = referenced.joinToString("") { name ->
+        val replacement = values[name]?.toString() ?: aliases.getValue(name)
+        "#ifndef $name\n#define $name $replacement\n#endif\n"
+    }
+    return source.substring(0, offset) + bridges + source.substring(offset)
+}
+
+private fun resolveCompilerObjectAliases(source: String): Map<String, String> {
+    val abiSymbols = COMPILER_ABI_DECLARATION.findAll(source).mapTo(hashSetOf()) { it.groupValues[1] }
+    val definitions = COMPILER_OBJECT_MACRO.findAll(source).groupBy(
+        { it.groupValues[1] },
+        { it.groupValues[2].substringBefore("//").trim() },
+    ).mapNotNull { (name, bodies) ->
+        val body = bodies.distinct().singleOrNull() ?: return@mapNotNull null
+        body.takeIf(COMPILER_IDENTIFIER::matches)?.let { name to it }
+    }.toMap()
+    return definitions.mapNotNull { (name, initial) ->
+        var target = initial
+        val visited = linkedSetOf(name)
+        while (target in definitions) {
+            if (!visited.add(target)) return@mapNotNull null
+            target = definitions.getValue(target)
+        }
+        (name to target).takeIf { COMPILER_IDENTIFIER.matches(target) && target in abiSymbols }
+    }.toMap()
+}
+
+private val COMPILER_MACRO_DEFINITION =
+    "(?m)^[\\t ]*#define[\\t ]+([A-Za-z_][A-Za-z0-9_]*)\\b".toRegex()
+private val COMPILER_OBJECT_MACRO =
+    "(?m)^[\\t ]*#define[\\t ]+([A-Za-z_][A-Za-z0-9_]*)[\\t ]+([^\\r\\n]+)$".toRegex()
+private val COMPILER_ABI_DECLARATION = Regex(
+    "(?m)^[\\t ]*(?:layout[\\t ]*\\([^\\r\\n)]*\\)[\\t ]*)?" +
+        "(?:(?:readonly|writeonly|coherent|volatile|restrict|flat|smooth|highp|mediump|lowp)[\\t ]+)*" +
+        "(?:uniform|buffer|in|out)[\\t ]+(?:[A-Za-z_][A-Za-z0-9_]*[\\t ]+)+" +
+        "([A-Za-z_][A-Za-z0-9_]*)[\\t ]*(?:[;\\[{])",
+)
+private val COMPILER_IDENTIFIER = "[A-Za-z_][A-Za-z0-9_]*".toRegex()
+private val COMPILER_VERSION_LINE = "(?m)^[\\t ]*#version[^\\r\\n]*".toRegex()
+
 internal data class SpirvModuleResult(
     val name: String,
     val source: String,
@@ -42,10 +97,12 @@ internal data class SpirvModuleResult(
     val bridgeSettings: List<ShaderSetting>,
     val structuralSignature: ShaderStructuralSignature?,
     val structuralAssignment: Map<String, String>,
+    val structuralAssignments: List<Map<String, String>>,
     val irisContracts: IrisShaderContractPlan,
     val originalContract: ShaderAbiContract,
     val generatedLayouts: List<GeneratedShaderLayout>,
     val restorationFailure: String?,
+    val resourceMarkers: List<TextureResourceMarker> = emptyList(),
     val textureAccess: TextureAccess,
     val artifactDirectory: Path,
     val originalSpirv: Path,
@@ -179,6 +236,9 @@ internal class SpirvOptimizer(
         requestDirectory.resolve(
             if (emission.mode == SpirvEmissionMode.OPTIMIZED) "optimized.glsl" else "preserved.glsl",
         ).writeText(emission.source)
+        emission.fallbackReason?.let { reason ->
+            requestDirectory.resolve("fallback-reason.txt").writeText(reason.trimEnd() + "\n")
+        }
         return SpirvOptimizationResult(
             source = emission.source,
             emissionMode = emission.mode,
@@ -455,10 +515,12 @@ internal class SpirvOptimizer(
             bridgeSettings = bridgeSettings,
             structuralSignature = module.structuralSignature,
             structuralAssignment = module.structuralAssignment,
+            structuralAssignments = module.structuralAssignments,
             irisContracts = patch.irisContracts,
             originalContract = emissionPatch.originalContract,
             generatedLayouts = emissionPatch.generatedLayouts,
             restorationFailure = restorationFailure,
+            resourceMarkers = module.resourceMarkers,
             textureAccess = TextureAccessAnalyzer.fromOptimizedSource(
                 semanticSource,
                 module.resourceMarkers,
@@ -511,7 +573,7 @@ internal class SpirvOptimizer(
                     structuralPlan.graph.structuralSettings,
                 )
             }
-            val selectedSource = phase(
+            val selectedStructuralSource = phase(
                 request,
                 SpirvRoundTripPhase.VALIDATE,
                 finalDirectory,
@@ -522,15 +584,22 @@ internal class SpirvOptimizer(
                     module.structuralAssignment,
                 )
             }
-            val compilerSource = phase(
+            val selectedSource = SpirvFinalEmitter.restoreSourceFunctionConditionalOwners(
+                request.source,
+                selectedStructuralSource,
+            )
+            val compilerCandidateSource = phase(
                 request,
                 SpirvRoundTripPhase.VALIDATE,
                 finalDirectory,
                 "${request.sourceName}#${module.name}",
             ) {
-                module.irisContracts.prepareCompilerSource(selectedSource)
+                ShaderCompilerCopyPlanner.plan(
+                    selectedSource,
+                    "${request.sourceName}#${module.name}",
+                ).compilerCandidateSource.let(module.irisContracts::restoreRequiredCompilerPrelude)
             }
-            val materialized = phase(
+            val preprocessedSource = phase(
                 request,
                 SpirvRoundTripPhase.VALIDATE,
                 finalDirectory,
@@ -539,13 +608,26 @@ internal class SpirvOptimizer(
                 materializer.materializeSource(
                     request.sourceName,
                     request.stage,
-                    compilerSource,
+                    compilerCandidateSource,
                     "v${index.toString().padStart(3, '0')}",
                 )
             }
+            val compilerMacroSource = restoreMissingCompilerMacros(preprocessedSource, selectedSource)
+            val materialized = phase(
+                request,
+                SpirvRoundTripPhase.VALIDATE,
+                finalDirectory,
+                "${request.sourceName}#${module.name}",
+            ) {
+                module.irisContracts.prepareCompilerSource(compilerMacroSource)
+            }
             val moduleDirectory = finalDirectory.resolve(safeName(module.name))
             moduleDirectory.createDirectories()
+            moduleDirectory.resolve("selected-structural.glsl").writeText(selectedStructuralSource)
             moduleDirectory.resolve("selected.glsl").writeText(selectedSource)
+            moduleDirectory.resolve("compiler-candidate.glsl").writeText(compilerCandidateSource)
+            moduleDirectory.resolve("preprocessed-raw.glsl").writeText(preprocessedSource)
+            moduleDirectory.resolve("preprocessed.glsl").writeText(compilerMacroSource)
             moduleDirectory.resolve("materialized.glsl").writeText(materialized)
             val actualSignature = ShaderStructuralSignatureExtractor.extract(
                 request.stage,
@@ -578,6 +660,7 @@ internal class SpirvOptimizer(
                     request.stage,
                     module.generatedLayouts,
                     module.irisContracts,
+                    module.originalContract,
                 )
             }
             phase(
@@ -587,7 +670,7 @@ internal class SpirvOptimizer(
                 "${request.sourceName}#${module.name}",
             ) {
                 patcher.validateContract(
-                    materialized,
+                    finalPatch.compilerSource,
                     finalPatch.copy(originalContract = module.originalContract),
                     validateSourceContracts = false,
                 )
@@ -650,7 +733,7 @@ internal class SpirvOptimizer(
             actual.localSizeFallback == expected.localSizeFallback &&
             compatible(actual.resources, expected.resources, varying.resources) { !it.startsWith("shared ") } &&
             compatible(actual.stageInterfaces, expected.stageInterfaces, varying.interfaces) &&
-            compatible(actual.functionAbi, expected.functionAbi, varying.functionAbi)
+            compatible(actual.functionAbi, expected.functionAbi, varying.functionAbi) { !it.startsWith("struct ") }
     }
 
     private fun generatedLayoutDifference(

@@ -188,6 +188,81 @@ class SpirvOptimizerTest {
     }
 
     @Test
+    fun reservesPreferredUniformLocationsBeforeAllocatingRestoredUniforms() {
+        val source = """
+            #version 460 compatibility
+            uniform float restoredUniform;
+            uniform int heldItemId;
+            layout(local_size_x = 1) in;
+            void main() {}
+        """.trimIndent()
+        val preferred = listOf(
+            GeneratedShaderLayout(
+                ShaderAbiKey(ShaderAbiKind.UNIFORM, "heldItemId"),
+                "location",
+                0,
+            ),
+        )
+        val patch = OpenGlShaderPatcher().patch(
+            PreprocessorProtection.protect(source, "preferred-location.csh"),
+            ShaderStage.COMPUTE,
+            preferred,
+        )
+        val generated = patch.generatedLayouts.associateBy(GeneratedShaderLayout::key)
+
+        assertEquals(0, generated.getValue(ShaderAbiKey(ShaderAbiKind.UNIFORM, "heldItemId")).value)
+        assertEquals(1, generated.getValue(ShaderAbiKey(ShaderAbiKind.UNIFORM, "restoredUniform")).value)
+    }
+
+    @Test
+    fun acceptsMutuallyExclusiveStructDefinitionsDuringRestoredSourceValidation() {
+        val source = """
+            #version 460 compatibility
+            #if HOST_LAYOUT == 0
+            struct Payload { float value; };
+            #else
+            struct Payload { vec2 value; };
+            #endif
+            layout(local_size_x = 1) in;
+            void main() {}
+        """.trimIndent()
+
+        val patch = OpenGlShaderPatcher().patch(
+            PreprocessorProtection.protectGeneratedCompilerSource(source, "conditional-struct.csh"),
+            ShaderStage.COMPUTE,
+        )
+
+        assertFalse("Payload" in patch.restorableTypeDeclarations)
+    }
+
+    @Test
+    fun acceptsMutuallyExclusiveAbiDeclarationsBeforeStructuralMaterialization() {
+        val source = """
+            #version 460 compatibility
+            #if HOST_LAYOUT == 0
+            uniform sampler2D payload;
+            #else
+            uniform usampler2D payload;
+            #endif
+            layout(local_size_x = 1) in;
+            void main() {}
+        """.trimIndent()
+
+        val patch = OpenGlShaderPatcher().patch(
+            PreprocessorProtection.protectGeneratedCompilerSource(source, "conditional-abi.csh"),
+            ShaderStage.COMPUTE,
+        )
+
+        assertEquals(1, patch.originalContract.entries.size)
+        assertEquals(1, patch.generatedLayouts.size)
+        val generated = patch.generatedLayouts.single()
+        assertEquals(
+            2,
+            "${generated.qualifier} = ${generated.value}".toRegex().findAll(patch.compilerSource).count(),
+        )
+    }
+
+    @Test
     fun restoresAnonymousBlocksExactlyAndLinksStagesAfterOptimization() = withWorkspace { workspace ->
         val optimizer = SpirvOptimizer(workspace.resolve("optimizer"))
         val vertex = optimizer.optimize(
@@ -405,6 +480,60 @@ class SpirvOptimizerTest {
         assertContains(restoredBlock, "layout(std430) readonly buffer DataBuffer {\n    float weights[];\n};")
         assertFalse("layout(offset = 0)" in restoredBlock)
         assertFalse("_123" in restoredBlock)
+    }
+
+    @Test
+    fun blockArrayMacroExtentsCompareByResolvedIntegerValue() {
+        val source = """
+            #version 460 compatibility
+            #define GRID_SIDE 4
+            #define GRID_VOLUME (GRID_SIDE * GRID_SIDE * GRID_SIDE)
+            layout(std430) buffer DataBuffer { uint values[GRID_VOLUME]; };
+            layout(local_size_x = 1) in;
+            void main() { values[0] = 1u; }
+        """.trimIndent()
+        val patcher = OpenGlShaderPatcher()
+        val patch = patcher.patch(PreprocessorProtection.protect(source, "macro-block.csh"), ShaderStage.COMPUTE)
+        val crossStyle = patch.compilerSource
+            .replace("#define GRID_SIDE 4\n", "")
+            .replace("#define GRID_VOLUME (GRID_SIDE * GRID_SIDE * GRID_SIDE)\n", "")
+            .replace("values[GRID_VOLUME]", "values[64]")
+        val symbolicCompilerCopy = crossStyle.replace("values[64]", "values[GRID_VOLUME]")
+        val materializedPatch = patcher.patch(
+            PreprocessorProtection.protect(symbolicCompilerCopy, "macro-block-final.csh"),
+            ShaderStage.COMPUTE,
+            expectedContract = patch.originalContract,
+        )
+
+        val restored = patcher.restore(crossStyle, patch.copy(integerMacros = emptyMap()))
+
+        assertContains(materializedPatch.compilerSource, "uint values[64];")
+        assertContains(restored, "uint values[GRID_VOLUME];")
+    }
+
+    @Test
+    fun finalCompilerCopyBridgesMissingConditionalIntegerMacro() {
+        val contractSource = """
+            #version 460 compatibility
+            #define SM_STRUCT_SETTING_GRID_SIZE 64
+            #if defined(DISTANT_HORIZONS)
+            #define GRID_SIZE SM_STRUCT_SETTING_GRID_SIZE
+            #define usam_data colortex8
+            #endif
+            uniform sampler2D colortex8;
+            int readGridSize() { return GRID_SIZE + textureSize(usam_data, 0).x; }
+        """.trimIndent()
+        val preprocessed = """
+            #version 460 compatibility
+            uniform sampler2D colortex8;
+            int readGridSize() { return GRID_SIZE + textureSize(usam_data, 0).x; }
+        """.trimIndent()
+
+        val result = restoreMissingCompilerMacros(preprocessed, contractSource)
+
+        assertContains(result, "#define GRID_SIZE 64")
+        assertContains(result, "#define usam_data colortex8")
+        assertContains(result, "return GRID_SIZE + textureSize(usam_data, 0).x;")
     }
 
     @Test

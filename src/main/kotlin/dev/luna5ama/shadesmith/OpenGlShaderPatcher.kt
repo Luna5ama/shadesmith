@@ -44,6 +44,7 @@ internal data class OpenGlShaderPatch(
     val restorableDeclarations: Map<ShaderAbiKey, String>,
     val irisContracts: IrisShaderContractPlan,
     val originalContract: ShaderAbiContract,
+    val integerMacros: Map<String, Long>,
 )
 
 internal class OpenGlShaderPatchException(
@@ -71,6 +72,7 @@ internal class OpenGlShaderPatcher {
         stage: ShaderStage,
         preferredLayouts: List<GeneratedShaderLayout> = emptyList(),
         sourceContracts: IrisShaderContractPlan? = null,
+        expectedContract: ShaderAbiContract? = null,
     ): OpenGlShaderPatch {
         val contracts = try {
             sourceContracts ?: IrisShaderContractExtractor.extract(
@@ -99,7 +101,15 @@ internal class OpenGlShaderPatcher {
         } else {
             contracts.prepareCompilerSource(protectedSource.compilerSource())
         }
-        val source = normalizeLineEndings(contractCompilerSource)
+        var source = normalizeLineEndings(contractCompilerSource)
+        if (expectedContract != null) {
+            source = materializeBlockArrayExtents(
+                source,
+                expectedContract,
+                protectedSource.sourceName,
+                stage,
+            )
+        }
         val version = VERSION_REGEX.find(source)
             ?: fail(protectedSource.sourceName, stage, null, "compiler source has no #version directive")
         var compilerSource = source.replaceRange(version.range, "#version 460 core")
@@ -134,6 +144,7 @@ internal class OpenGlShaderPatcher {
             ),
             irisContracts = contracts,
             originalContract = analyzeContract(source, protectedSource.sourceName, stage),
+            integerMacros = resolveIntegerObjectMacros(source),
         )
     }
 
@@ -183,7 +194,7 @@ internal class OpenGlShaderPatcher {
         validateSourceContracts: Boolean = true,
     ) {
         val compilerView = patch.irisContracts.prepareCompilerSource(restoredSource)
-        val actual = analyzeContract(compilerView, patch.sourceName, patch.stage)
+        val actual = analyzeContract(compilerView, patch.sourceName, patch.stage, patch.integerMacros)
         val expected = patch.originalContract
         val missing = expected.entries.keys - actual.entries.keys
         val unexpected = actual.entries.keys - expected.entries.keys
@@ -230,7 +241,16 @@ internal class OpenGlShaderPatcher {
                     "${key.kind}:${key.name} lost layout contract ${expectedEntry.layout - actualEntry.layout}",
                 )
             }
-            if (expectedEntry.blockSignature != actualEntry.blockSignature) {
+            val restoredBlockSignature = patch.restorableDeclarations[key]?.let { original ->
+                val declaration = parseDeclarations(original).singleOrNull { it.key == key }
+                declaration?.let {
+                    blockSignature(original, it, patch.sourceName, patch.stage, emptyMap())
+                }
+            }
+            if (
+                expectedEntry.blockSignature != actualEntry.blockSignature &&
+                restoredBlockSignature != actualEntry.blockSignature
+            ) {
                 fail(
                     patch.sourceName,
                     patch.stage,
@@ -283,6 +303,11 @@ internal class OpenGlShaderPatcher {
     ): List<GeneratedShaderLayout> {
         val preferred = preferredLayouts.associateBy { it.key }
         val occupied = LayoutNamespace.entries.associateWith { mutableSetOf<Int>() }.toMutableMap()
+        val occupiedBy = LayoutNamespace.entries.associateWith { mutableMapOf<Int, ShaderAbiKey>() }
+
+        fun record(namespace: LayoutNamespace, value: Int, slots: Int, key: ShaderAbiKey) {
+            repeat(slots) { occupiedBy.getValue(namespace).putIfAbsent(value + it, key) }
+        }
 
         declarations.forEach { declaration ->
             val qualifier = requiredLayoutQualifier(declaration) ?: return@forEach
@@ -294,48 +319,77 @@ internal class OpenGlShaderPatcher {
                     sourceLine(source, declaration.range.first),
                     "$qualifier for ${declaration.key.kind}:${declaration.key.name} must be an integer literal",
                 )
-            occupy(occupied.getValue(layoutNamespace(declaration)), value, declaration.locationSlots())
+            val namespace = layoutNamespace(declaration)
+            val slots = declaration.locationSlots()
+            occupy(occupied.getValue(namespace), value, slots)
+            record(namespace, value, slots, declaration.key)
+        }
+
+        val generatedCandidates = declarations.groupBy(ParsedDeclaration::key).mapNotNull { (key, variants) ->
+            val missing = variants.filter { declaration ->
+                val qualifier = requiredLayoutQualifier(declaration) ?: return@filter false
+                declaration.layoutValue(qualifier) == null
+            }
+            if (missing.isEmpty()) return@mapNotNull null
+            val qualifiers = missing.mapNotNull(::requiredLayoutQualifier).distinct()
+            val namespaces = missing.map(::layoutNamespace).distinct()
+            if (qualifiers.size != 1 || namespaces.size != 1) {
+                fail(
+                    sourceName,
+                    stage,
+                    sourceLine(source, missing.first().range.first),
+                    "conditional ABI variants require incompatible generated layouts for ${key.kind}:${key.name}",
+                )
+            }
+            LayoutCandidate(key, qualifiers.single(), namespaces.single(), missing.maxOf { it.locationSlots() })
+        }
+
+        generatedCandidates.forEach { candidate ->
+            val preferredLayout = preferred[candidate.key] ?: return@forEach
+            val qualifier = candidate.qualifier
+            if (preferredLayout.qualifier != qualifier) {
+                fail(
+                    sourceName,
+                    stage,
+                    null,
+                    "preferred layout kind changed for ${candidate.key.kind}:${candidate.key.name}",
+                )
+            }
+            val namespace = candidate.namespace
+            val owners = (preferredLayout.value until preferredLayout.value + candidate.slots)
+                .mapNotNull(occupiedBy.getValue(namespace)::get)
+                .distinct()
+            if (owners.any { it != candidate.key } && !namespace.allowsGeneratedAlias) {
+                fail(
+                    sourceName,
+                    stage,
+                    null,
+                    "preferred $qualifier ${preferredLayout.value} collides for " +
+                        "${candidate.key.kind}:${candidate.key.name}; occupied by $owners",
+                )
+            }
+            occupy(occupied.getValue(namespace), preferredLayout.value, candidate.slots)
+            record(namespace, preferredLayout.value, candidate.slots, candidate.key)
         }
 
         return buildList {
-            declarations.forEach { declaration ->
-                val qualifier = requiredLayoutQualifier(declaration) ?: return@forEach
-                if (declaration.layoutValue(qualifier) != null) return@forEach
-                val namespace = layoutNamespace(declaration)
-                val slots = declaration.locationSlots()
-                val preferredLayout = preferred[declaration.key]
+            generatedCandidates.forEach { candidate ->
+                val preferredLayout = preferred[candidate.key]
                 val value = if (preferredLayout != null) {
-                    if (preferredLayout.qualifier != qualifier) {
-                        fail(
-                            sourceName,
-                            stage,
-                            sourceLine(source, declaration.range.first),
-                            "preferred layout kind changed for ${declaration.key.kind}:${declaration.key.name}",
-                        )
-                    }
-                    if (
-                        !isFree(occupied.getValue(namespace), preferredLayout.value, slots) &&
-                        !namespace.allowsGeneratedAlias
-                    ) {
-                        fail(
-                            sourceName,
-                            stage,
-                            sourceLine(source, declaration.range.first),
-                            "preferred $qualifier ${preferredLayout.value} collides for " +
-                                "${declaration.key.kind}:${declaration.key.name}",
-                        )
-                    }
                     preferredLayout.value
                 } else {
-                    val firstFree = firstFree(occupied.getValue(namespace), slots)
-                    if (namespace == LayoutNamespace.SAMPLER_BINDING && firstFree >= MAX_COMPILER_SAMPLER_BINDINGS) {
+                    val firstFree = firstFree(occupied.getValue(candidate.namespace), candidate.slots)
+                    if (candidate.namespace == LayoutNamespace.SAMPLER_BINDING && firstFree >= MAX_COMPILER_SAMPLER_BINDINGS) {
                         0
                     } else {
                         firstFree
                     }
                 }
-                occupy(occupied.getValue(namespace), value, slots)
-                add(GeneratedShaderLayout(declaration.key, qualifier, value))
+                if (preferredLayout == null) {
+                    occupy(occupied.getValue(candidate.namespace), value, candidate.slots)
+                    record(candidate.namespace, value, candidate.slots, candidate.key)
+                }
+                add(GeneratedShaderLayout(candidate.key, candidate.qualifier, value))
             }
         }
     }
@@ -345,18 +399,20 @@ internal class OpenGlShaderPatcher {
         declarations: List<ParsedDeclaration>,
         generatedLayouts: List<GeneratedShaderLayout>,
     ): String {
-        val declarationsByKey = declarations.associateBy { it.key }
-        val insertions = generatedLayouts.map { generated ->
-            val declaration = declarationsByKey.getValue(generated.key)
-            if (declaration.layoutRange == null) {
-                SourceInsertion(
-                    declaration.range.first + declaration.indent.length,
-                    "layout(${generated.qualifier} = ${generated.value}) ",
-                )
-            } else {
-                val close = source.indexOf(')', declaration.layoutRange.first)
-                val separator = if (declaration.layoutItems.isEmpty()) "" else ", "
-                SourceInsertion(close, "$separator${generated.qualifier} = ${generated.value}")
+        val declarationsByKey = declarations.groupBy { it.key }
+        val insertions = generatedLayouts.flatMap { generated ->
+            declarationsByKey.getValue(generated.key).mapNotNull { declaration ->
+                if (declaration.layoutValue(generated.qualifier) != null) return@mapNotNull null
+                if (declaration.layoutRange == null) {
+                    SourceInsertion(
+                        declaration.range.first + declaration.indent.length,
+                        "layout(${generated.qualifier} = ${generated.value}) ",
+                    )
+                } else {
+                    val close = source.indexOf(')', declaration.layoutRange.first)
+                    val separator = if (declaration.layoutItems.isEmpty()) "" else ", "
+                    SourceInsertion(close, "$separator${generated.qualifier} = ${generated.value}")
+                }
             }
         }
 
@@ -522,10 +578,12 @@ internal class OpenGlShaderPatcher {
                 match.groupValues[1] to source.substring(range)
             }
             .toList()
-        if (declarations.map { it.first }.toSet().size != declarations.size) {
-            fail(sourceName, stage, null, "duplicate top-level struct declarations are unsupported")
-        }
-        return declarations.toMap(linkedMapOf())
+        return declarations.groupBy({ it.first }, { it.second })
+            .mapNotNull { (name, bodies) ->
+                val distinctBodies = bodies.distinct()
+                if (distinctBodies.size == 1) name to distinctBodies.single() else null
+            }
+            .toMap(linkedMapOf())
     }
 
     private fun parseTypeDeclarationNames(source: String): Set<String> {
@@ -535,8 +593,15 @@ internal class OpenGlShaderPatcher {
             .mapTo(linkedSetOf()) { it.groupValues[1] }
     }
 
-    private fun analyzeContract(source: String, sourceName: String, stage: ShaderStage): ShaderAbiContract {
-        val declarations = parseDeclarations(normalizeLineEndings(source))
+    private fun analyzeContract(
+        source: String,
+        sourceName: String,
+        stage: ShaderStage,
+        inheritedIntegerMacros: Map<String, Long> = emptyMap(),
+    ): ShaderAbiContract {
+        val contractSource = expandAbiQualifierMacros(normalizeLineEndings(source))
+        val declarations = parseDeclarations(contractSource)
+        val integerMacros = inheritedIntegerMacros + resolveIntegerObjectMacros(contractSource)
         val entries = declarations.associate { declaration ->
             declaration.key to ShaderAbiEntry(
                 key = declaration.key,
@@ -546,14 +611,10 @@ internal class OpenGlShaderPatcher {
                 qualifiersBeforeStorage = declaration.qualifiersBeforeStorage,
                 qualifiersAfterStorage = declaration.qualifiersAfterStorage,
                 layout = declaration.layoutItems.mapTo(mutableSetOf()) { it.normalized },
-                blockSignature = blockSignature(source, declaration, sourceName, stage),
+                blockSignature = blockSignature(contractSource, declaration, sourceName, stage, integerMacros),
             )
         }
-        if (entries.size != declarations.size) {
-            fail(sourceName, stage, null, "duplicate stage ABI declaration names are unsupported")
-        }
-
-        val code = stripComments(source)
+        val code = stripComments(contractSource)
         val workGroup = WORKGROUP_LAYOUT_REGEX.find(code)?.groupValues?.get(1)?.let {
             val items = parseLayoutItems(it).associate { item -> item.key to item.value }
             Triple(
@@ -577,21 +638,92 @@ internal class OpenGlShaderPatcher {
         )
     }
 
+    private fun expandAbiQualifierMacros(source: String): String {
+        val aliases = ABI_QUALIFIER_MACRO.findAll(source).mapNotNull { match ->
+            val value = match.groupValues[2].trim()
+            val tokens = value.split(WHITESPACE_REGEX)
+            if (tokens.none { it == "uniform" || it == "buffer" }) return@mapNotNull null
+            if (tokens.any { it !in ABI_QUALIFIER_TOKENS }) return@mapNotNull null
+            match.groupValues[1] to value
+        }.toMap()
+        if (aliases.isEmpty()) return source
+        return source.lineSequence().joinToString("\n") { line ->
+            if (line.trimStart().startsWith('#')) {
+                line
+            } else {
+                aliases.entries.fold(line) { value, (name, replacement) ->
+                    Regex("(?<![A-Za-z0-9_])${Regex.escape(name)}(?![A-Za-z0-9_])")
+                        .replace(value, replacement)
+                }
+            }
+        } + "\n"
+    }
+
     private fun blockSignature(
         source: String,
         declaration: ParsedDeclaration,
         sourceName: String,
         stage: ShaderStage,
+        integerMacros: Map<String, Long> = resolveIntegerObjectMacros(source),
     ): ShaderBlockSignature? {
         if (declaration.key.kind !in BLOCK_KINDS) return null
         val range = blockDeclarationRange(source, declaration, sourceName, stage)
         return ShaderBlockSignature(
             body = canonicalizeIntegerArraySizes(
-                stripComments(source.substring(range.openBrace, range.closeBrace + 1))
+                expandIntegerObjectMacros(
+                    stripComments(source.substring(range.openBrace, range.closeBrace + 1)),
+                    integerMacros,
+                )
                     .replace(WHITESPACE_REGEX, ""),
             ),
             instance = stripComments(source.substring(range.closeBrace + 1, range.semicolon)).replace(WHITESPACE_REGEX, ""),
         )
+    }
+
+    private fun materializeBlockArrayExtents(
+        source: String,
+        expectedContract: ShaderAbiContract,
+        sourceName: String,
+        stage: ShaderStage,
+    ): String {
+        val declarations = parseDeclarations(source).associateBy { it.key }
+        val replacements = mutableListOf<Pair<IntRange, String>>()
+        val touched = linkedSetOf<ShaderAbiKey>()
+        expectedContract.entries.forEach { (key, entry) ->
+            val expected = entry.blockSignature ?: return@forEach
+            val declaration = declarations[key] ?: return@forEach
+            val range = blockDeclarationRange(source, declaration, sourceName, stage)
+            val body = source.substring(range.openBrace, range.closeBrace + 1)
+            val actualExtents = BLOCK_ARRAY_EXTENT.findAll(body).toList()
+            val expectedExtents = BLOCK_ARRAY_EXTENT.findAll(expected.body).toList()
+            if (actualExtents.size != expectedExtents.size) return@forEach
+            actualExtents.zip(expectedExtents).forEach { (actualExtent, expectedExtent) ->
+                val actualExpression = actualExtent.groupValues[1]
+                val expectedValue = IntegerConstantExpressionParser(expectedExtent.groupValues[1]).parse()
+                    ?: return@forEach
+                val actualValue = IntegerConstantExpressionParser(actualExpression).parse()
+                if (actualValue != null) return@forEach
+                val expressionRange = requireNotNull(actualExtent.groups[1]).range
+                replacements += (range.openBrace + expressionRange.first until
+                    range.openBrace + expressionRange.last + 1) to expectedValue.toString()
+                touched += key
+            }
+        }
+        if (replacements.isEmpty()) return source
+        var result = source
+        replacements.sortedByDescending { it.first.first }.forEach { (range, replacement) ->
+            result = result.replaceRange(range, replacement)
+        }
+        val materialized = parseDeclarations(result).associateBy { it.key }
+        touched.forEach { key ->
+            val declaration = materialized[key] ?: fail(sourceName, stage, null, "$key disappeared during ABI materialization")
+            val actual = blockSignature(result, declaration, sourceName, stage, emptyMap())
+            val expected = expectedContract.entries.getValue(key).blockSignature
+            if (!blockSignatureRestorable(expected, actual)) {
+                fail(sourceName, stage, null, "$key could not materialize proven array extents: $expected vs $actual")
+            }
+        }
+        return result
     }
 
     private fun declarationSourceRange(
@@ -706,8 +838,9 @@ internal class OpenGlShaderPatcher {
 
     private fun parseDeclarations(source: String): List<ParsedDeclaration> {
         val lexicalMap = buildLexicalMap(source)
-        val variables = VARIABLE_DECLARATION_REGEX.findAll(source).mapNotNull { match ->
-            if (!lexicalMap.isTopLevelCode(match.range.first)) return@mapNotNull null
+        val topLevelLineStarts = topLevelLineStarts(source, lexicalMap)
+        val variables = topLevelLineStarts.mapNotNull { offset ->
+            val match = VARIABLE_DECLARATION_REGEX.matchAt(source, offset) ?: return@mapNotNull null
             val storage = match.groupValues[5]
             ParsedDeclaration(
                 range = match.range,
@@ -729,8 +862,8 @@ internal class OpenGlShaderPatcher {
                 qualifiersAfterStorage = parseQualifierList(match.groupValues[6]),
             )
         }
-        val blocks = BLOCK_DECLARATION_REGEX.findAll(source).mapNotNull { match ->
-            if (!lexicalMap.isTopLevelCode(match.range.first)) return@mapNotNull null
+        val blocks = topLevelLineStarts.mapNotNull { offset ->
+            val match = BLOCK_DECLARATION_REGEX.matchAt(source, offset) ?: return@mapNotNull null
             val storage = match.groupValues[5]
             val name = match.groupValues[7]
             ParsedDeclaration(
@@ -748,8 +881,46 @@ internal class OpenGlShaderPatcher {
                 qualifiersBeforeStorage = parseQualifierList(match.groupValues[4]),
                 qualifiersAfterStorage = parseQualifierList(match.groupValues[6]),
             )
+        }.toList()
+        val macroBlocks = topLevelLineStarts.mapNotNull { offset ->
+            val match = BLOCK_MACRO_DECLARATION_REGEX.matchAt(source, offset) ?: return@mapNotNull null
+            if (blocks.any { it.range.overlaps(match.range) }) return@mapNotNull null
+            val layoutItems = parseLayoutItems(match.groupValues[3])
+            if (layoutItems.none { it.key == "std430" || it.key == "binding" }) return@mapNotNull null
+            val name = match.groupValues[5]
+            ParsedDeclaration(
+                range = match.range,
+                indent = match.groupValues[1],
+                layoutRange = match.groups[2]?.range,
+                layoutItems = layoutItems,
+                storageRange = match.groups[4]!!.range,
+                key = ShaderAbiKey(ShaderAbiKind.STORAGE_BLOCK, name),
+                type = name,
+                arraySuffix = "",
+                qualifiersBeforeStorage = emptyList(),
+                qualifiersAfterStorage = emptyList(),
+            )
         }
-        return (variables + blocks).sortedBy { it.range.first }.toList()
+        return (variables + blocks + macroBlocks).sortedBy { it.range.first }.toList()
+    }
+
+    private fun topLevelLineStarts(source: String, lexicalMap: LexicalMap): List<Int> {
+        val result = mutableListOf<Int>()
+        var lineStart = 0
+        while (lineStart < source.length) {
+            var content = lineStart
+            while (content < source.length && source[content] in "\t ") content++
+            if (content < source.length && source[content] !in "\r\n" && lexicalMap.isTopLevelCode(content)) {
+                result += lineStart
+            }
+            val newline = source.indexOfAny(charArrayOf('\r', '\n'), content)
+            lineStart = when {
+                newline < 0 -> source.length
+                source[newline] == '\r' && source.getOrNull(newline + 1) == '\n' -> newline + 2
+                else -> newline + 1
+            }
+        }
+        return result
     }
 
     private fun requiredLayoutQualifier(declaration: ParsedDeclaration): String? {
@@ -979,6 +1150,13 @@ internal class OpenGlShaderPatcher {
         STORAGE_BLOCK_BINDING,
     }
 
+    private data class LayoutCandidate(
+        val key: ShaderAbiKey,
+        val qualifier: String,
+        val namespace: LayoutNamespace,
+        val slots: Int,
+    )
+
     private data class ParsedDeclaration(
         val range: IntRange,
         val indent: String,
@@ -1027,6 +1205,15 @@ internal class OpenGlShaderPatcher {
                 "((?:$QUALIFIER\\s+)*)(uniform|buffer)\\s+((?:$QUALIFIER\\s+)*)" +
                 "([A-Za-z_][A-Za-z0-9_]*)\\s*\\{"
             ).toRegex()
+        private val BLOCK_MACRO_DECLARATION_REGEX = (
+            "(?m)^([\\t ]*)(?:(layout\\s*\\(([^)\\r\\n]*)\\)\\s*))?" +
+                "([A-Za-z_][A-Za-z0-9_]*)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*\\{"
+            ).toRegex()
+        private val ABI_QUALIFIER_MACRO =
+            "(?m)^[\\t ]*#define[\\t ]+([A-Za-z_][A-Za-z0-9_]*)[\\t ]+([^\\r\\n]+)$".toRegex()
+        private val ABI_QUALIFIER_TOKENS = setOf(
+            "uniform", "buffer", "coherent", "volatile", "restrict", "readonly", "writeonly",
+        )
         private val STRUCT_DECLARATION_REGEX =
             "(?m)^[\\t ]*struct\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*\\{".toRegex()
         private val CUSTOM_INTERFACE_BLOCK_REGEX = (
@@ -1048,6 +1235,7 @@ internal class OpenGlShaderPatcher {
         private val SIZED_ARRAY_SUFFIX = """\[\d+]""".toRegex()
         private val BLOCK_INSTANCE_NAME_REGEX = """[A-Za-z_][A-Za-z0-9_]*""".toRegex()
         private val BLOCK_MEMBER_OFFSET_LAYOUT = """layout\(offset=[^)]+\)""".toRegex()
+        private val BLOCK_ARRAY_EXTENT = """\[([^]]+)]""".toRegex()
         private val WHITESPACE_REGEX = """\s+""".toRegex()
         private val LINE_COMMENT_REGEX = """//[^\r\n]*""".toRegex()
         private val BLOCK_COMMENT_REGEX = """/\*[\s\S]*?\*/""".toRegex()
@@ -1061,6 +1249,39 @@ private fun canonicalizeIntegerArraySizes(source: String): String {
         "[$value]"
     }
 }
+
+internal fun resolveIntegerObjectMacros(source: String): Map<String, Long> {
+    val definitions = INTEGER_OBJECT_MACRO.findAll(source).groupBy(
+        { it.groupValues[1] },
+        { it.groupValues[2].substringBefore("//").trim() },
+    ).mapNotNull { (name, bodies) ->
+        bodies.distinct().singleOrNull()?.let { name to it }
+    }.toMap()
+    val resolved = linkedMapOf<String, Long>()
+    var changed: Boolean
+    do {
+        changed = false
+        definitions.forEach { (name, body) ->
+            if (name in resolved) return@forEach
+            val expanded = INTEGER_IDENTIFIER.replace(body) { match ->
+                resolved[match.value]?.toString() ?: match.value
+            }
+            val value = IntegerConstantExpressionParser(expanded).parse() ?: return@forEach
+            resolved[name] = value
+            changed = true
+        }
+    } while (changed)
+    return resolved
+}
+
+private fun expandIntegerObjectMacros(source: String, macros: Map<String, Long>): String {
+    if (macros.isEmpty()) return source
+    return INTEGER_IDENTIFIER.replace(source) { match -> macros[match.value]?.toString() ?: match.value }
+}
+
+private val INTEGER_OBJECT_MACRO =
+    "(?m)^[\\t ]*#define[\\t ]+([A-Za-z_][A-Za-z0-9_]*)[\\t ]+([^\\r\\n]+)$".toRegex()
+private val INTEGER_IDENTIFIER = "(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*(?![A-Za-z0-9_])".toRegex()
 
 private class IntegerConstantExpressionParser(private val source: String) {
     private var cursor = 0
