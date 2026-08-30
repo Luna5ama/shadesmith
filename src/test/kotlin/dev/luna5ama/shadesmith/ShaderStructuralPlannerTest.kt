@@ -158,7 +158,7 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
-    fun tokenPasteFailsClosedWhenFloatArgumentsCannotBeSeparated() {
+    fun tokenPasteSelectionDoesNotStructuralizeUnrelatedFloatSettings() {
         val source = """
             #version 460 compatibility
             #define SETTING_MODE 0 //[0 1]
@@ -173,12 +173,11 @@ class ShaderStructuralPlannerTest {
             void main() { float value = APPLY(2.0); }
         """.trimIndent()
         val base = ShaderCompilerCopyPlanner.plan(source, "token-paste-float.csh")
-        val preserved = assertIs<ShaderStructuralPlanningResult.Preserved>(
-            ShaderStructuralPlanner.plan(base, ShaderStage.COMPUTE),
-        )
-
-        assertTrue("floating-point structural settings" in preserved.reason, preserved.reason)
-        assertTrue("SETTING_GAIN" in preserved.reason)
+        assertEquals(1, base.compilerModuleCount, base.structuralBlockers.joinToString { it.reason })
+        assertTrue(base.structuralBlockers.isEmpty())
+        assertFalse(ShaderStructuralPlanner.requiresPlanning(base))
+        assertTrue(base.settings.single { it.name == "SETTING_GAIN" }.type == ShaderSettingType.FLOAT)
+        assertFalse("##" in assertNotNull(base.compilerSource))
     }
 
     @Test

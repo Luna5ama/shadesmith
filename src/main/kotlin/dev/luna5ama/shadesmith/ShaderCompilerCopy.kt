@@ -247,7 +247,13 @@ internal object ShaderCompilerCopyPlanner {
             localSizeIdSupported,
             localSizeProbeDiagnostic,
         )
-        val planningSource = irisContracts.compilerSource
+        val tokenPasteLowering = lowerSettingTokenPasteDispatches(
+            irisContracts.compilerSource,
+            sourceName,
+            typedSettings,
+        )
+        blockers += tokenPasteLowering.blockers
+        val planningSource = tokenPasteLowering.source
         val protection = PreprocessorProtection.protect(planningSource, sourceName)
         val sourceMap = SourceMap(planningSource, sourceName)
         sourceMap.directives += protection.directives
@@ -329,6 +335,848 @@ internal object ShaderCompilerCopyPlanner {
             structuralBlockers = distinctBlockers,
             irisContracts = irisContracts,
         )
+    }
+
+    private fun lowerSettingTokenPasteDispatches(
+        source: String,
+        sourceName: String,
+        settings: List<ShaderSetting>,
+    ): TokenPasteLoweringResult {
+        if (settings.none { it.type == ShaderSettingType.INT } || "##" !in source) {
+            return TokenPasteLoweringResult(source, emptyList())
+        }
+        val protection = PreprocessorProtection.protect(source, sourceName)
+        val sourceMap = SourceMap(source, sourceName).also { it.directives += protection.directives }
+        val definitions = protection.directives.filter {
+            it.kind == PreprocessorDirectiveKind.DEFINE && it.macroName != null
+        }
+        val functionDefinitions = definitions.mapNotNull { directive ->
+            parseFunctionMacro(directive)?.let { ParsedFunctionMacro(directive, it.first, it.second) }
+        }
+        val functionMacros = functionDefinitions.groupBy { requireNotNull(it.directive.macroName) }.mapNotNull { (name, items) ->
+            val parameterLists = items.map(ParsedFunctionMacro::parameters).distinct()
+            if (parameterLists.size != 1) null else name to FunctionMacro(name, parameterLists.single(), items)
+        }.toMap()
+        if (functionMacros.isEmpty()) return TokenPasteLoweringResult(source, emptyList())
+        val objectMacros = definitions.filterNot { it.macroFunctionLike }.groupBy { requireNotNull(it.macroName) }
+            .mapValues { (_, items) -> items.map { it.macroBody.orEmpty() } }
+        val typeLikeObjectMacros = definitions.filter {
+            !it.macroFunctionLike && PreprocessorFeature.TYPE_OR_QUALIFIER in it.features
+        }.mapNotNull(PreprocessorDirective::macroName).toSet()
+        val domains = mutableMapOf<MacroParameter, TokenValueDomain>()
+        val edges = functionMacros.values.flatMap { caller ->
+            caller.definitions.flatMap { definition ->
+                findMacroInvocations(definition.body, functionMacros).map { invocation ->
+                    MacroInvocationEdge(caller, invocation)
+                }
+            }
+        }
+        val sourceWithoutMacroDefinitions = applyReplacements(
+            source,
+            definitions.map { directive ->
+                val range = sourceMap.directiveRange(directive)
+                Replacement(range.first, range.last + 1, maskSource(source.substring(range)))
+            },
+        )
+        val roots = findMacroInvocations(sourceWithoutMacroDefinitions, functionMacros)
+        val settingsByName = settings.associateBy(ShaderSetting::name)
+
+        var iteration = 0
+        while (iteration <= functionMacros.size) {
+            var changed = false
+            roots.forEach { invocation ->
+                changed = mergeInvocationDomains(
+                    invocation,
+                    emptyMap(),
+                    emptySet(),
+                    functionMacros,
+                    objectMacros,
+                    settingsByName,
+                    domains,
+                ) || changed
+            }
+            edges.forEach { edge ->
+                val environment = edge.caller.parameters.associateWith { parameter ->
+                    domains[MacroParameter(edge.caller.name, parameter)]
+                }.mapNotNull { (name, domain) -> domain?.let { name to it } }.toMap()
+                changed = mergeInvocationDomains(
+                    edge.invocation,
+                    environment,
+                    edge.caller.parameters.toSet(),
+                    functionMacros,
+                    objectMacros,
+                    settingsByName,
+                    domains,
+                ) || changed
+            }
+            if (!changed) break
+            iteration++
+        }
+        val identifiers = identifiers(maskCommentsAndStrings(source)).toSet()
+        val functionSignatures = collectFunctionSignatures(source)
+        val constantTypes = collectConstantTypes(source)
+        val lowerings = mutableListOf<TokenPasteLowering>()
+        val loweringBlockers = mutableListOf<ShaderCompilerCopyBlocker>()
+        functionMacros.values.forEach macroLoop@ { macro ->
+            if (macro.definitions.map(ParsedFunctionMacro::body).distinct().size != 1) return@macroLoop
+            val helperName = tokenPasteHelperName(macro.name)
+            var emittedHelperDefinitions = false
+            macro.definitions.forEach definitionLoop@ { definition ->
+                if ("##" !in definition.body) return@definitionLoop
+                val chain = parseTokenPasteChain(definition.body, macro.parameters) ?: return@definitionLoop
+                val pastedDomains = chain.parameters.map { parameter ->
+                    parameter to (domains[MacroParameter(macro.name, parameter)] ?: return@definitionLoop)
+                }
+                if (pastedDomains.none { (_, domain) -> domain.settings.isNotEmpty() }) return@definitionLoop
+                if (pastedDomains.any { (_, domain) -> domain.values.isEmpty() }) {
+                    return@definitionLoop
+                }
+                val orderedDomains = pastedDomains.map { (parameter, domain) ->
+                    parameter to domain.values.sortedWith(
+                        compareBy<String> { it.toLongOrNull() ?: Long.MAX_VALUE }.thenBy { it },
+                    )
+                }
+                val combinations = cartesianTokenValues(orderedDomains)
+                if (combinations.isEmpty() || combinations.size > MAX_TOKEN_PASTE_DISPATCH_CASES) {
+                    return@definitionLoop
+                }
+                val existingHelper = reuseTokenPasteHelper(
+                    macro,
+                    definition,
+                    chain,
+                    functionSignatures,
+                    helperName,
+                )
+                val candidates = if (existingHelper == null) {
+                    val candidatePattern = chain.candidatePattern()
+                    identifiers.mapNotNull { identifier ->
+                        val match = candidatePattern.matchEntire(identifier) ?: return@mapNotNull null
+                        val assignment = linkedMapOf<String, String>()
+                        chain.captureParameters.forEachIndexed { index, parameter ->
+                            val value = match.groupValues[index + 1]
+                            val previous = assignment.putIfAbsent(parameter, value)
+                            if (previous != null && previous != value) return@mapNotNull null
+                        }
+                        assignment.toMap() to identifier
+                    }.toMap()
+                } else {
+                    emptyMap()
+                }
+                if (existingHelper == null && combinations.any { it !in candidates }) return@definitionLoop
+                if (existingHelper == null && combinations.any { candidates[it] in typeLikeObjectMacros }) {
+                    return@definitionLoop
+                }
+                val helper = existingHelper ?: renderTokenPasteHelper(
+                    macro,
+                    definition,
+                    chain,
+                    orderedDomains,
+                    combinations,
+                    candidates,
+                    functionMacros,
+                    functionSignatures,
+                    constantTypes,
+                    helperName,
+                )
+                if (helper == null) {
+                    describeTokenPasteSignatureFailure(
+                        definition,
+                        chain,
+                        orderedDomains,
+                        pastedDomains,
+                        combinations,
+                        candidates,
+                        functionMacros,
+                        functionSignatures,
+                        constantTypes,
+                    )?.let { reason ->
+                        loweringBlockers += ShaderCompilerCopyBlocker(definition.directive.sourceLine, reason)
+                        return@definitionLoop
+                    }
+                }
+                val dispatch = helper?.macroBody
+                    ?: renderTokenPasteDispatch(definition.body, chain, orderedDomains, candidates)
+                if ("##" in normalizeTokenPastePunctuation(dispatch)) return@definitionLoop
+                val exact = definition.directive.exactText
+                val bodyOffset = exact.indexOf(definition.body)
+                if (bodyOffset < 0) return@definitionLoop
+                val lowered = buildString {
+                    helper?.prototypes?.let(::append)
+                    append(exact.replaceRange(bodyOffset, bodyOffset + definition.body.length, dispatch))
+                }
+                val range = sourceMap.directiveRange(definition.directive)
+                lowerings += TokenPasteLowering(
+                    Replacement(range.first, range.last + 1, lowered),
+                    helper?.definitions.orEmpty().takeIf { !emittedHelperDefinitions }.orEmpty(),
+                )
+                emittedHelperDefinitions = emittedHelperDefinitions || helper != null
+            }
+        }
+        val lowered = applyReplacements(source, lowerings.map(TokenPasteLowering::replacement))
+        val helpers = lowerings.map(TokenPasteLowering::helperDefinitions).filter(String::isNotBlank)
+        val loweredSource = if (helpers.isEmpty()) {
+            lowered
+        } else {
+            lowered.trimEnd() + "\n\n" + helpers.joinToString("\n") + "\n"
+        }
+        return TokenPasteLoweringResult(loweredSource, loweringBlockers)
+    }
+
+    internal fun tokenPasteHelperName(macroName: String): String {
+        val encoded = macroName.map { character -> character.code.toString(16).padStart(2, '0') }.joinToString("")
+        return "SM_TOKEN_PASTE_M$encoded"
+    }
+
+    private fun mergeInvocationDomains(
+        invocation: ParsedMacroInvocation,
+        environment: Map<String, TokenValueDomain>,
+        callerParameters: Set<String>,
+        functionMacros: Map<String, FunctionMacro>,
+        objectMacros: Map<String, List<String>>,
+        settings: Map<String, ShaderSetting>,
+        domains: MutableMap<MacroParameter, TokenValueDomain>,
+    ): Boolean {
+        val macro = functionMacros[invocation.name] ?: return false
+        if (macro.parameters.size != invocation.arguments.size) return false
+        var changed = false
+        macro.parameters.zip(invocation.arguments).forEach { (parameter, argument) ->
+            val token = stripOuterParentheses(stripComments(argument).trim())
+            if (token in callerParameters && token !in environment) return@forEach
+            val domain = resolveTokenValueDomain(argument, environment, objectMacros, settings, linkedSetOf())
+                ?: return@forEach
+            val key = MacroParameter(macro.name, parameter)
+            val merged = domains[key]?.merge(domain) ?: domain
+            if (merged != domains[key]) {
+                domains[key] = merged
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    private fun resolveTokenValueDomain(
+        expression: String,
+        environment: Map<String, TokenValueDomain>,
+        objectMacros: Map<String, List<String>>,
+        settings: Map<String, ShaderSetting>,
+        visiting: MutableSet<String>,
+    ): TokenValueDomain? {
+        val value = stripOuterParentheses(stripComments(expression).trim())
+        canonicalTokenInteger(value)?.let { return TokenValueDomain(setOf(it), emptySet()) }
+        if (!IDENTIFIER.matches(value)) return null
+        environment[value]?.let { return it }
+        settings[value]?.takeIf { it.type == ShaderSettingType.INT }?.let { setting ->
+            return TokenValueDomain(
+                setting.domain.mapNotNull(::canonicalTokenInteger).toSet(),
+                setOf(setting.name),
+            ).takeIf { it.values.size == setting.domain.size }
+        }
+        val bodies = objectMacros[value] ?: return TokenValueDomain(setOf(value), emptySet())
+        if (!visiting.add(value)) return null
+        val resolved = bodies.mapNotNull { body ->
+            resolveTokenValueDomain(body, environment, objectMacros, settings, visiting)
+        }
+        visiting.remove(value)
+        if (resolved.size != bodies.size || resolved.isEmpty()) return null
+        return resolved.reduce(TokenValueDomain::merge)
+    }
+
+    private fun canonicalTokenInteger(value: String): String? {
+        if (!INT_LITERAL.matches(value)) return null
+        return runCatching {
+            val unsigned = value.removePrefix("+")
+            when {
+                unsigned.startsWith("-0x", true) -> -unsigned.substring(3).toLong(16)
+                unsigned.startsWith("0x", true) -> unsigned.substring(2).toLong(16)
+                else -> unsigned.toLong()
+            }.toString()
+        }.getOrNull()?.takeIf { !it.startsWith('-') }
+    }
+
+    private fun stripOuterParentheses(source: String): String {
+        var result = source
+        while (result.startsWith('(') && result.endsWith(')')) {
+            var depth = 0
+            var wraps = true
+            result.forEachIndexed { index, character ->
+                when (character) {
+                    '(' -> depth++
+                    ')' -> depth--
+                }
+                if (depth == 0 && index != result.lastIndex) wraps = false
+            }
+            if (!wraps || depth != 0) break
+            result = result.substring(1, result.lastIndex).trim()
+        }
+        return result
+    }
+
+    private fun parseFunctionMacro(directive: PreprocessorDirective): Pair<List<String>, String>? {
+        if (!directive.macroFunctionLike) return null
+        val name = requireNotNull(directive.macroName)
+        val exact = directive.exactText
+        val nameOffset = exact.indexOf(name)
+        if (nameOffset < 0) return null
+        val open = exact.indexOf('(', nameOffset + name.length)
+        if (open < 0) return null
+        val close = matchingDelimiter(exact, open, '(', ')') ?: return null
+        val parameters = splitMacroArguments(exact.substring(open + 1, close)) ?: return null
+        if (parameters.any { !IDENTIFIER.matches(it) }) return null
+        return parameters to directive.macroBody.orEmpty()
+    }
+
+    private fun findMacroInvocations(
+        source: String,
+        macros: Map<String, FunctionMacro>,
+    ): List<ParsedMacroInvocation> {
+        val masked = maskCommentsAndStrings(source)
+        val result = mutableListOf<ParsedMacroInvocation>()
+        IDENTIFIER.findAll(masked).forEach { match ->
+            val name = match.value
+            if (name !in macros) return@forEach
+            var cursor = match.range.last + 1
+            while (cursor < masked.length && masked[cursor].isWhitespace()) cursor++
+            if (masked.getOrNull(cursor) != '(') return@forEach
+            val close = matchingDelimiter(masked, cursor, '(', ')') ?: return@forEach
+            val arguments = splitMacroArguments(source.substring(cursor + 1, close)) ?: return@forEach
+            result += ParsedMacroInvocation(name, arguments)
+        }
+        return result.distinct()
+    }
+
+    private fun matchingDelimiter(source: String, open: Int, opening: Char, closing: Char): Int? {
+        var depth = 0
+        for (index in open until source.length) {
+            when (source[index]) {
+                opening -> depth++
+                closing -> {
+                    depth--
+                    if (depth == 0) return index
+                }
+            }
+        }
+        return null
+    }
+
+    private fun splitMacroArguments(source: String): List<String>? {
+        if (source.isBlank()) return emptyList()
+        val result = mutableListOf<String>()
+        var start = 0
+        var parentheses = 0
+        var brackets = 0
+        var braces = 0
+        source.forEachIndexed { index, character ->
+            when (character) {
+                '(' -> parentheses++
+                ')' -> parentheses--
+                '[' -> brackets++
+                ']' -> brackets--
+                '{' -> braces++
+                '}' -> braces--
+                ',' -> if (parentheses == 0 && brackets == 0 && braces == 0) {
+                    result += source.substring(start, index).trim()
+                    start = index + 1
+                }
+            }
+            if (parentheses < 0 || brackets < 0 || braces < 0) return null
+        }
+        if (parentheses != 0 || brackets != 0 || braces != 0) return null
+        result += source.substring(start).trim()
+        return result.takeIf { it.none(String::isEmpty) }
+    }
+
+    private fun parseTokenPasteChain(body: String, parameters: List<String>): TokenPasteChain? {
+        val matches = TOKEN_PASTE_CHAIN.findAll(body).mapNotNull { match ->
+            val parts = match.value.split(TOKEN_PASTE_SEPARATOR).map(String::trim)
+            val pasted = parts.filter(parameters::contains).distinct()
+            if (pasted.isEmpty()) null else TokenPasteChain(match.range, parts, pasted)
+        }.toList()
+        if (matches.size != 1) return null
+        val chain = matches.single()
+        val outside = body.removeRange(chain.range)
+        if (chain.parameters.any { IDENTIFIER_TOKEN(it).containsMatchIn(outside) }) return null
+        return chain
+    }
+
+    private fun cartesianTokenValues(
+        domains: List<Pair<String, List<String>>>,
+    ): List<Map<String, String>> {
+        var rows = listOf<Map<String, String>>(emptyMap())
+        domains.forEach { (name, values) ->
+            rows = rows.flatMap { row -> values.map { value -> row + (name to value) } }
+            if (rows.size > MAX_TOKEN_PASTE_DISPATCH_CASES) return emptyList()
+        }
+        return rows
+    }
+
+    private fun renderTokenPasteDispatch(
+        body: String,
+        chain: TokenPasteChain,
+        domains: List<Pair<String, List<String>>>,
+        candidates: Map<Map<String, String>, String>,
+    ): String {
+        fun candidate(assignment: Map<String, String>): String {
+            val identifier = requireNotNull(candidates[assignment])
+            return normalizeTokenPastePunctuation(body.replaceRange(chain.range, identifier))
+        }
+        fun render(depth: Int, assignment: Map<String, String>): String {
+            if (depth == domains.size) return candidate(assignment)
+            val (parameter, values) = domains[depth]
+            var result = render(depth + 1, assignment + (parameter to values.last()))
+            values.dropLast(1).asReversed().forEach { value ->
+                val selected = render(depth + 1, assignment + (parameter to value))
+                result = "((($parameter) == $value) ? ($selected) : ($result))"
+            }
+            return result
+        }
+        return render(0, emptyMap())
+    }
+
+    private fun reuseTokenPasteHelper(
+        macro: FunctionMacro,
+        definition: ParsedFunctionMacro,
+        chain: TokenPasteChain,
+        functionSignatures: Map<String, Set<ValueSignature>>,
+        helperName: String,
+    ): TokenPasteHelper? {
+        val signatures = functionSignatures[helperName].orEmpty()
+        if (signatures.isEmpty()) return null
+        val call = parseTokenPasteCall(definition.body, chain) ?: return null
+        val valueParameters = call.arguments.map { stripOuterParentheses(it.trim()) }
+        if (valueParameters.any { it !in macro.parameters || it in chain.parameters }) return null
+        val orderedValueParameters = valueParameters.distinct()
+        val parameterCount = chain.parameters.size + orderedValueParameters.size
+        val compatibleSignatures = signatures.filter { signature ->
+            signature.returnType != "void" &&
+                signature.parameterTypes.size == parameterCount &&
+                signature.parameterTypes.take(chain.parameters.size).all { it == "int" }
+        }
+        if (compatibleSignatures.isEmpty()) return null
+        val parameterNames = chain.parameters + orderedValueParameters
+        val prototypes = compatibleSignatures.sortedWith(
+            compareBy<ValueSignature> { it.returnType }.thenBy { it.parameterTypes.joinToString("\u0000") },
+        ).joinToString("") { signature ->
+            val parameters = parameterNames.zip(signature.parameterTypes).joinToString(", ") { (name, type) ->
+                "$type $name"
+            }
+            "${signature.returnType} $helperName($parameters);\n"
+        }
+        return TokenPasteHelper(
+            macroBody = "$helperName(${(chain.parameters + orderedValueParameters).joinToString(", ")})",
+            prototypes = prototypes,
+            definitions = "",
+        )
+    }
+
+    private fun describeTokenPasteSignatureFailure(
+        definition: ParsedFunctionMacro,
+        chain: TokenPasteChain,
+        domains: List<Pair<String, List<String>>>,
+        pastedDomains: List<Pair<String, TokenValueDomain>>,
+        combinations: List<Map<String, String>>,
+        candidates: Map<Map<String, String>, String>,
+        functionMacros: Map<String, FunctionMacro>,
+        functionSignatures: Map<String, Set<ValueSignature>>,
+        constantTypes: Map<String, String>,
+    ): String? {
+        if (domains.any { (_, values) -> values.any { canonicalTokenInteger(it) == null } }) return null
+        val call = parseTokenPasteCall(definition.body, chain) ?: return null
+        val candidateNames = combinations.map { assignment ->
+            requireNotNull(candidates[assignment])
+        }.distinct().sorted()
+        val signatures = candidateNames.associateWith { candidate ->
+            inferCandidateSignatures(
+                candidate,
+                functionMacros,
+                functionSignatures,
+                constantTypes,
+                linkedSetOf(),
+            ).filter { it.parameterTypes.size == call.arguments.size }.sortedWith(
+                compareBy<ValueSignature> { it.returnType }.thenBy { it.parameterTypes.joinToString("\u0000") },
+            )
+        }
+        val expansionDomain = combinations.joinToString(prefix = "[", postfix = "]") { assignment ->
+            val values = chain.parameters.joinToString(",") { parameter ->
+                "$parameter=${requireNotNull(assignment[parameter])}"
+            }
+            "{$values}->${requireNotNull(candidates[assignment])}"
+        }
+        val candidateSignatures = signatures.entries.joinToString(prefix = "[", postfix = "]") { (name, values) ->
+            val rendered = values.takeIf(List<ValueSignature>::isNotEmpty)?.joinToString("|") { signature ->
+                "${signature.returnType}(${signature.parameterTypes.joinToString(",")})"
+            } ?: "<unresolved>"
+            "$name=$rendered"
+        }
+        val dependencyComponent = pastedDomains.flatMapTo(sortedSetOf()) { (_, domain) -> domain.settings }
+        return "token-paste macro ${definition.directive.macroName} at line ${definition.directive.sourceLine} " +
+            "has no common typed lowering; expansion_domain=$expansionDomain; " +
+            "candidate_signatures=$candidateSignatures; dependency_component=$dependencyComponent"
+    }
+
+    private fun renderTokenPasteHelper(
+        macro: FunctionMacro,
+        definition: ParsedFunctionMacro,
+        chain: TokenPasteChain,
+        domains: List<Pair<String, List<String>>>,
+        combinations: List<Map<String, String>>,
+        candidates: Map<Map<String, String>, String>,
+        functionMacros: Map<String, FunctionMacro>,
+        functionSignatures: Map<String, Set<ValueSignature>>,
+        constantTypes: Map<String, String>,
+        helperName: String,
+    ): TokenPasteHelper? {
+        if (domains.any { (_, values) -> values.any { canonicalTokenInteger(it) == null } }) return null
+        val call = parseTokenPasteCall(definition.body, chain) ?: return null
+        val valueParameters = call.arguments.map { stripOuterParentheses(it.trim()) }
+        if (valueParameters.any { it !in macro.parameters || it in chain.parameters }) return null
+        val orderedValueParameters = valueParameters.distinct()
+        val signatureSets = combinations.map { assignment ->
+            inferCandidateSignatures(
+                requireNotNull(candidates[assignment]),
+                functionMacros,
+                functionSignatures,
+                constantTypes,
+                linkedSetOf(),
+            ).filterTo(linkedSetOf()) {
+                it.returnType != "void" && it.parameterTypes.size == valueParameters.size
+            }
+        }
+        if (signatureSets.any(Set<ValueSignature>::isEmpty)) return null
+        val commonSignatures = signatureSets.drop(1).fold(signatureSets.first().toSet()) { common, signatures ->
+            common intersect signatures
+        }
+        val overloads = commonSignatures.mapNotNullTo(linkedSetOf()) { signature ->
+            val types = linkedMapOf<String, String>()
+            valueParameters.zip(signature.parameterTypes).forEach { (parameter, type) ->
+                val previous = types.putIfAbsent(parameter, type)
+                if (previous != null && previous != type) return@mapNotNullTo null
+            }
+            if (orderedValueParameters.any { it !in types }) return@mapNotNullTo null
+            TokenPasteHelperOverload(
+                signature.returnType,
+                orderedValueParameters.map { it to requireNotNull(types[it]) },
+            )
+        }.sortedWith(compareBy<TokenPasteHelperOverload> { it.returnType }.thenBy { it.valueParameters.toString() })
+        if (overloads.isEmpty()) return null
+        val helperArguments = chain.parameters + orderedValueParameters
+        val prototypes = overloads.joinToString("") { overload ->
+            "${overload.returnType} $helperName(${renderTokenPasteHelperParameters(chain, overload)});\n"
+        }
+        val definitions = overloads.joinToString("\n\n") { overload ->
+            buildString {
+                append(overload.returnType)
+                append(' ')
+                append(helperName)
+                append('(')
+                append(renderTokenPasteHelperParameters(chain, overload))
+                appendLine(") {")
+                append(
+                    renderTokenPasteHelperDispatch(
+                        definition.body,
+                        chain,
+                        domains,
+                        candidates,
+                    ),
+                )
+                append('}')
+            }
+        }
+        return TokenPasteHelper(
+            macroBody = "$helperName(${helperArguments.joinToString(", ")})",
+            prototypes = prototypes,
+            definitions = definitions,
+        )
+    }
+
+    private fun renderTokenPasteHelperDispatch(
+        body: String,
+        chain: TokenPasteChain,
+        domains: List<Pair<String, List<String>>>,
+        candidates: Map<Map<String, String>, String>,
+        depth: Int = 0,
+        assignment: Map<String, String> = emptyMap(),
+        indent: String = "    ",
+    ): String {
+        if (depth == domains.size) {
+            return buildString {
+                append(indent)
+                append("return ")
+                append(renderTokenPasteCandidate(body, chain, requireNotNull(candidates[assignment])))
+                appendLine(';')
+            }
+        }
+        val (parameter, values) = domains[depth]
+        return buildString {
+            append(indent)
+            append("switch (")
+            append(parameter)
+            appendLine(") {")
+            values.dropLast(1).forEach { value ->
+                append(indent)
+                append("case ")
+                append(value)
+                appendLine(':')
+                append(
+                    renderTokenPasteHelperDispatch(
+                        body,
+                        chain,
+                        domains,
+                        candidates,
+                        depth + 1,
+                        assignment + (parameter to value),
+                        "$indent    ",
+                    ),
+                )
+            }
+            append(indent)
+            appendLine('}')
+            append(
+                renderTokenPasteHelperDispatch(
+                    body,
+                    chain,
+                    domains,
+                    candidates,
+                    depth + 1,
+                    assignment + (parameter to values.last()),
+                    indent,
+                ),
+            )
+        }
+    }
+
+    private fun renderTokenPasteHelperParameters(
+        chain: TokenPasteChain,
+        overload: TokenPasteHelperOverload,
+    ): String {
+        return (chain.parameters.map { "int $it" } + overload.valueParameters.map { (name, type) -> "$type $name" })
+            .joinToString(", ")
+    }
+
+    private fun renderTokenPasteCandidate(body: String, chain: TokenPasteChain, candidate: String): String {
+        return normalizeTokenPastePunctuation(body.replaceRange(chain.range, candidate))
+    }
+
+    private fun parseTokenPasteCall(body: String, chain: TokenPasteChain): TokenPasteCall? {
+        val sentinel = "SM_TOKEN_PASTE_CANDIDATE"
+        val replaced = stripOuterParentheses(
+            normalizeTokenPastePunctuation(body.replaceRange(chain.range, sentinel)).trim(),
+        )
+        if (replaced == sentinel) return TokenPasteCall(emptyList())
+        val match = IDENTIFIER.find(replaced) ?: return null
+        if (match.range.first != 0 || match.value != sentinel) return null
+        var cursor = match.range.last + 1
+        while (cursor < replaced.length && replaced[cursor].isWhitespace()) cursor++
+        if (replaced.getOrNull(cursor) != '(') return null
+        val close = matchingDelimiter(replaced, cursor, '(', ')') ?: return null
+        if (replaced.substring(close + 1).isNotBlank()) return null
+        return TokenPasteCall(splitMacroArguments(replaced.substring(cursor + 1, close)) ?: return null)
+    }
+
+    private fun collectFunctionSignatures(source: String): Map<String, Set<ValueSignature>> {
+        val masked = maskCommentsAndStrings(source)
+        return FUNCTION_DEFINITION.findAll(masked).mapNotNull { match ->
+            val returnType = match.groupValues[1]
+            val name = match.groupValues[2]
+            val parameters = splitMacroArguments(source.substring(match.groups[3]!!.range)) ?: return@mapNotNull null
+            val parameterTypes = parameters.map { parseFunctionParameterType(it) ?: return@mapNotNull null }
+            name to ValueSignature(returnType, parameterTypes)
+        }.groupBy({ it.first }, { it.second }).mapValues { (_, signatures) -> signatures.toSet() }
+    }
+
+    private fun parseFunctionParameterType(parameter: String): String? {
+        if ('[' in parameter || ']' in parameter) return null
+        val tokens = IDENTIFIER.findAll(stripComments(parameter)).map { it.value }.toList()
+        if (tokens.any { it == "out" || it == "inout" }) return null
+        val type = tokens.firstOrNull { it !in PARAMETER_QUALIFIERS } ?: return null
+        return type.takeIf(GLSL_TYPE::matches)
+    }
+
+    private fun collectConstantTypes(source: String): Map<String, String> {
+        val masked = maskCommentsAndStrings(source)
+        return CONSTANT_DEFINITION.findAll(masked).mapNotNull { match ->
+            if ('[' in match.value) null else match.groupValues[2] to match.groupValues[1]
+        }.toMap()
+    }
+
+    private fun inferCandidateSignatures(
+        name: String,
+        functionMacros: Map<String, FunctionMacro>,
+        functionSignatures: Map<String, Set<ValueSignature>>,
+        constantTypes: Map<String, String>,
+        visiting: MutableSet<String>,
+    ): Set<ValueSignature> {
+        val result = functionSignatures[name].orEmpty().toMutableSet()
+        constantTypes[name]?.let { result += ValueSignature(it, emptyList()) }
+        val macro = functionMacros[name]
+        val body = macro?.definitions?.map(ParsedFunctionMacro::body)?.distinct()?.singleOrNull()
+        if (macro == null || body == null || !visiting.add(name)) return result
+        result += inferMacroBodySignatures(
+            macro,
+            body,
+            functionMacros,
+            functionSignatures,
+            constantTypes,
+            visiting,
+        )
+        visiting.remove(name)
+        return result
+    }
+
+    private fun inferMacroBodySignatures(
+        macro: FunctionMacro,
+        body: String,
+        functionMacros: Map<String, FunctionMacro>,
+        functionSignatures: Map<String, Set<ValueSignature>>,
+        constantTypes: Map<String, String>,
+        visiting: MutableSet<String>,
+    ): Set<ValueSignature> {
+        val expression = stripOuterParentheses(body.trim())
+        val invocation = parseWholeInvocation(expression)
+        if (invocation != null) {
+            val targetSignatures = inferCandidateSignatures(
+                invocation.name,
+                functionMacros,
+                functionSignatures,
+                constantTypes,
+                visiting,
+            )
+            val inherited = targetSignatures.mapNotNullTo(linkedSetOf()) { signature ->
+                if (signature.parameterTypes.size != invocation.arguments.size) return@mapNotNullTo null
+                val types = linkedMapOf<String, String>()
+                invocation.arguments.zip(signature.parameterTypes).forEach { (argument, type) ->
+                    val parameter = stripOuterParentheses(argument.trim())
+                    if (parameter !in macro.parameters) return@mapNotNullTo null
+                    val previous = types.putIfAbsent(parameter, type)
+                    if (previous != null && previous != type) return@mapNotNullTo null
+                }
+                if (macro.parameters.any { it !in types }) return@mapNotNullTo null
+                ValueSignature(signature.returnType, macro.parameters.map { requireNotNull(types[it]) })
+            }
+            if (inherited.isNotEmpty()) return inherited
+        }
+        if (macro.parameters.size != 1) return emptySet()
+        val parameter = macro.parameters.single()
+        val matrixSymbols = identifiers(expression).distinct().mapNotNull { name ->
+            val size = constantTypes[name]?.let(MATRIX_TYPE::matchEntire)?.groupValues?.get(1)?.toIntOrNull()
+            size?.let { name to it }
+        }
+        val parameterPattern = "\\(?\\s*\\b${Regex.escape(parameter)}\\b\\s*\\)?"
+        val dotSizes = matrixSymbols.filter { (name, _) ->
+            val matrixPattern = "\\b${Regex.escape(name)}\\b\\s*\\[[^]]+]"
+            ("\\bdot\\s*\\(\\s*$parameterPattern\\s*,\\s*$matrixPattern\\s*\\)".toRegex()
+                .containsMatchIn(expression) ||
+                "\\bdot\\s*\\(\\s*$matrixPattern\\s*,\\s*$parameterPattern\\s*\\)".toRegex()
+                    .containsMatchIn(expression))
+        }.mapTo(linkedSetOf()) { it.second }
+        if (dotSizes.size == 1) {
+            val size = dotSizes.single()
+            return setOf(ValueSignature("float", listOf("vec$size")))
+        }
+        val multiplySizes = matrixSymbols.filter { (name, _) ->
+            val matrixPattern = "\\b${Regex.escape(name)}\\b"
+            ("$parameterPattern\\s*\\*\\s*$matrixPattern".toRegex().containsMatchIn(expression) ||
+                "$matrixPattern\\s*\\*\\s*$parameterPattern".toRegex().containsMatchIn(expression))
+        }.mapTo(linkedSetOf()) { it.second }
+        if (multiplySizes.size == 1) {
+            val size = multiplySizes.single()
+            val vector = "vec$size"
+            return setOf(ValueSignature(vector, listOf(vector)))
+        }
+        val component = PARAMETER_COMPONENT.find(expression)?.takeIf { it.groupValues[1] == parameter }
+            ?.groupValues?.get(2)?.singleOrNull()
+        if (component != null) {
+            val minimumSize = "xyzw".indexOf(component) + 1
+            return (maxOf(2, minimumSize)..4).mapTo(linkedSetOf()) { size ->
+                ValueSignature("float", listOf("vec$size"))
+            }
+        }
+        return emptySet()
+    }
+
+    private fun parseWholeInvocation(source: String): ParsedMacroInvocation? {
+        val match = IDENTIFIER.find(source) ?: return null
+        if (match.range.first != 0) return null
+        var cursor = match.range.last + 1
+        while (cursor < source.length && source[cursor].isWhitespace()) cursor++
+        if (source.getOrNull(cursor) != '(') return null
+        val close = matchingDelimiter(source, cursor, '(', ')') ?: return null
+        if (source.substring(close + 1).isNotBlank()) return null
+        val arguments = splitMacroArguments(source.substring(cursor + 1, close)) ?: return null
+        return ParsedMacroInvocation(match.value, arguments)
+    }
+
+    private fun normalizeTokenPastePunctuation(source: String): String {
+        return TOKEN_PASTE_BEFORE_DELIMITER.replace(source, "")
+    }
+
+    private data class ParsedFunctionMacro(
+        val directive: PreprocessorDirective,
+        val parameters: List<String>,
+        val body: String,
+    )
+
+    private data class FunctionMacro(
+        val name: String,
+        val parameters: List<String>,
+        val definitions: List<ParsedFunctionMacro>,
+    )
+
+    private data class ParsedMacroInvocation(val name: String, val arguments: List<String>)
+
+    private data class MacroInvocationEdge(
+        val caller: FunctionMacro,
+        val invocation: ParsedMacroInvocation,
+    )
+
+    private data class MacroParameter(val macro: String, val parameter: String)
+
+    private data class ValueSignature(val returnType: String, val parameterTypes: List<String>)
+
+    private data class TokenPasteCall(val arguments: List<String>)
+
+    private data class TokenPasteHelperOverload(
+        val returnType: String,
+        val valueParameters: List<Pair<String, String>>,
+    )
+
+    private data class TokenPasteHelper(
+        val macroBody: String,
+        val prototypes: String,
+        val definitions: String,
+    )
+
+    private data class TokenPasteLowering(
+        val replacement: Replacement,
+        val helperDefinitions: String,
+    )
+
+    private data class TokenPasteLoweringResult(
+        val source: String,
+        val blockers: List<ShaderCompilerCopyBlocker>,
+    )
+
+    private data class TokenValueDomain(
+        val values: Set<String>,
+        val settings: Set<String>,
+    ) {
+        fun merge(other: TokenValueDomain): TokenValueDomain {
+            return TokenValueDomain(values + other.values, settings + other.settings)
+        }
+    }
+
+    private data class TokenPasteChain(
+        val range: IntRange,
+        val parts: List<String>,
+        val parameters: List<String>,
+    ) {
+        val captureParameters: List<String>
+            get() = parts.filter(parameters::contains)
+
+        fun candidatePattern(): Regex {
+            return parts.joinToString("", "^", "$") { part ->
+                if (part in parameters) "([A-Za-z0-9_]+)" else Regex.escape(part)
+            }.toRegex()
+        }
     }
 
     private fun collectSettingCandidates(
@@ -2060,6 +2908,25 @@ internal object ShaderCompilerCopyPlanner {
         "(&&|\\|\\|)([\\t ]*)([0-9]+)(?![A-Za-z0-9_.])".toRegex()
     private val CASE_LABEL = "(?m)^[ \\t]*(?:case\\b[^:]*|default)[ \\t]*:".toRegex()
     private val TOKEN_PASTE = "##".toRegex()
+    private val TOKEN_PASTE_CHAIN =
+        "(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*(?:[ \\t]*##[ \\t]*[A-Za-z_][A-Za-z0-9_]*)+)".toRegex()
+    private val TOKEN_PASTE_SEPARATOR = "[ \\t]*##[ \\t]*".toRegex()
+    private val TOKEN_PASTE_BEFORE_DELIMITER = "##(?=[ \\t]*[({\\[])".toRegex()
+    private const val MAX_TOKEN_PASTE_DISPATCH_CASES = 256
+    private val FUNCTION_DEFINITION =
+        ("(?m)^[ \\t]*(?:(?:const|precise|highp|mediump|lowp)[ \\t]+)*" +
+            "([A-Za-z_][A-Za-z0-9_]*)[ \\t]+([A-Za-z_][A-Za-z0-9_]*)[ \\t]*" +
+            "\\(([^;{}]*)\\)[ \\t\\r\\n]*\\{").toRegex()
+    private val CONSTANT_DEFINITION =
+        ("\\bconst\\s+(?:(?:precise|highp|mediump|lowp)\\s+)*" +
+            "([A-Za-z_][A-Za-z0-9_]*)\\s+([A-Za-z_][A-Za-z0-9_]*)" +
+            "\\s*(?:\\[[^]=;]*])?\\s*=").toRegex()
+    private val GLSL_TYPE = "[A-Za-z_][A-Za-z0-9_]*".toRegex()
+    private val MATRIX_TYPE = "mat([234])(?:x[234])?".toRegex()
+    private val PARAMETER_COMPONENT = "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*\\)?\\s*\\.([xyzw])".toRegex()
+    private val PARAMETER_QUALIFIERS = setOf(
+        "const", "in", "out", "inout", "precise", "highp", "mediump", "lowp",
+    )
     private val CONTROL_STATEMENT = "\\b(?:if|for|while|switch|return|break|continue|discard)\\b".toRegex()
     private val RETURN_SUFFIX = "\\breturn\\s*$".toRegex()
     private val LOCAL_DECLARATION =

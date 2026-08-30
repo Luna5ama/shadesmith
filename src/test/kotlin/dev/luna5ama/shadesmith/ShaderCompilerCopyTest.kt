@@ -822,6 +822,380 @@ class ShaderCompilerCopyTest {
     }
 
     @Test
+    fun lowersSettingDrivenTokenPasteThroughDerivedMacros() = withWorkspace { workspace ->
+        val source = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define SETTING_GAIN 0.5 //[0.5 1.0]
+            #define SELECTED_MODE SETTING_MODE
+            #define PASTE_IMPL(a, b) a ## b
+            #define PASTE(a, b) PASTE_IMPL(a, b)
+            #define APPLY(value) PASTE(mode, SELECTED_MODE)(value * SETTING_GAIN)
+            float mode0(float value) { return value; }
+            float mode1(float value) { return value + 1.0; }
+            layout(local_size_x = 1) in;
+            void main() { float value = APPLY(2.0); }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "token-paste-derived.csh")
+
+        assertEquals(1, plan.compilerModuleCount, plan.structuralBlockers.joinToString { it.reason })
+        assertTrue(plan.structuralBlockers.isEmpty())
+        assertFalse(ShaderStructuralPlanner.requiresPlanning(plan))
+        val compiler = assertNotNull(plan.compilerSource)
+        assertFalse("##" in compiler)
+        assertContains(compiler, "SM_SETTING_MODE")
+        assertContains(compiler, "SM_SETTING_GAIN")
+
+        val module = ShaderCompilerCopyMaterializer(workspace).materialize(
+            "token-paste-derived.csh",
+            ShaderStage.COMPUTE,
+            plan,
+            TextureAccessProbe(source, emptyList(), TextureAccess()),
+        )
+
+        assertTrue("\\bmode0\\s*\\(".toRegex().containsMatchIn(module.source))
+        assertTrue("\\bmode1\\s*\\(".toRegex().containsMatchIn(module.source))
+        assertFalse("PASTE(" in module.source)
+        assertFalse("##" in module.source)
+    }
+
+    @Test
+    fun requiresRepeatedPastedParametersToResolveToTheSameToken() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define CALL_IMPL(mode, value) function_ ## mode ## _ ## mode ##(value)
+            #define CALL(mode, value) CALL_IMPL(mode, value)
+            float function_0_0(float value) { return value; }
+            float function_1_1(float value) { return value + 1.0; }
+            float function_0_1(float value) { return value + 100.0; }
+            layout(local_size_x = 1) in;
+            void main() { float value = CALL(SETTING_MODE, 2.0); }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "token-paste-repeated-parameter.csh")
+
+        assertEquals(1, plan.compilerModuleCount, plan.structuralBlockers.joinToString { it.reason })
+        val compiler = assertNotNull(plan.compilerSource)
+        assertFalse("##" in compiler)
+        assertEquals(1, "\\bfunction_0_1\\s*\\(".toRegex().findAll(compiler).count())
+        assertEquals(2, "\\bfunction_0_0\\s*\\(".toRegex().findAll(compiler).count())
+        assertEquals(2, "\\bfunction_1_1\\s*\\(".toRegex().findAll(compiler).count())
+    }
+
+    @Test
+    fun lowersNineByEightTokenPasteSelectionIntoOneCompilerModule() = withWorkspace { workspace ->
+        val source = buildString {
+            appendLine("#version 460 compatibility")
+            appendLine("#define SETTING_FROM 0 //[0 1 2 3 4 5 6 7 8]")
+            appendLine("#define SETTING_TO 0 //[0 1 2 3 4 5 6 7]")
+            appendLine("#define SETTING_GAIN 0.5 //[0.5 1.0]")
+            appendLine("#ifndef INCLUDE_TOKEN_PASTE_GRID")
+            appendLine("#define INCLUDE_TOKEN_PASTE_GRID")
+            appendLine("#define CONVERT_IMPL(from, to, value) convert_ ## from ## _to_ ## to ##(value)")
+            appendLine("#define CONVERT(from, to, value) CONVERT_IMPL(from, to, value)")
+            repeat(9) { from ->
+                repeat(8) { to ->
+                    appendLine("vec3 convert_${from}_to_$to(vec3 value) { return value + vec3(${from + to}.0); }")
+                }
+            }
+            appendLine("#endif")
+            appendLine("layout(local_size_x = 1) in;")
+            appendLine(
+                "void main() { vec3 value = CONVERT(SETTING_FROM, SETTING_TO, vec3(SETTING_GAIN)); }",
+            )
+        }
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "token-paste-grid.csh")
+
+        assertEquals(1, plan.compilerModuleCount)
+        assertTrue(plan.structuralBlockers.isEmpty())
+        assertFalse(ShaderStructuralPlanner.requiresPlanning(plan))
+        assertFalse("##" in assertNotNull(plan.compilerSource))
+
+        val module = ShaderCompilerCopyMaterializer(workspace).materialize(
+            "token-paste-grid.csh",
+            ShaderStage.COMPUTE,
+            plan,
+            TextureAccessProbe(source, emptyList(), TextureAccess()),
+        )
+
+        assertContains(module.source, "convert_0_to_0")
+        assertContains(module.source, "convert_8_to_7")
+        assertContains(module.source, "SM_SETTING_GAIN")
+        assertFalse("##" in module.source)
+    }
+
+    @Test
+    fun lowersNestedColorAndTransferSelectionIndependently() = withWorkspace { workspace ->
+        val source = buildString {
+            appendLine("#version 460 compatibility")
+            appendLine("#define SETTING_MATERIAL_COLOR_SPACE 0 //[0 1 2 3 4 5 6 7 8]")
+            appendLine("#define SETTING_WORKING_COLOR_SPACE 0 //[0 1 2 3 4 5 6 7 8]")
+            appendLine("#define SETTING_MATERIAL_TRANSFER_FUNC 0 //[0 1 2 3 4 5 6 7]")
+            appendLine("#define SETTING_GAIN 0.5 //[0.5 1.0]")
+            appendLine("#ifndef INCLUDE_COLOR_API")
+            appendLine("#define INCLUDE_COLOR_API")
+            appendLine(
+                "#define _colors2_colorspaces_convert(a, b, x) colors2_colorspaces_ ## a ## _to_ ## b ##(x)",
+            )
+            appendLine("#define colors2_colorspaces_convert(a, b, x) _colors2_colorspaces_convert(a, b, x)")
+            appendLine("#define _colors2_eotf(a, x) colors2_eotf_ ## a ##(x)")
+            appendLine("#define colors2_eotf(a, x) _colors2_eotf(a, x)")
+            repeat(9) { from ->
+                repeat(9) { to ->
+                    appendLine(
+                        "vec3 colors2_colorspaces_${from}_to_$to(vec3 x) { return x + vec3(${from + to}.0); }",
+                    )
+                }
+            }
+            repeat(8) { mode ->
+                appendLine("float colors2_eotf_$mode(float value) { return value + $mode.0; }")
+                appendLine("vec3 colors2_eotf_$mode(vec3 value) { return value + vec3($mode.0); }")
+            }
+            appendLine("#define COLORS2_MATERIAL_COLORSPACE SETTING_MATERIAL_COLOR_SPACE")
+            appendLine("#define COLORS2_MATERIAL_TF SETTING_MATERIAL_TRANSFER_FUNC")
+            appendLine("#define COLORS2_WORKING_COLORSPACE SETTING_WORKING_COLOR_SPACE")
+            appendLine(
+                "#define colors2_material_toWorkSpace(x) colors2_colorspaces_convert(" +
+                    "COLORS2_MATERIAL_COLORSPACE, COLORS2_WORKING_COLORSPACE, " +
+                    "colors2_eotf(COLORS2_MATERIAL_TF, x))",
+            )
+            appendLine("#endif")
+            appendLine("layout(local_size_x = 1) in;")
+            appendLine(
+                "void main() { vec3 color = colors2_material_toWorkSpace(vec3(SETTING_GAIN)); " +
+                    "float scalar = colors2_eotf(SETTING_MATERIAL_TRANSFER_FUNC, SETTING_GAIN); }",
+            )
+        }
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "token-paste-nested.csh")
+
+        assertEquals(1, plan.compilerModuleCount, plan.structuralBlockers.joinToString { it.reason })
+        assertTrue(plan.structuralBlockers.isEmpty())
+        assertFalse(ShaderStructuralPlanner.requiresPlanning(plan))
+        val compiler = assertNotNull(plan.compilerSource)
+        assertContains(compiler, "SM_TOKEN_PASTE_")
+        assertContains(compiler, "switch (")
+        assertFalse("##" in compiler)
+        val module = ShaderCompilerCopyMaterializer(workspace).materialize(
+            "token-paste-nested.csh",
+            ShaderStage.COMPUTE,
+            plan,
+            TextureAccessProbe(source, emptyList(), TextureAccess()),
+        )
+        assertContains(module.source, "vec3(0.0)")
+        assertContains(module.source, "vec3(16.0)")
+        assertContains(module.source, "colors2_eotf_0")
+        assertContains(module.source, "colors2_eotf_7")
+        assertContains(module.source, "SM_SETTING_GAIN")
+        assertFalse("##" in module.source)
+        assertTrue(module.source.length < 100_000, "nested dispatch expanded to ${module.source.length} bytes")
+    }
+
+    @Test
+    fun lowersRepeatedIdenticalTokenPasteDefinitionsAfterEntityRestoration() = withWorkspace { workspace ->
+        val helperName = ShaderCompilerCopyPlanner.tokenPasteHelperName("APPLY_IMPL")
+        val source = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define APPLY_IMPL(mode, value) function_ ## mode ##(value)
+            #define APPLY(mode, value) APPLY_IMPL(mode, value)
+            float function_0(float value) { return value; }
+            float function_1(float value) { return value + 1.0; }
+            float first(float value) { return APPLY(SETTING_MODE, value); }
+            #define APPLY_IMPL(mode, value) function_ ## mode ##(value)
+            #define APPLY(mode, value) APPLY_IMPL(mode, value)
+            float second(float value) { return APPLY(SETTING_MODE, value); }
+            layout(local_size_x = 1) in;
+            void main() { float value = first(1.0) + second(2.0); }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "token-paste-restored-repeat.csh")
+
+        assertEquals(1, plan.compilerModuleCount, plan.structuralBlockers.joinToString { it.reason })
+        val compiler = assertNotNull(plan.compilerSource)
+        assertFalse("##" in compiler)
+        assertEquals(
+            1,
+            "(?m)^float ${Regex.escape(helperName)}\\([^\\n]*\\) \\{".toRegex().findAll(compiler).count(),
+        )
+        val module = ShaderCompilerCopyMaterializer(workspace).materialize(
+            "token-paste-restored-repeat.csh",
+            ShaderStage.COMPUTE,
+            plan,
+            TextureAccessProbe(source, emptyList(), TextureAccess()),
+        )
+        assertContains(module.source, "function_0")
+        assertContains(module.source, "function_1")
+        assertFalse("##" in module.source)
+    }
+
+    @Test
+    fun reusesStableGeneratedHelperWhenRestoredCandidatesWereOptimizedAway() = withWorkspace { workspace ->
+        val helperName = ShaderCompilerCopyPlanner.tokenPasteHelperName("SELECT_IMPL")
+        val source = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define SELECT_IMPL(mode, value) function_ ## mode ##(value)
+            #define SELECT(mode, value) SELECT_IMPL(mode, value)
+            layout(local_size_x = 1) in;
+            void main() { vec3 value = SELECT(SETTING_MODE, vec3(1.0)); }
+            vec3 $helperName(int mode, vec3 value)
+            {
+                switch (mode) {
+                case 0:
+                    return value;
+                }
+                return value + vec3(1.0);
+            }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "token-paste-restored-helper.csh")
+
+        assertEquals(1, plan.compilerModuleCount, plan.structuralBlockers.joinToString { it.reason })
+        val compiler = assertNotNull(plan.compilerSource)
+        assertContains(compiler, "SELECT_IMPL(mode, value) $helperName(mode, value)")
+        assertTrue(compiler.indexOf("vec3 $helperName(int mode, vec3 value);") < compiler.indexOf("void main()"))
+        assertFalse("##" in compiler)
+        val module = ShaderCompilerCopyMaterializer(workspace).materialize(
+            "token-paste-restored-helper.csh",
+            ShaderStage.COMPUTE,
+            plan,
+            TextureAccessProbe(source, emptyList(), TextureAccess()),
+        )
+        assertContains(module.source, helperName)
+        assertFalse("function_SM_SETTING_MODE" in module.source)
+    }
+
+    @Test
+    fun lowersTokenPastedMatrixAndConstantValues() = withWorkspace { workspace ->
+        val source = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define MATRIX_IMPL(mode) matrix_ ## mode
+            #define MATRIX(mode) MATRIX_IMPL(mode)
+            #define SCALE_IMPL(mode) scale_ ## mode
+            #define SCALE(mode) SCALE_IMPL(mode)
+            const mat3 matrix_0 = mat3(1.0);
+            const mat3 matrix_1 = mat3(2.0);
+            const float scale_0 = 1.0;
+            const float scale_1 = 2.0;
+            layout(local_size_x = 1) in;
+            void main() { vec3 value = MATRIX(SETTING_MODE) * vec3(SCALE(SETTING_MODE)); }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "token-paste-values.csh")
+
+        assertEquals(1, plan.compilerModuleCount)
+        assertTrue(plan.structuralBlockers.isEmpty())
+        assertFalse(ShaderStructuralPlanner.requiresPlanning(plan))
+        val module = ShaderCompilerCopyMaterializer(workspace).materialize(
+            "token-paste-values.csh",
+            ShaderStage.COMPUTE,
+            plan,
+            TextureAccessProbe(source, emptyList(), TextureAccess()),
+        )
+        assertContains(module.source, "matrix_0")
+        assertContains(module.source, "matrix_1")
+        assertContains(module.source, "scale_0")
+        assertContains(module.source, "scale_1")
+        assertFalse("##" in module.source)
+    }
+
+    @Test
+    fun lowersPastedMatrixAndLumaAdaptersWithProvenSignatures() = withWorkspace { workspace ->
+        val source = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            const mat3 matrix_0 = mat3(1.0);
+            const mat3 matrix_1 = mat3(2.0);
+            #define CONVERT_IMPL(mode, value) convert_ ## mode ##(value)
+            #define CONVERT(mode, value) CONVERT_IMPL(mode, value)
+            #define convert_0(value) (value * matrix_0)
+            #define convert_1(value) (value * matrix_1)
+            #define LUMA_IMPL(mode, value) luma_ ## mode ##(value)
+            #define LUMA(mode, value) LUMA_IMPL(mode, value)
+            #define luma_0(value) (value).y
+            #define luma_1(value) dot(value, matrix_1[1])
+            layout(local_size_x = 1) in;
+            void main() {
+                vec3 converted = CONVERT(SETTING_MODE, vec3(1.0));
+                float luma = LUMA(SETTING_MODE, converted);
+            }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "token-paste-matrix-adapters.csh")
+
+        assertEquals(1, plan.compilerModuleCount, plan.structuralBlockers.joinToString { it.reason })
+        val compiler = assertNotNull(plan.compilerSource)
+        assertFalse("##" in compiler)
+        assertContains(
+            compiler,
+            "vec3 ${ShaderCompilerCopyPlanner.tokenPasteHelperName("CONVERT_IMPL")}(int mode, vec3 value);",
+        )
+        assertContains(
+            compiler,
+            "float ${ShaderCompilerCopyPlanner.tokenPasteHelperName("LUMA_IMPL")}(int mode, vec3 value);",
+        )
+        val module = ShaderCompilerCopyMaterializer(workspace).materialize(
+            "token-paste-matrix-adapters.csh",
+            ShaderStage.COMPUTE,
+            plan,
+            TextureAccessProbe(source, emptyList(), TextureAccess()),
+        )
+        assertContains(module.source, "matrix_0")
+        assertContains(module.source, "matrix_1")
+        assertFalse("##" in module.source)
+    }
+
+    @Test
+    fun leavesIncompleteTokenPasteDomainsStructural() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define CALL_IMPL(mode, value) function_ ## mode ##(value)
+            #define CALL(mode, value) CALL_IMPL(mode, value)
+            float function_0(float value) { return value; }
+            layout(local_size_x = 1) in;
+            void main() { float value = CALL(SETTING_MODE, 2.0); }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "token-paste-missing.csh")
+
+        assertEquals(0, plan.compilerModuleCount)
+        assertTrue(ShaderStructuralPlanner.requiresPlanning(plan))
+        assertTrue(plan.structuralBlockers.any { "token paste" in it.reason.lowercase() })
+    }
+
+    @Test
+    fun rejectsIncompatibleTokenPasteSignaturesWithDependencyDiagnostic() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define CALL_IMPL(mode, value) function_ ## mode ##(value)
+            #define CALL(mode, value) CALL_IMPL(mode, value)
+            float function_0(float value) { return value; }
+            vec3 function_1(vec3 value) { return value; }
+            layout(local_size_x = 1) in;
+            void main() { float value = CALL(SETTING_MODE, 2.0); }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "token-paste-incompatible.csh")
+
+        assertEquals(0, plan.compilerModuleCount)
+        val diagnostic = plan.structuralBlockers.single {
+            it.reason.startsWith("token-paste macro CALL_IMPL")
+        }.reason
+        assertContains(diagnostic, "at line 5")
+        assertContains(diagnostic, "expansion_domain=[{mode=0}->function_0, {mode=1}->function_1]")
+        assertContains(diagnostic, "function_0=float(float)")
+        assertContains(diagnostic, "function_1=vec3(vec3)")
+        assertContains(diagnostic, "dependency_component=[SETTING_MODE]")
+    }
+
+    @Test
     fun preservesSpirvCrossDirectiveOnlyCapabilityDispatchForGlslang() = withWorkspace { workspace ->
         val source = """
             #version 460 core
