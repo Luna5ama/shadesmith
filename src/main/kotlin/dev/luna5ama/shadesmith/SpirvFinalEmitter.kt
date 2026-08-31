@@ -582,6 +582,18 @@ internal object SpirvFinalEmitter {
         finalSource = deduplicateDominatedAbiLines(finalSource)
         finalSource = restoreMissingBranchOwnedMain(finalSource, modules, structuralPlan.restorationPlan)
         finalSource = removeNonBranchOwnedMainFunctions(finalSource)
+        finalSource = when (
+            val ordered = restoreDirectiveMacroDependencies(
+                request.sourceName,
+                request.source,
+                finalSource,
+                restorationContracts.contracts,
+                structuralPlan.restorationPlan,
+            )
+        ) {
+            is ShaderStructuralRestoration.Restored -> ordered.source
+            is ShaderStructuralRestoration.Preserved -> return preserved(request, ordered.reason)
+        }
         finalSource = restoreProbeResources(finalSource, modules)
         return optimizedOrPreserved(
             request,
@@ -1938,6 +1950,317 @@ internal object SpirvFinalEmitter {
             restorationContracts = emptyList(),
             issue = null,
         ).restore(source)
+    }
+
+    internal fun restoreDirectiveMacroDependencies(
+        sourceName: String,
+        originalSource: String,
+        restoredSource: String,
+        contracts: List<IrisSourceContractSlice>,
+        restorationPlan: ShaderStructuralRestorationPlan,
+    ): ShaderStructuralRestoration {
+        val sourceDefinitions = sourceMacroDefinitions(originalSource)
+        if (sourceDefinitions.isEmpty()) return ShaderStructuralRestoration.Restored(restoredSource)
+
+        data class DependencyTarget(
+            val label: String,
+            val exactText: String,
+            val matchText: String,
+            val sourceLine: Int,
+            val sourceRange: IntRange,
+        )
+        data class DependencyBlock(
+            val exactText: String,
+            val sourceLine: Int,
+            val sourceRange: IntRange,
+            val macroNames: Set<String>,
+        )
+        data class TargetDependencies(
+            val target: DependencyTarget,
+            val blocks: List<DependencyBlock>,
+        )
+
+        val contractTargets = contracts.filter { contract ->
+            occurrences(restoredSource, contract.exactText.trim()).isNotEmpty()
+        }.map { contract ->
+            DependencyTarget(
+                "${contract.kind} contract",
+                contract.exactText,
+                contract.exactText.trim(),
+                contract.sourceLine,
+                contract.sourceRange,
+            )
+        }
+        val declarationTargets = sourceStructuralEntities(originalSource).filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION &&
+                contracts.none { contract ->
+                    contract.sourceRange.overlaps(entity.range) ||
+                        contract.exactText.contains(originalSource.substring(entity.range).trim())
+                } &&
+                occurrences(restoredSource, originalSource.substring(entity.range).trim()).isNotEmpty() &&
+                DECLARATION_IDENTIFIER.findAll(originalSource.substring(entity.range)).any { match ->
+                    match.value in sourceDefinitions && restorableSourceMacro(match.value)
+                }
+        }.map { entity ->
+            DependencyTarget(
+                "declaration ${entity.symbol ?: entity.identity}",
+                originalSource.substring(entity.range),
+                originalSource.substring(entity.range).trim(),
+                sourceLine(originalSource, entity.range.first),
+                entity.range,
+            )
+        }
+        val rawTargets = (contractTargets + declarationTargets).distinctBy(DependencyTarget::sourceRange)
+        val targets = rawTargets.filterNot { candidate ->
+            rawTargets.any { owner ->
+                owner.sourceRange != candidate.sourceRange && owner.sourceRange.containsRange(candidate.sourceRange)
+            }
+        }.sortedBy { target -> target.sourceRange.first }
+        val dependencies = mutableListOf<TargetDependencies>()
+        val selectedMacroNames = linkedSetOf<String>()
+
+        for (target in targets) {
+            val targetMacroNames = sourceMacroDefinitions(target.exactText).keys
+            val requiredMacroNames = linkedSetOf<String>()
+            val pendingMacroNames = ArrayDeque(
+                DECLARATION_IDENTIFIER.findAll(target.exactText).map(MatchResult::value)
+                    .filter { name -> name !in targetMacroNames && name in sourceDefinitions }
+                    .toCollection(linkedSetOf()),
+            )
+            fun expandRequiredMacroNames() {
+                while (pendingMacroNames.isNotEmpty()) {
+                    val name = pendingMacroNames.removeFirst()
+                    if (!requiredMacroNames.add(name)) continue
+                    sourceDefinitions[name].orEmpty().asSequence().flatMap { definition ->
+                        DECLARATION_IDENTIFIER.findAll(definition.value).map(MatchResult::value)
+                    }.filter { dependency ->
+                        dependency !in targetMacroNames && dependency in sourceDefinitions
+                    }.forEach(pendingMacroNames::addLast)
+                }
+            }
+            expandRequiredMacroNames()
+            val slots = sourceMacroDependencySlots(
+                originalSource,
+                "",
+                listOf(target.exactText),
+                restorationPlan,
+            )
+            do {
+                var addedOwnerDependency = false
+                slots.asSequence().filter { slot ->
+                    sourceMacroDefinitions(slot.exactText).keys.any(requiredMacroNames::contains)
+                }.flatMap { slot ->
+                    DECLARATION_IDENTIFIER.findAll(slot.exactText).map(MatchResult::value)
+                }.filter { name ->
+                    name !in targetMacroNames && name in sourceDefinitions && name !in requiredMacroNames
+                }.forEach { name ->
+                    pendingMacroNames.addLast(name)
+                    addedOwnerDependency = true
+                }
+                expandRequiredMacroNames()
+            } while (addedOwnerDependency)
+            val blocks = mutableListOf<DependencyBlock>()
+            for (slot in slots) {
+                val slotDefinitions = sourceMacroDefinitions(slot.exactText)
+                    .filterKeys(::restorableSourceMacro)
+                if (slotDefinitions.isEmpty()) continue
+                val requiredSlotMacros = slotDefinitions.keys.intersect(requiredMacroNames)
+                if (requiredSlotMacros.isEmpty()) continue
+                val occurrences = occurrences(originalSource, slot.exactText)
+                val lineMatches = occurrences.filter { range ->
+                    sourceLine(originalSource, range.first) == slot.sourceLine
+                }
+                val range = when {
+                    occurrences.size == 1 -> occurrences.single()
+                    lineMatches.size == 1 -> lineMatches.single()
+                    else -> return ShaderStructuralRestoration.Preserved(
+                        "$sourceName:${target.sourceLine}: ${target.label} macro dependency at line " +
+                            "${slot.sourceLine} is ambiguous (${occurrences.size} source matches)",
+                    )
+                }
+                if (range.overlaps(target.sourceRange)) continue
+                if (range.first >= target.sourceRange.first) {
+                    return ShaderStructuralRestoration.Preserved(
+                        "$sourceName:${target.sourceLine}: ${target.label} uses macro dependency " +
+                            "${slotDefinitions.keys.sorted()} before its source definition at line ${slot.sourceLine}",
+                    )
+                }
+                selectedMacroNames += requiredSlotMacros
+                blocks += DependencyBlock(
+                    slot.exactText,
+                    slot.sourceLine,
+                    range,
+                    requiredSlotMacros,
+                )
+            }
+            if (blocks.isNotEmpty()) {
+                dependencies += TargetDependencies(target, blocks.sortedBy { block -> block.sourceRange.first })
+            }
+        }
+        if (dependencies.isEmpty()) return ShaderStructuralRestoration.Restored(restoredSource)
+
+        val selectedBlocks = dependencies.flatMap(TargetDependencies::blocks)
+            .distinctBy(DependencyBlock::sourceRange)
+        val selectedDefinitions = selectedBlocks.flatMap { block ->
+            sourceMacroDefinitions(block.exactText).values.flatten()
+        }
+        selectedMacroNames.forEach { name ->
+            val variants = selectedDefinitions.filter { definition -> definition.name == name }
+            val values = variants.map { definition -> definition.value.trim() }.distinct()
+            if (values.size <= 1) return@forEach
+            val blocks = selectedBlocks.filter { block -> name in block.macroNames }
+            if (blocks.size != 1) {
+                return ShaderStructuralRestoration.Preserved(
+                    "$sourceName: conflicting source definitions for directive macro $name: $values",
+                )
+            }
+            val block = blocks.single()
+            val blockDefinitions = sourceMacroDefinitions(block.exactText)[name].orEmpty()
+            val ranges = blockDefinitions.map { definition ->
+                definition.offset until definition.offset + definition.exactText.length
+            }
+            val owners = nearestConditionalOwnerRanges(
+                block.exactText,
+                ranges,
+            ).filterNotNull().distinct()
+            if (owners.size != 1) {
+                return ShaderStructuralRestoration.Preserved(
+                    "$sourceName: conflicting source definitions for directive macro $name: $values",
+                )
+            }
+        }
+
+        val graph = selectedMacroNames.associateWith { name ->
+            selectedDefinitions.asSequence().filter { definition -> definition.name == name }
+                .flatMap { definition ->
+                    DECLARATION_IDENTIFIER.findAll(definition.value).map(MatchResult::value)
+                }
+                .filter { dependency -> dependency in selectedMacroNames }
+                .toCollection(linkedSetOf())
+        }
+        val visited = hashSetOf<String>()
+        val active = linkedSetOf<String>()
+        fun cycle(name: String): List<String>? {
+            if (name in active) {
+                val path = active.toList()
+                return path.drop(path.indexOf(name)) + name
+            }
+            if (!visited.add(name)) return null
+            active += name
+            graph[name].orEmpty().forEach { dependency ->
+                cycle(dependency)?.let { return it }
+            }
+            active.remove(name)
+            return null
+        }
+        selectedMacroNames.forEach { name ->
+            cycle(name)?.let { names ->
+                return ShaderStructuralRestoration.Preserved(
+                    "$sourceName: cyclic directive macro dependency: ${names.joinToString(" -> ")}",
+                )
+            }
+        }
+
+        fun dependencyBlockOccurrences(source: String, exactText: String): List<IntRange> {
+            val firstToken = exactText.indexOfFirst { char -> !char.isWhitespace() }
+            if (firstToken < 0) return emptyList()
+            val masked = maskStructuralSource(source)
+            return occurrences(source, exactText).filter { range ->
+                masked.getOrNull(range.first + firstToken) == exactText[firstToken]
+            }
+        }
+
+        var result = restoredSource
+        dependencies.forEach dependencyLoop@{ dependency ->
+            val targetMatches = occurrences(result, dependency.target.matchText)
+            if (targetMatches.size != 1) {
+                return ShaderStructuralRestoration.Preserved(
+                    "$sourceName:${dependency.target.sourceLine}: ${dependency.target.label} is " +
+                        if (targetMatches.isEmpty()) "missing after restoration" else
+                            "ambiguous (${targetMatches.size} restored matches)",
+                )
+            }
+            var targetOffset = targetMatches.single().first
+            val requiredNames = dependency.blocks.flatMapTo(linkedSetOf(), DependencyBlock::macroNames)
+            val currentDefinitions = sourceMacroDefinitions(result)
+            if (requiredNames.all { name ->
+                    currentDefinitions[name].orEmpty().any { definition -> definition.offset < targetOffset }
+                }
+            ) {
+                return@dependencyLoop
+            }
+            val insertions = mutableListOf<DependencyBlock>()
+            dependency.blocks.forEach blockLoop@{ block ->
+                val blockMatches = dependencyBlockOccurrences(result, block.exactText)
+                when {
+                    blockMatches.any { match -> match.first < targetOffset } -> Unit
+                    blockMatches.size > 1 -> return ShaderStructuralRestoration.Preserved(
+                        "$sourceName:${block.sourceLine}: directive macro dependency " +
+                            "${block.macroNames.sorted()} is duplicated (${blockMatches.size} restored matches)",
+                    )
+                    blockMatches.size == 1 -> {
+                        result = result.removeRange(blockMatches.single())
+                        insertions += block
+                    }
+                    else -> {
+                        val restoredDefinitions = sourceMacroDefinitions(result)
+                        val lateNames = block.macroNames.filter { name ->
+                            restoredDefinitions[name].orEmpty().none { definition ->
+                                definition.offset < targetOffset
+                            }
+                        }
+                        if (lateNames.isEmpty()) return@blockLoop
+                        val lateDefinitions = lateNames.associateWith { name ->
+                            restoredDefinitions[name].orEmpty()
+                        }
+                        if (lateDefinitions.values.any { definitions -> definitions.isEmpty() }) {
+                            val existing = lateDefinitions.values.flatten()
+                            if (existing.isEmpty()) {
+                                insertions += block
+                                return@blockLoop
+                            }
+                            return ShaderStructuralRestoration.Preserved(
+                                "$sourceName:${block.sourceLine}: directive macro dependency " +
+                                    "${block.macroNames.sorted()} was rewritten and cannot be safely relocated",
+                            )
+                        }
+                        val definitionRanges = lateDefinitions.values.flatten().map { definition ->
+                            definition.offset until definition.offset + definition.exactText.length
+                        }
+                        val owners = nearestConditionalOwnerRanges(result, definitionRanges)
+                        val relocationRanges = definitionRanges.indices.map { index ->
+                            owners[index] ?: definitionRanges[index]
+                        }.distinct().filterNot { candidate ->
+                            definitionRanges.indices.any { index ->
+                                val owner = owners[index] ?: definitionRanges[index]
+                                owner != candidate && owner.containsRange(candidate)
+                            }
+                        }.sortedBy(IntRange::first)
+                        val currentTarget = occurrences(result, dependency.target.matchText).single()
+                        if (relocationRanges.any { range -> range.overlaps(currentTarget) }) return@blockLoop
+                        val relocatedText = relocationRanges.joinToString(separator = "") { range ->
+                            result.substring(range)
+                        }
+                        result = removeRanges(result, relocationRanges)
+                        insertions += block.copy(exactText = relocatedText)
+                    }
+                }
+            }
+            if (insertions.isEmpty()) return@dependencyLoop
+            val relocatedTarget = occurrences(result, dependency.target.matchText)
+            if (relocatedTarget.size != 1) {
+                return ShaderStructuralRestoration.Preserved(
+                    "$sourceName:${dependency.target.sourceLine}: ${dependency.target.label} anchor changed " +
+                        "while relocating macro dependencies",
+                )
+            }
+            targetOffset = relocatedTarget.single().first
+            val insertion = insertions.sortedBy { block -> block.sourceRange.first }
+                .joinToString(separator = "") { block -> block.exactText }
+                .let { text -> if (text.endsWith('\n') || text.endsWith('\r')) text else "$text\n" }
+            result = result.substring(0, targetOffset) + insertion + result.substring(targetOffset)
+        }
+        return ShaderStructuralRestoration.Restored(result)
     }
 
     private fun ensureForwardFunctionDeclarations(source: String): String {

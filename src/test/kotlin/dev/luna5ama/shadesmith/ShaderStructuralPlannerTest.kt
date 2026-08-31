@@ -834,6 +834,206 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
+    fun restoredDirectiveMacroClosurePrecedesLocalSizeHostAndArrayUses() {
+        val original = """
+            #version 460 compatibility
+            #define BASE_COUNT 32
+            #define SAMPLE_COUNT (BASE_COUNT * 2)
+            layout(local_size_x = SAMPLE_COUNT) in;
+            const ivec3 workGroups = ivec3(SAMPLE_COUNT, 1, 1);
+            float weights[SAMPLE_COUNT];
+            void main() { weights[0] = 1.0; }
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            layout(local_size_x = SAMPLE_COUNT) in;
+            const ivec3 workGroups = ivec3(SAMPLE_COUNT, 1, 1);
+            float weights[SAMPLE_COUNT];
+            void main() { weights[0] = 1.0; }
+            #define BASE_COUNT 32
+            #define SAMPLE_COUNT (BASE_COUNT * 2)
+        """.trimIndent() + "\n"
+
+        val result = assertIs<ShaderStructuralRestoration.Restored>(
+            restoreDirectiveMacroDependencies(original, restored),
+        ).source
+
+        val base = result.indexOf("#define BASE_COUNT 32")
+        val count = result.indexOf("#define SAMPLE_COUNT (BASE_COUNT * 2)")
+        val layout = result.indexOf("layout(local_size_x = SAMPLE_COUNT)")
+        val host = result.indexOf("const ivec3 workGroups")
+        val array = result.indexOf("float weights[SAMPLE_COUNT]")
+        assertTrue(base in 0 until count)
+        assertTrue(count in 0 until layout)
+        assertTrue(layout in 0 until host)
+        assertTrue(host in 0 until array)
+        assertEquals(1, Regex("#define BASE_COUNT\\b").findAll(result).count())
+        assertEquals(1, Regex("#define SAMPLE_COUNT\\b").findAll(result).count())
+    }
+
+    @Test
+    fun restoredConditionalMacroOwnerAndCapabilityDependencyPrecedeUses() {
+        val original = """
+            #version 460 compatibility
+            #define USE_LARGE 1
+            #if USE_LARGE
+            #define SAMPLE_COUNT 64
+            #else
+            #define SAMPLE_COUNT 32
+            #endif
+            #define ENABLE_INT64 1
+            #if ENABLE_INT64
+            #extension GL_ARB_gpu_shader_int64 : require
+            #endif
+            layout(local_size_x = SAMPLE_COUNT) in;
+            void main() {}
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            #if ENABLE_INT64
+            #extension GL_ARB_gpu_shader_int64 : require
+            #endif
+            layout(local_size_x = SAMPLE_COUNT) in;
+            void main() {}
+            #define USE_LARGE 1
+            #if USE_LARGE
+            #define SAMPLE_COUNT 64
+            #else
+            #define SAMPLE_COUNT 32
+            #endif
+            #define ENABLE_INT64 1
+        """.trimIndent() + "\n"
+
+        val result = assertIs<ShaderStructuralRestoration.Restored>(
+            restoreDirectiveMacroDependencies(original, restored),
+        ).source
+
+        assertTrue(result.indexOf("#define USE_LARGE 1") < result.indexOf("#if USE_LARGE"))
+        assertTrue(result.indexOf("#if USE_LARGE") < result.indexOf("layout(local_size_x = SAMPLE_COUNT)"))
+        assertTrue(result.indexOf("#define ENABLE_INT64 1") < result.indexOf("#if ENABLE_INT64"))
+        assertEquals(1, Regex("#define SAMPLE_COUNT 64").findAll(result).count())
+        assertEquals(1, Regex("#define SAMPLE_COUNT 32").findAll(result).count())
+    }
+
+    @Test
+    fun contractContainedHostDeclarationAndCommentedMacroExampleRemainOrdered() {
+        val original = """
+            #version 460 compatibility
+            #define GROUP_SIZE 8
+            #define DISPATCH_SIZE 32
+            float stableAnchor() { return 1.0; }
+            layout(local_size_x = GROUP_SIZE) in;
+            const ivec3 workGroups = ivec3(DISPATCH_SIZE, 1, 1);
+            // #define DISPATCH_SIZE 64
+            void main() {}
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            float stableAnchor() { return 1.0; }
+            layout(local_size_x = GROUP_SIZE) in;
+            const ivec3 workGroups = ivec3(DISPATCH_SIZE, 1, 1);
+            // #define DISPATCH_SIZE 64
+            void main() {}
+            #define GROUP_SIZE 8
+            #define DISPATCH_SIZE 32
+        """.trimIndent() + "\n"
+
+        val result = assertIs<ShaderStructuralRestoration.Restored>(
+            restoreDirectiveMacroDependencies(original, restored),
+        ).source
+
+        val group = result.indexOf("#define GROUP_SIZE 8")
+        val dispatch = result.indexOf("#define DISPATCH_SIZE 32")
+        val layout = result.indexOf("layout(local_size_x = GROUP_SIZE)")
+        val host = result.indexOf("const ivec3 workGroups")
+        assertTrue(group in 0 until layout, result)
+        assertTrue(dispatch in 0 until layout, result)
+        assertTrue(layout in 0 until host, result)
+        assertEquals(1, Regex("(?m)^#define DISPATCH_SIZE 32$").findAll(result).count())
+        assertEquals(1, Regex("(?m)^// #define DISPATCH_SIZE 64$").findAll(result).count())
+    }
+
+    @Test
+    fun directiveMacroCyclesConflictsAndAmbiguousTargetsFailClosed() {
+        val cyclic = """
+            #version 460 compatibility
+            #define COUNT_A COUNT_B
+            #define COUNT_B COUNT_A
+            float stableAnchor() { return 1.0; }
+            layout(local_size_x = COUNT_A) in;
+            void main() {}
+        """.trimIndent() + "\n"
+        val cyclicRestored = """
+            #version 460 compatibility
+            float stableAnchor() { return 1.0; }
+            layout(local_size_x = COUNT_A) in;
+            void main() {}
+            #define COUNT_A COUNT_B
+            #define COUNT_B COUNT_A
+        """.trimIndent() + "\n"
+        val cycle = assertIs<ShaderStructuralRestoration.Preserved>(
+            restoreDirectiveMacroDependencies(cyclic, cyclicRestored),
+        )
+        assertContains(cycle.reason, "cyclic directive macro dependency")
+        assertContains(cycle.reason, "COUNT_A -> COUNT_B -> COUNT_A")
+
+        val conflicting = """
+            #version 460 compatibility
+            #define SAMPLE_COUNT 32
+            #define SAMPLE_COUNT 64
+            float stableAnchor() { return 1.0; }
+            layout(local_size_x = SAMPLE_COUNT) in;
+            void main() {}
+        """.trimIndent() + "\n"
+        val conflictingRestored = """
+            #version 460 compatibility
+            float stableAnchor() { return 1.0; }
+            layout(local_size_x = SAMPLE_COUNT) in;
+            void main() {}
+            #define SAMPLE_COUNT 32
+            #define SAMPLE_COUNT 64
+        """.trimIndent() + "\n"
+        val conflict = assertIs<ShaderStructuralRestoration.Preserved>(
+            restoreDirectiveMacroDependencies(conflicting, conflictingRestored),
+        )
+        assertContains(conflict.reason, "conflicting source definitions")
+        assertContains(conflict.reason, "SAMPLE_COUNT")
+
+        val original = """
+            #version 460 compatibility
+            #define SAMPLE_COUNT 64
+            float stableAnchor() { return 1.0; }
+            layout(local_size_x = SAMPLE_COUNT) in;
+            void main() {}
+        """.trimIndent() + "\n"
+        val duplicatedDependency = """
+            #version 460 compatibility
+            float stableAnchor() { return 1.0; }
+            layout(local_size_x = SAMPLE_COUNT) in;
+            void main() {}
+            #define SAMPLE_COUNT 64
+            #define SAMPLE_COUNT 64
+        """.trimIndent() + "\n"
+        val duplicateDependency = assertIs<ShaderStructuralRestoration.Preserved>(
+            restoreDirectiveMacroDependencies(original, duplicatedDependency),
+        )
+        assertContains(duplicateDependency.reason, "directive macro dependency [SAMPLE_COUNT] is duplicated")
+
+        val ambiguous = """
+            #version 460 compatibility
+            float stableAnchor() { return 1.0; }
+            layout(local_size_x = SAMPLE_COUNT) in;
+            layout(local_size_x = SAMPLE_COUNT) in;
+            void main() {}
+            #define SAMPLE_COUNT 64
+        """.trimIndent() + "\n"
+        val duplicate = assertIs<ShaderStructuralRestoration.Preserved>(
+            restoreDirectiveMacroDependencies(original, ambiguous),
+        )
+        assertContains(duplicate.reason, "LOCAL_SIZE contract is ambiguous (2 restored matches)")
+    }
+
+    @Test
     fun optimizedCapabilityFunctionRecoversSimpleOriginalGuard() {
         val original = """
             #version 460 compatibility
@@ -1483,6 +1683,28 @@ class ShaderStructuralPlannerTest {
     """.trimIndent()
 
     private data class Fixture(val name: String, val stage: ShaderStage, val source: String)
+
+    private fun restoreDirectiveMacroDependencies(
+        original: String,
+        restored: String,
+    ): ShaderStructuralRestoration {
+        val base = ShaderCompilerCopyPlanner.plan(original, "directive-macro-order.csh")
+        val restorationPlan = ShaderStructuralRestorationPlan(
+            base.sourceName,
+            base.settings,
+            emptySet(),
+            emptyList(),
+            base.irisContracts.contracts,
+            null,
+        )
+        return SpirvFinalEmitter.restoreDirectiveMacroDependencies(
+            base.sourceName,
+            original,
+            restored,
+            base.irisContracts.contracts,
+            restorationPlan,
+        )
+    }
 
     private fun withWorkspace(block: (Path) -> Unit) {
         val workspace = Files.createTempDirectory("shadesmith structural planner test ")
