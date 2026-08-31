@@ -574,10 +574,11 @@ internal data class IrisShaderContractPlan(
         var result = restoredSource
         val alreadyCompilerSource = COMPILER_MARKER in result
         if (!alreadyCompilerSource) {
-            contracts.sortedByDescending { it.exactText.length }.forEach { contract ->
+            sourceFacingContracts.sortedByDescending { it.exactText.length }.forEach { contract ->
                 val first = result.indexOf(contract.exactText)
                 if (first >= 0) result = result.removeRange(first, first + contract.exactText.length)
             }
+            result = removeDerivedMacroDefinitions(result)
             if (localSize != null) result = LOCAL_SIZE_LAYOUT.replace(result, "")
         }
         val version = VERSION_LINE.find(result)
@@ -621,6 +622,31 @@ internal data class IrisShaderContractPlan(
             result = insertAfterVersion(result, validationPrelude)
         }
         return normalizeCompilerText(result)
+    }
+
+    private fun removeDerivedMacroDefinitions(source: String): String {
+        val names = derivedMacros.mapTo(hashSetOf()) { it.sourceName }
+        PreprocessorProtection.protect(compilerPrelude, "$sourceName#compiler-prelude").directives.mapNotNullTo(names) {
+            it.macroName
+        }
+        if (names.isEmpty()) return source
+        val ranges = mutableListOf<IntRange>()
+        var cursor = 0
+        PreprocessorProtection.protect(source, sourceName).directives.forEach { directive ->
+            val start = source.indexOf(directive.exactText, cursor)
+            require(start >= 0) { "$sourceName: cannot locate protected directive during compiler preparation" }
+            val end = start + directive.exactText.length
+            if (
+                directive.kind in setOf(PreprocessorDirectiveKind.DEFINE, PreprocessorDirectiveKind.UNDEF) &&
+                directive.macroName in names
+            ) {
+                ranges += start until end
+            }
+            cursor = end
+        }
+        var result = source
+        ranges.asReversed().forEach { range -> result = result.removeRange(range) }
+        return result
     }
 
     private fun anchorFailure(contract: IrisSourceContractSlice, anchor: IrisSourceAnchor, matches: Int): String {
@@ -1932,8 +1958,13 @@ private fun evaluateInteger(
     return IntegerExpressionParser(expression) { name ->
         values[name]?.toScalarInt() ?: run {
             if (!visiting.add(name)) return@IntegerExpressionParser null
-            val active = macros[name].orEmpty().filter { it.predicate.evaluate(values, settings) == true }.singleOrNull()
-            val value = active?.let { evaluateInteger(it.body, values, settings, macros, visiting) }
+            val activeBodies = macros[name].orEmpty()
+                .filter { it.predicate.evaluate(values, settings) == true }
+                .map { stripComments(it.body).trim() }
+                .distinct()
+            val value = activeBodies.singleOrNull()?.let {
+                evaluateInteger(it, values, settings, macros, visiting)
+            }
             visiting.remove(name)
             value
         }
@@ -2303,8 +2334,31 @@ private fun identifiers(source: String): List<String> = IDENTIFIER.findAll(strip
 private fun identifierRegex(name: String): Regex = "(?<![A-Za-z0-9_])${Regex.escape(name)}(?![A-Za-z0-9_])".toRegex()
 private fun stripComments(source: String): String = BLOCK_COMMENT.replace(LINE_COMMENT.replace(source, ""), "")
 
-private fun isHostDeclarationName(name: String): Boolean {
+internal fun isHostDeclarationName(name: String): Boolean {
     return name in IRIS_HOST_NAMES || IRIS_HOST_NAME_PATTERNS.any { it.matches(name) }
+}
+
+internal data class IrisHostRegistryDeclaration(
+    val name: String,
+    val range: IntRange,
+)
+
+internal fun irisHostRegistryDeclarations(
+    source: String,
+    sourceName: String,
+): List<IrisHostRegistryDeclaration> {
+    val lines = ContractLineMap(source)
+    val lexical = ContractLexicalMap(source)
+    return HOST_CONST_START.findAll(source).filter { match ->
+        lexical.isTopLevelCode(match.range.first) && isHostDeclarationName(match.groupValues[1])
+    }.map { match ->
+        val name = match.groupValues[1]
+        val semicolon = lexical.findCodeCharacter(';', match.range.last + 1)
+            ?: throw IllegalArgumentException(
+                "$sourceName:${lines.lineAt(match.range.first)}: unterminated Iris host declaration $name",
+            )
+        IrisHostRegistryDeclaration(name, lines.fullLineRange(match.range.first..semicolon))
+    }.toList()
 }
 
 private const val COMPILER_HOST_PREFIX = "SM_IRIS_HOST_"

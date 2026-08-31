@@ -516,7 +516,7 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
-    fun restoredStructuralEntityKeepsWholeMultilineMacroDependency() = withWorkspace { workspace ->
+    fun optimizedAwayStructuralEntityDropsItsMultilineMacroDependency() = withWorkspace { workspace ->
         val source = """
             #version 460 compatibility
             #define SETTING_MODE 0 //[0 1 2]
@@ -551,7 +551,7 @@ class ShaderStructuralPlannerTest {
         val result = optimizeStructural(workspace, "multiline-macro.csh", source, ShaderStage.COMPUTE)
 
         assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
-        assertContains(result.source, "#define OPTIONAL_VALUE(value) (\\\n    (value) + 1.0)")
+        assertFalse(result.source.contains("#define OPTIONAL_VALUE"))
         assertFalse(result.source.contains("float unusedCallback()"), result.source)
         assertEquals(2, result.finalValidationInvocations.size)
     }
@@ -707,7 +707,8 @@ class ShaderStructuralPlannerTest {
         """.trimIndent()
 
         assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
-        assertContains(result.source, exactIsland)
+        assertFalse(result.source.contains(exactIsland))
+        assertFalse(result.source.contains("unusedStructural"))
         assertEquals(2, result.structuralSignatures.size)
         assertEquals(2, result.finalValidationInvocations.size)
     }
@@ -736,9 +737,8 @@ class ShaderStructuralPlannerTest {
         val result = optimizeStructural(workspace, "dead-abi.csh", source, ShaderStage.COMPUTE)
 
         assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
-        assertContains(result.source, "uniform float unusedAbi;")
-        assertTrue(result.source.indexOf("#define unusedAbiAlias unusedAbi") < result.source.indexOf("uniform float unusedAbi;"))
-        assertTrue(result.source.indexOf("uniform float unusedAbi;") < result.source.indexOf("void main"))
+        assertFalse(result.source.contains("uniform float unusedAbi;"))
+        assertFalse(result.source.contains("#define unusedAbiAlias unusedAbi"))
         assertFalse("SHADESMITH_RESTORED_ABI" in result.source)
         assertEquals(2, result.finalValidationInvocations.size)
     }
@@ -1720,9 +1720,9 @@ class ShaderStructuralPlannerTest {
 
         assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
         assertFalse(result.source == source)
-        assertContains(result.source, "uniform float unusedAbi;")
+        assertFalse(result.source.contains("uniform float unusedAbi;"))
         val prologue = result.source.indexOf("SHADESMITH_BRANCH_OWNED_PROLOGUE_BEGIN")
-        assertTrue(prologue < 0 || result.source.indexOf("uniform float unusedAbi;") < prologue)
+        assertTrue(prologue < 0)
         assertEquals(1, result.finalValidationInvocations.size)
         assertEquals(1, result.modules.size)
         assertEquals(
@@ -1753,6 +1753,21 @@ class ShaderStructuralPlannerTest {
         assertContains(restored, "const int BRICK_SIZE = 16;")
         assertContains(restored, "shared uint spreadLut[GRID_SIZE * BRICK_SIZE];")
         assertFalse("shared uint spreadLut[1024];" in restored)
+    }
+
+    @Test
+    fun hoistsRestoredImageDeclarationAheadOfHelperUse() {
+        val source = """
+            #version 460 compatibility
+            vec4 loadValue(ivec2 texel) { return imageLoad(colorimg0, texel); }
+            layout(rgba16f) restrict uniform image2D colorimg0;
+            void main() { imageStore(colorimg0, ivec2(0), loadValue(ivec2(0))); }
+        """.trimIndent() + "\n"
+
+        val restored = SpirvFinalEmitter.hoistLateDeclarationDependencies(source)
+
+        assertTrue(restored.indexOf("uniform image2D colorimg0") < restored.indexOf("vec4 loadValue"))
+        assertEquals(1, "uniform image2D colorimg0".toRegex().findAll(restored).count())
     }
 
     @Test
@@ -1915,7 +1930,7 @@ class ShaderStructuralPlannerTest {
             SpirvOptimizationRequest("fixture.${stage.glslangName}", stage, source, modules),
         )
         assertEquals(modules.size, result.modules.size)
-        assertTrue(result.modules.all { Files.isRegularFile(it.validationSpirv) })
+        assertTrue(result.modules.all { Files.isRegularFile(it.optimizedSpirv) })
     }
 
     private fun optimizeStructural(

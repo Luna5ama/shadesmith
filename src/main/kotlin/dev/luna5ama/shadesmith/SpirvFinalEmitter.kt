@@ -450,7 +450,7 @@ internal object SpirvFinalEmitter {
                 is IrisContractRestoration.Restored -> references.source
                 is IrisContractRestoration.StructuralPreservation -> return preserved(request, references.reason)
             }
-            return optimizedOrPreserved(request, restoreProbeResources(sourceFacing, modules))
+            return optimizedOrPreserved(request, restoreProbeResources(sourceFacing, modules), modules)
         }
         structuralPlan.restorationPlan.issue?.let { return preserved(request, it) }
         if (modules.any { it.structuralSignature == null }) {
@@ -625,6 +625,8 @@ internal object SpirvFinalEmitter {
         finalSource = hoistLateAbiQualifierMacros(finalSource)
         finalSource = deduplicateDominatedAbiLines(finalSource)
         finalSource = restoreMissingBranchOwnedMain(finalSource, modules, structuralPlan.restorationPlan)
+        finalSource = hoistLateDeclarationDependencies(finalSource)
+        finalSource = hoistLateAbiDeclarations(finalSource)
         finalSource = removeNonBranchOwnedMainFunctions(finalSource)
         finalSource = when (
             val tokenPaste = restoreTokenPasteSourceDependencies(
@@ -637,6 +639,18 @@ internal object SpirvFinalEmitter {
         ) {
             is ShaderStructuralRestoration.Restored -> tokenPaste.source
             is ShaderStructuralRestoration.Preserved -> return preserved(request, tokenPaste.reason)
+        }
+        finalSource = when (
+            val dependencies = restoreMissingSourceGlobalDependencies(
+                request,
+                finalSource,
+                structuralPlan.restorationPlan,
+                modules.first().irisContracts,
+                reachableCodeAndMacroIdentifiers(finalSource),
+            )
+        ) {
+            is ShaderStructuralRestoration.Restored -> dependencies.source
+            is ShaderStructuralRestoration.Preserved -> return preserved(request, dependencies.reason)
         }
         finalSource = when (val references = restorationContracts.restoreSourceReferences(finalSource)) {
             is IrisContractRestoration.Restored -> references.source
@@ -658,6 +672,7 @@ internal object SpirvFinalEmitter {
         return optimizedOrPreserved(
             request,
             finalSource,
+            modules,
             convergence.optimizedEntities,
             convergence.restoredEntities + nativeComplete.restoredFunctions,
             convergence.restoredBytes + nativeComplete.restoredBytes,
@@ -668,15 +683,21 @@ internal object SpirvFinalEmitter {
     private fun optimizedOrPreserved(
         request: SpirvOptimizationRequest,
         source: String,
+        modules: List<SpirvModuleResult>,
         optimizedEntities: Int = structuralEntities(source).size,
         restoredEntities: Int = 0,
         restoredBytes: Int = 0,
         restorationDiagnostics: List<String> = emptyList(),
     ): SpirvFinalEmission {
-        val artifact = FINAL_SPECIALIZATION_ARTIFACT.find(source)?.value
+        val processed = IrisFinalSourceProcessor.process(request, source, modules)
+        if (processed is IrisFinalSourceProcessing.Preserved) {
+            return preserved(request, processed.reason)
+        }
+        val finalSource = (processed as IrisFinalSourceProcessing.Processed).source
+        val artifact = FINAL_SPECIALIZATION_ARTIFACT.find(finalSource)?.value
         return if (artifact == null) {
             SpirvFinalEmission(
-                source.trimEnd() + "\n",
+                finalSource.trimEnd() + "\n",
                 SpirvEmissionMode.OPTIMIZED,
                 null,
                 optimizedEntities,
@@ -1512,32 +1533,43 @@ internal object SpirvFinalEmitter {
     ): ShaderStructuralRestoration {
         val declared = sourceStructuralEntities(source).mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
         val sourceDeclarations = sourceStructuralEntities(request.source).filter { entity ->
-            entity.kind == StructuralEntityKind.DECLARATION && entity.symbol != null &&
-                !structuralDeclarationPrototype(request.source.substring(entity.range))
+            entity.symbol != null &&
+                (
+                    entity.kind == StructuralEntityKind.FUNCTION ||
+                        entity.kind == StructuralEntityKind.DECLARATION &&
+                        !structuralDeclarationPrototype(request.source.substring(entity.range))
+                    )
         }.groupBy { requireNotNull(it.symbol) }
         additionalReferences.sorted().firstOrNull { name ->
-            sourceDeclarations[name].orEmpty().size > 1
+            val candidates = sourceDeclarations[name].orEmpty()
+            name !in declared && candidates.size > 1 && candidates.any { it.kind != StructuralEntityKind.FUNCTION }
         }?.let { name ->
             return ShaderStructuralRestoration.Preserved(
                 "${request.sourceName}: token-paste declaration dependency $name is ambiguous " +
                     "(${sourceDeclarations.getValue(name).size} source declarations)",
             )
         }
-        val selected = linkedMapOf<String, StructuralEntity>()
+        fun candidates(name: String): List<StructuralEntity> {
+            val items = sourceDeclarations[name].orEmpty()
+            return if (items.size <= 1 || items.all { it.kind == StructuralEntityKind.FUNCTION }) items else emptyList()
+        }
+        val selected = linkedMapOf<IntRange, StructuralEntity>()
         val directReferences = DECLARATION_IDENTIFIER.findAll(maskStructuralCode(source)).map(MatchResult::value)
             .toCollection(linkedSetOf())
         val pending = ArrayDeque(
             (directReferences + additionalReferences).asSequence()
-                .filter { it !in declared && sourceDeclarations[it]?.size == 1 }
+                .filter { it !in declared && candidates(it).isNotEmpty() }
                 .toCollection(linkedSetOf()),
         )
         while (pending.isNotEmpty()) {
             val name = pending.removeFirst()
-            if (name in declared || name in selected) continue
-            val declaration = sourceDeclarations[name]?.singleOrNull() ?: continue
-            selected[name] = declaration
-            declaration.references.filter { dependency ->
-                dependency !in declared && dependency !in selected && sourceDeclarations[dependency]?.size == 1
+            if (name in declared || selected.values.any { it.symbol == name }) continue
+            val dependencies = candidates(name)
+            if (dependencies.isEmpty()) continue
+            dependencies.forEach { dependency -> selected[dependency.range] = dependency }
+            dependencies.flatMap(StructuralEntity::references).filter { dependency ->
+                dependency !in declared && selected.values.none { it.symbol == dependency } &&
+                    candidates(dependency).isNotEmpty()
             }.forEach(pending::addLast)
         }
         if (selected.isEmpty()) return ShaderStructuralRestoration.Restored(source)
@@ -2431,7 +2463,9 @@ internal object SpirvFinalEmitter {
                 slots.asSequence().filter { slot ->
                     sourceMacroDefinitions(slot.exactText).keys.any(requiredMacroNames::contains)
                 }.flatMap { slot ->
+                    val siblingDefinitions = sourceMacroDefinitions(slot.exactText).keys
                     DECLARATION_IDENTIFIER.findAll(slot.exactText).map(MatchResult::value)
+                        .filterNot(siblingDefinitions::contains)
                 }.filter { name ->
                     name !in targetMacroNames && name in sourceDefinitions && name !in requiredMacroNames
                 }.forEach { name ->
@@ -2710,7 +2744,7 @@ internal object SpirvFinalEmitter {
         return source.substring(0, insertionOffset) + insertion + source.substring(insertionOffset)
     }
 
-    private fun hoistLateDeclarationDependencies(source: String): String {
+    internal fun hoistLateDeclarationDependencies(source: String): String {
         val entities = sourceStructuralEntities(source)
         val depths = preprocessorDepths(source)
         val declarations = entities.filter { entity ->
@@ -3184,7 +3218,9 @@ internal object SpirvFinalEmitter {
     ): String {
         val outputEntities = structuralEntities(source)
         val masked = maskStructuralCode(source)
-        val prologueOffset = masked.indexOf(BRANCH_OWNED_PROLOGUE_BEGIN).takeIf { it >= 0 } ?: masked.length
+        val firstFunctionOffset = outputEntities.firstOrNull { it.kind == StructuralEntityKind.FUNCTION }
+            ?.range?.first ?: masked.length
+        val prologueOffset = masked.indexOf(BRANCH_OWNED_PROLOGUE_BEGIN).takeIf { it >= 0 } ?: firstFunctionOffset
         val abiOffset = ABI_PROLOGUE_DECLARATION.find(masked.substring(0, prologueOffset))?.range?.first
             ?: prologueOffset
         val abiLineOffset = source.lineRangeAt(abiOffset).first
@@ -3895,7 +3931,7 @@ private data class SourceMacroDefinition(
     val depth: Int,
 )
 
-private data class StructuralEntity(
+internal data class StructuralEntity(
     val range: IntRange,
     val canonical: String,
     val identity: String,
@@ -3905,7 +3941,7 @@ private data class StructuralEntity(
     val kind: StructuralEntityKind,
 )
 
-private enum class StructuralEntityKind {
+internal enum class StructuralEntityKind {
     DECLARATION,
     FUNCTION,
 }
@@ -3986,10 +4022,10 @@ private class StructuralBranchMaskResolver(
     }
 }
 
-private fun structuralEntities(source: String): List<StructuralEntity> =
+internal fun structuralEntities(source: String): List<StructuralEntity> =
     parseStructuralEntities(source, maskStructuralCode(source))
 
-private fun sourceStructuralEntities(source: String): List<StructuralEntity> {
+internal fun sourceStructuralEntities(source: String): List<StructuralEntity> {
     val baseMask = maskStructuralCode(source)
     val branchMask = StructuralBranchMaskResolver(source, baseMask).defaultMask()
     if (branchMask == baseMask) return parseStructuralEntities(source, baseMask)
@@ -4287,7 +4323,7 @@ private fun maskStructuralSource(source: String): String {
     return result.concatToString()
 }
 
-private fun maskStructuralCode(source: String): String {
+internal fun maskStructuralCode(source: String): String {
     val result = maskStructuralSource(source).toCharArray()
     var continuedDirective = false
     var offset = 0

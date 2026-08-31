@@ -38,7 +38,7 @@ class SpirvOptimizerTest {
             assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, name)
             assertEquals(
                 listOf(SpirvTool.GLSLANG, SpirvTool.SPIRV_OPT, SpirvTool.SPIRV_CROSS, SpirvTool.GLSLANG),
-                module.invocations.map { it.tool },
+                (module.invocations + result.finalValidationInvocations).map { it.tool },
                 name,
             )
             assertEquals(SpirvToolchain.OPTIMIZER_PASSES, module.invocations[1].command.drop(1).dropLast(3), name)
@@ -122,7 +122,7 @@ class SpirvOptimizerTest {
                 SpirvTool.SPIRV_CROSS,
                 SpirvTool.GLSLANG,
             ),
-            module.invocations.map(SpirvInvocation::tool),
+            (module.invocations + result.finalValidationInvocations).map(SpirvInvocation::tool),
         )
         assertTrue("--vulkan-semantics" in module.invocations[4].command)
         assertFalse("--inline-entry-points-exhaustive" in module.invocations[3].command)
@@ -278,13 +278,13 @@ class SpirvOptimizerTest {
         assertFalse(module.source.contains("if (false)"))
         assertFalse(module.source.contains("gl_WorkGroupSize"))
         assertContains(module.source, "inputTexture")
-        assertContains(module.source, "unusedTexture")
+        assertFalse(module.source.contains("unusedTexture"), module.coreSource)
         assertFalse(module.artifactDirectory.resolve("decompiled.glsl").readText().contains("unusedTexture"))
-        assertContains(module.source, "uniform float deadReferencedUniform = 1.0;")
+        assertFalse(module.source.contains("deadReferencedUniform"), module.coreSource)
         assertFalse(module.artifactDirectory.resolve("decompiled.glsl").readText().contains("deadReferencedUniform"))
-        assertContains(module.source, "struct DeadRecord")
-        assertContains(module.source, "readonly buffer DeadBuffer")
-        assertContains(module.source, "DeadRecord deadValues[];")
+        assertFalse(module.source.contains("struct DeadRecord"), module.source)
+        assertFalse(module.source.contains("readonly buffer DeadBuffer"))
+        assertFalse(module.source.contains("DeadRecord deadValues[];"))
         assertContains(module.source, "outputImage")
         assertContains(module.source, "exposure")
         assertContains(module.source, "readonly buffer DataBuffer")
@@ -472,7 +472,7 @@ class SpirvOptimizerTest {
         assertContains(vertex, "readonly buffer GlobalData")
         assertContains(vertex, "sharedCoord = globalValue.xy;")
         assertFalse(Regex("""\b_[0-9]+\s*\.""").containsMatchIn(vertex))
-        assertContains(fragment, "readonly buffer GlobalData")
+        assertFalse(fragment.contains("readonly buffer GlobalData"))
         assertFalse(Regex("""}\s+_[0-9]+\s*;""").containsMatchIn(fragment))
 
         val linkDirectory = workspace.resolve("linked")
@@ -559,7 +559,8 @@ class SpirvOptimizerTest {
         assertContains(result.source, "//#define SETTING_TINT")
         assertEquals(listOf("tint-on", "tint-off"), result.modules.map { it.name })
         assertTrue(maximumProcesses.get() >= 2)
-        assertTrue(result.modules.all { it.validationSpirv.isRegularFile() && it.validationSpirv.fileSize() > 0 })
+        assertTrue(result.modules.all { it.optimizedSpirv.isRegularFile() && it.optimizedSpirv.fileSize() > 0 })
+        assertTrue(result.finalValidationInvocations.isEmpty())
         assertTrue(result.modules.all { "APPLY_TINT" !in it.source })
     }
 
@@ -705,24 +706,62 @@ class SpirvOptimizerTest {
         val contractSource = """
             #version 460 compatibility
             #define SM_STRUCT_SETTING_GRID_SIZE 64
+            #define SM_SETTING_MODE 2
             #if defined(DISTANT_HORIZONS)
             #define GRID_SIZE SM_STRUCT_SETTING_GRID_SIZE
             #define usam_data colortex8
             #endif
+            #define UPSCALE_FACTOR 2.5
             uniform sampler2D colortex8;
-            int readGridSize() { return GRID_SIZE + textureSize(usam_data, 0).x; }
+            float readGridSize() { return float(GRID_SIZE + textureSize(usam_data, 0).x) * UPSCALE_FACTOR; }
         """.trimIndent()
         val preprocessed = """
             #version 460 compatibility
+            layout(constant_id = 0) const int SM_SETTING_MODE = 2;
             uniform sampler2D colortex8;
-            int readGridSize() { return GRID_SIZE + textureSize(usam_data, 0).x; }
+            float readGridSize() { return float(GRID_SIZE + textureSize(usam_data, 0).x) * UPSCALE_FACTOR; }
         """.trimIndent()
 
-        val result = restoreMissingCompilerMacros(preprocessed, contractSource)
+        val result = restoreMissingCompilerScalarMacros(
+            restoreMissingCompilerMacros(preprocessed, contractSource),
+            contractSource,
+        )
 
         assertContains(result, "#define GRID_SIZE 64")
         assertContains(result, "#define usam_data colortex8")
-        assertContains(result, "return GRID_SIZE + textureSize(usam_data, 0).x;")
+        assertContains(result, "#define UPSCALE_FACTOR 2.5")
+        assertFalse("#define SM_SETTING_MODE" in result)
+        assertContains(result, "float(GRID_SIZE + textureSize(usam_data, 0).x) * UPSCALE_FACTOR")
+    }
+
+    @Test
+    fun finalCompilerCopyBridgesMissingDerivedScalarMacro() {
+        val contractSource = """
+            #version 460 compatibility
+            #define SETTING_UPSCALE_FACTOR 2 //[0 1 2]
+            #if SETTING_UPSCALE_FACTOR == 0
+            #define UPSCALE_FACTOR 1.0
+            #elif SETTING_UPSCALE_FACTOR == 1
+            #define UPSCALE_FACTOR 1.5
+            #else
+            #define UPSCALE_FACTOR 2.0
+            #endif
+            float readValue() { return UPSCALE_FACTOR; }
+        """.trimIndent()
+        val preprocessed = """
+            #version 460 compatibility
+            const int SM_SETTING_UPSCALE_FACTOR = 2;
+            float readValue() { return UPSCALE_FACTOR; }
+        """.trimIndent()
+
+        val result = restoreMissingCompilerDerivedMacros(
+            preprocessed,
+            compilerDerivedScalarExpressions(ShaderCompilerCopyPlanner.plan(contractSource)),
+        )
+
+        assertContains(result, "#define UPSCALE_FACTOR")
+        assertContains(result, "SM_SETTING_UPSCALE_FACTOR == 0")
+        assertContains(result, "SM_SETTING_UPSCALE_FACTOR == 1")
     }
 
     @Test

@@ -117,6 +117,7 @@ internal class ShaderPipeline(
         val duplicateNames = orderedFiles.groupingBy(::sourceName).eachCount().filterValues { it > 1 }.keys
         require(duplicateNames.isEmpty()) { "Duplicate shader source names: ${duplicateNames.sorted()}" }
         if (orderedFiles.isEmpty()) return emptyList()
+        val finalSourcePolicies = IrisCorpusMetadataRegistry.plan(orderedFiles)
 
         val activeCache = cache
         val executor = Executors.newFixedThreadPool(minOf(parallelism, orderedFiles.size))
@@ -132,7 +133,7 @@ internal class ShaderPipeline(
         val work = try {
             chunkExecutor.invokeAll(
                 chunks.map { files ->
-                    Callable { processFileChunk(files, activeCache, executor, optimizer) }
+                    Callable { processFileChunk(files, activeCache, executor, optimizer, finalSourcePolicies) }
                 },
             ).flatMap { future -> future.get() }
         } catch (e: InterruptedException) {
@@ -184,6 +185,7 @@ internal class ShaderPipeline(
         activeCache: ShaderPipelineCache?,
         executor: java.util.concurrent.ExecutorService,
         optimizer: SpirvOptimizer,
+        finalSourcePolicies: Map<String, IrisFinalSourcePolicy>,
     ): List<ShaderWork> {
         val preparations = executor.invokeAll(
             files.map { file ->
@@ -192,7 +194,9 @@ internal class ShaderPipeline(
                     val previousName = worker.name
                     worker.name = "shadesmith-plan-${sourceName(file).substringAfterLast('/').take(64)}"
                     try {
-                        ShaderPreparationWork.Success(prepareFile(file, activeCache))
+                        ShaderPreparationWork.Success(
+                            prepareFile(file, activeCache, finalSourcePolicies[sourceName(file)]),
+                        )
                     } catch (e: Exception) {
                         ShaderPreparationWork.Failure(file, e)
                     } finally {
@@ -226,6 +230,7 @@ internal class ShaderPipeline(
                                 preparation,
                                 materializedByPreparation[preparationIndex].orEmpty(),
                                 optimizer,
+                                finalSourcePolicies[sourceName(preparation.file)],
                             ),
                         )
                     } catch (e: Exception) {
@@ -266,6 +271,7 @@ internal class ShaderPipeline(
     private fun prepareFile(
         file: ShaderFile,
         activeCache: ShaderPipelineCache?,
+        finalSourcePolicy: IrisFinalSourcePolicy?,
     ): ShaderPreparation {
         val sourceName = sourceName(file)
         val entryPoint = ShaderEntryPoint.from(file.path, file.code)
@@ -285,7 +291,12 @@ internal class ShaderPipeline(
             )
         }
         val activation = ioContext.programActivations.contractFor(file.path.nameWithoutExtension)
-        val planContract = "$ROOT_DERIVED_PLAN_CONTRACT\n${activation.cacheContract}"
+        val planContract = buildString {
+            appendLine(ROOT_DERIVED_PLAN_CONTRACT)
+            appendLine(activation.cacheContract)
+            append("final-source-policy=")
+            append(finalSourcePolicy?.cacheContract.orEmpty())
+        }
         val decision = lookupCache(activeCache, file, entryPoint.stage, planContract)
         decision.hit?.let { return ShaderPreparation.Completed(file, entryPoint.stage, it, decision.binding) }
 
@@ -337,6 +348,7 @@ internal class ShaderPipeline(
         preparation: ShaderPreparation,
         materializations: List<ShaderCompilerCopyMaterialization>,
         optimizer: SpirvOptimizer,
+        finalSourcePolicy: IrisFinalSourcePolicy?,
     ): ShaderExecution {
         val result = when (preparation) {
             is ShaderPreparation.Completed -> preparation.result
@@ -349,6 +361,7 @@ internal class ShaderPipeline(
                         sourceName = sourceName(preparation.file),
                         stage = preparation.stage,
                         source = preparation.file.code,
+                        finalSourcePolicy = finalSourcePolicy,
                     ),
                 ),
             )
@@ -367,6 +380,7 @@ internal class ShaderPipeline(
                             stage = preparation.stage,
                             source = preparation.file.code,
                             compilerModules = listOf(module),
+                            finalSourcePolicy = finalSourcePolicy,
                         ),
                     ),
                 )
@@ -395,6 +409,7 @@ internal class ShaderPipeline(
                                         source = preparation.file.code,
                                         compilerModules = finalized.modules.map { it.module },
                                         structuralPlan = preparation.plan,
+                                        finalSourcePolicy = finalSourcePolicy,
                                     ),
                                 ),
                             )

@@ -23,6 +23,7 @@ internal data class SpirvCompilerModule(
     val structuralAssignment: Map<String, String> = emptyMap(),
     val structuralAssignments: List<Map<String, String>> = emptyList(),
     val tokenPasteLowerings: List<ShaderTokenPasteLowering> = emptyList(),
+    val derivedScalarExpressions: Map<String, String> = emptyMap(),
 )
 
 internal data class SpirvOptimizationRequest(
@@ -31,6 +32,7 @@ internal data class SpirvOptimizationRequest(
     val source: String,
     val compilerModules: List<SpirvCompilerModule> = emptyList(),
     val structuralPlan: ShaderStructuralCoveragePlan? = null,
+    val finalSourcePolicy: IrisFinalSourcePolicy? = null,
 )
 
 internal enum class SpirvEmissionMode {
@@ -45,7 +47,7 @@ internal fun restoreMissingCompilerMacros(source: String, contractSource: String
     val defined = COMPILER_MACRO_DEFINITION.findAll(source).mapTo(hashSetOf()) { it.groupValues[1] }
     val referenced = source.lineSequence().filterNot { it.trimStart().startsWith('#') }
         .flatMap { line -> COMPILER_IDENTIFIER.findAll(line.substringBefore("//")).map(MatchResult::value) }
-        .filterTo(sortedSetOf()) { (it in values || it in aliases) && it !in defined }
+        .filterTo(sortedSetOf()) { (it in values || it in aliases) && it !in defined && !it.startsWith("SM_") }
     if (referenced.isEmpty()) return source
     val version = COMPILER_VERSION_LINE.find(source)
         ?: throw IllegalArgumentException("final compiler copy has no #version directive")
@@ -57,6 +59,96 @@ internal fun restoreMissingCompilerMacros(source: String, contractSource: String
         "#ifndef $name\n#define $name $replacement\n#endif\n"
     }
     return source.substring(0, offset) + bridges + source.substring(offset)
+}
+
+internal fun restoreMissingCompilerScalarMacros(source: String, contractSource: String): String {
+    val integers = resolveIntegerObjectMacros(contractSource).mapValues { it.value.toString() }
+    val literals = COMPILER_OBJECT_MACRO.findAll(contractSource).groupBy(
+        { it.groupValues[1] },
+        { it.groupValues[2].substringBefore("//").trim() },
+    ).mapNotNull { (name, bodies) ->
+        bodies.distinct().singleOrNull()?.takeIf(COMPILER_SCALAR_LITERAL::matches)?.let { name to it }
+    }.toMap()
+    val replacements = literals + integers
+    if (replacements.isEmpty()) return source
+    val defined = COMPILER_MACRO_DEFINITION.findAll(source).mapTo(hashSetOf()) { it.groupValues[1] }
+    val referenced = source.lineSequence().filterNot { it.trimStart().startsWith('#') }
+        .flatMap { line -> COMPILER_IDENTIFIER.findAll(line.substringBefore("//")).map(MatchResult::value) }
+        .filterTo(sortedSetOf()) { it in replacements && it !in defined && !it.startsWith("SM_") }
+    if (referenced.isEmpty()) return source
+    val version = COMPILER_VERSION_LINE.find(source)
+        ?: throw IllegalArgumentException("final compiler copy has no #version directive")
+    var offset = version.range.last + 1
+    if (source.getOrNull(offset) == '\r') offset++
+    if (source.getOrNull(offset) == '\n') offset++
+    val bridges = referenced.joinToString("") { name ->
+        "#ifndef $name\n#define $name ${replacements.getValue(name)}\n#endif\n"
+    }
+    return source.substring(0, offset) + bridges + source.substring(offset)
+}
+
+internal fun restoreMissingCompilerDerivedMacros(source: String, replacements: Map<String, String>): String {
+    if (replacements.isEmpty()) return source
+    val defined = COMPILER_MACRO_DEFINITION.findAll(source).mapTo(hashSetOf()) { it.groupValues[1] }
+    val referenced = source.lineSequence().filterNot { it.trimStart().startsWith('#') }
+        .flatMap { line -> COMPILER_IDENTIFIER.findAll(line.substringBefore("//")).map(MatchResult::value) }
+        .filterTo(sortedSetOf()) { it in replacements && it !in defined }
+    if (referenced.isEmpty()) return source
+    val version = COMPILER_VERSION_LINE.find(source)
+        ?: throw IllegalArgumentException("final compiler copy has no #version directive")
+    var offset = version.range.last + 1
+    if (source.getOrNull(offset) == '\r') offset++
+    if (source.getOrNull(offset) == '\n') offset++
+    val bridges = referenced.joinToString("") { name ->
+        "#ifndef $name\n#define $name (${replacements.getValue(name)})\n#endif\n"
+    }
+    return source.substring(0, offset) + bridges + source.substring(offset)
+}
+
+internal fun compilerDerivedScalarExpressions(contractPlan: ShaderCompilerCopyPlan): Map<String, String> {
+    val controls = contractPlan.derivedControls
+        .filter { it.kind == ShaderDerivedControlKind.SCALAR && "defined" !in it.compilerExpression }
+        .associateBy { it.name }
+    if (controls.isEmpty()) return emptyMap()
+    val settingNames = contractPlan.settings.associate { setting ->
+        setting.name to if (setting.controlKind == ShaderControlKind.HOST_PRESENCE) {
+            "SM_HOST_${setting.name}"
+        } else {
+            "SM_${setting.name}"
+        }
+    }
+    fun render(name: String, visiting: Set<String>): String? {
+        if (name in visiting) return null
+        var expression = controls[name]?.compilerExpression ?: return null
+        val replacements = linkedMapOf<String, String>()
+        replacements.putAll(settingNames)
+        controls.keys.filter { it != name && COMPILER_IDENTIFIER.findAll(expression).any { match -> match.value == it } }
+            .forEach { dependency ->
+                render(dependency, visiting + name)?.let { replacements[dependency] = "($it)" }
+                    ?: return null
+            }
+        replacements.entries.sortedByDescending { it.key.length }.forEach { (token, replacement) ->
+            expression = compilerIdentifier(token).replace(expression, replacement)
+        }
+        return expression
+    }
+    return controls.keys.sorted().mapNotNull { name -> render(name, emptySet())?.let { name to it } }.toMap()
+}
+
+internal fun mergeDerivedScalarExpressions(
+    sourceName: String,
+    modules: List<SpirvModuleResult>,
+): Map<String, String> {
+    return modules.flatMap { module -> module.derivedScalarExpressions.entries }
+        .groupBy(Map.Entry<String, String>::key, Map.Entry<String, String>::value)
+        .toSortedMap()
+        .mapValues { (name, expressions) ->
+            val distinct = expressions.distinct()
+            require(distinct.size == 1) {
+                "$sourceName: derived macro $name differs across structural modules"
+            }
+            distinct.single()
+        }
 }
 
 private fun resolveCompilerObjectAliases(source: String): Map<String, String> {
@@ -90,13 +182,19 @@ private val COMPILER_ABI_DECLARATION = Regex(
         "([A-Za-z_][A-Za-z0-9_]*)[\\t ]*(?:[;\\[{])",
 )
 private val COMPILER_IDENTIFIER = "[A-Za-z_][A-Za-z0-9_]*".toRegex()
+private val COMPILER_SCALAR_LITERAL =
+    "[+-]?(?:(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?)[fFuU]?".toRegex()
 private val COMPILER_VERSION_LINE = "(?m)^[\\t ]*#version[^\\r\\n]*".toRegex()
+private fun compilerIdentifier(name: String): Regex =
+    "(?<![A-Za-z0-9_])${Regex.escape(name)}(?![A-Za-z0-9_])".toRegex()
 
 internal data class SpirvModuleResult(
     val name: String,
     val source: String,
     val coreSource: String,
+    val liveSource: String,
     val bridgeSettings: List<ShaderSetting>,
+    val derivedScalarExpressions: Map<String, String>,
     val structuralSignature: ShaderStructuralSignature?,
     val structuralAssignment: Map<String, String>,
     val structuralAssignments: List<Map<String, String>>,
@@ -229,16 +327,18 @@ internal class SpirvOptimizer(
         } else {
             restorationDiagnostic.writeText(emission.restorationDiagnostics.joinToString("\n", postfix = "\n"))
         }
-        val finalValidationInvocations = if (
-            emission.mode == SpirvEmissionMode.OPTIMIZED && request.structuralPlan != null
-        ) {
-            validateFinalStructuralSource(
-                request,
-                emission.source,
-                results,
-                request.structuralPlan,
-                requestDirectory,
-            )
+        val finalValidationInvocations = if (emission.mode == SpirvEmissionMode.OPTIMIZED) {
+            if (request.structuralPlan == null) {
+                listOf(validateFinalSource(request, emission.source, results.single(), requestDirectory))
+            } else {
+                validateFinalStructuralSource(
+                    request,
+                    emission.source,
+                    results,
+                    request.structuralPlan,
+                    requestDirectory,
+                )
+            }
         } else {
             emptyList()
         }
@@ -247,6 +347,11 @@ internal class SpirvOptimizer(
         ).writeText(emission.source)
         emission.fallbackReason?.let { reason ->
             requestDirectory.resolve("fallback-reason.txt").writeText(reason.trimEnd() + "\n")
+        }
+        val emittedResults = if (results.size == 1 && request.structuralPlan == null) {
+            listOf(results.single().copy(source = emission.source))
+        } else {
+            results
         }
         return SpirvOptimizationResult(
             source = emission.source,
@@ -257,7 +362,7 @@ internal class SpirvOptimizer(
             finalValidationInvocations = finalValidationInvocations,
             cacheHits = 0,
             artifactDirectory = requestDirectory,
-            modules = results,
+            modules = emittedResults,
             optimizedEntities = emission.optimizedEntities,
             restoredEntities = emission.restoredEntities,
             restoredBytes = emission.restoredBytes,
@@ -581,17 +686,9 @@ internal class SpirvOptimizer(
         val validationSpirv = if (deferFinalRestoration) {
             requestDirectory.resolve("final-structural-validation").resolve(safeName(module.name)).resolve("final.spv")
         } else {
-            moduleDirectory.resolve("validation.spv")
+            requestDirectory.resolve("final-validation").resolve(safeName(module.name)).resolve("final.spv")
         }
-        val validationInvocation = if (deferFinalRestoration) {
-            null
-        } else {
-            toolchain.compileInvocation(request.stage, validationSource, validationSpirv).also { invocation ->
-                phase(request, SpirvRoundTripPhase.RECOMPILE, moduleDirectory, moduleSourceName) {
-                    toolchain.execute(invocation)
-                }
-            }
-        }
+        val validationInvocation: SpirvInvocation? = null
         moduleDirectory.resolve("native-primitives.txt").writeText(
             buildString {
                 appendLine("cross-semantics: ${if (vulkanCrossSemantics) "vulkan-subgroup" else "opengl"}")
@@ -604,7 +701,7 @@ internal class SpirvOptimizer(
                     appendLine("validation")
                     appendLine(SpirvBinaryInventory.read(validationSpirv).render())
                 } else {
-                    appendLine("validation: deferred structural recompile")
+                    appendLine("validation: deferred final-source recompile")
                 }
             },
         )
@@ -633,7 +730,9 @@ internal class SpirvOptimizer(
             name = module.name,
             source = emissionSource,
             coreSource = emissionCore,
+            liveSource = semanticSource,
             bridgeSettings = bridgeSettings,
+            derivedScalarExpressions = module.derivedScalarExpressions,
             structuralSignature = module.structuralSignature,
             structuralAssignment = module.structuralAssignment,
             structuralAssignments = module.structuralAssignments,
@@ -662,6 +761,80 @@ internal class SpirvOptimizer(
         )
     }
 
+    private fun validateFinalSource(
+        request: SpirvOptimizationRequest,
+        source: String,
+        module: SpirvModuleResult,
+        requestDirectory: Path,
+    ): SpirvInvocation {
+        val finalDirectory = requestDirectory.resolve("final-validation").resolve(safeName(module.name))
+        finalDirectory.createDirectories()
+        finalDirectory.resolve("emitted.glsl").writeText(source)
+        module.irisContracts.finalSourceReferenceIssue(source)?.let { issue ->
+            fail(request, SpirvRoundTripPhase.VALIDATE, finalDirectory, issue, request.sourceName)
+        }
+        val compilerRestored = phase(request, SpirvRoundTripPhase.VALIDATE, finalDirectory) {
+            SpirvSettingBridge.restoreCompilerDeclarations(
+                source,
+                module.bridgeSettings,
+                emptyMap(),
+                emptySet(),
+            )
+        }
+        val compilerReady = phase(request, SpirvRoundTripPhase.VALIDATE, finalDirectory) {
+            module.irisContracts.replaceHostReferences(
+                module.irisContracts.prepareCompilerSource(compilerRestored),
+            )
+        }
+        val finalPatch = phase(request, SpirvRoundTripPhase.VALIDATE, finalDirectory) {
+            patcher.patch(
+                PreprocessorProtection.protectGeneratedCompilerSource(compilerReady, request.sourceName),
+                request.stage,
+                module.generatedLayouts,
+                sourceContracts = module.irisContracts,
+            )
+        }
+        val activeExpectedLayouts = module.generatedLayouts.filter { expected ->
+            finalPatch.generatedLayouts.any { it.key == expected.key }
+        }
+        generatedLayoutDifference(activeExpectedLayouts, finalPatch.generatedLayouts)?.let { difference ->
+            fail(
+                request,
+                SpirvRoundTripPhase.VALIDATE,
+                finalDirectory,
+                "final generated layout mapping changed for ${module.name}: $difference",
+                request.sourceName,
+            )
+        }
+        phase(request, SpirvRoundTripPhase.VALIDATE, finalDirectory) {
+            patcher.validateContract(source, finalPatch, validateSourceContracts = false)
+        }
+        val normalized = CompilerCopyEarlyReturnNormalizer.normalize(finalPatch.compilerSource)
+        finalDirectory.resolve("early-returns.txt").writeText(normalized.renderReport())
+        val compilerSource = SpirvNativePrimitiveContract.plan(normalized.source)
+            ?.prepareCompilerSource(normalized.source)
+            ?: normalized.source
+        val compilerPath = finalDirectory.resolve("final.glsl")
+        val spirvPath = finalDirectory.resolve("final.spv")
+        compilerPath.writeText(compilerSource)
+        val toolchain = if (processRunner == null) {
+            SpirvToolchain(
+                finalDirectory,
+                executables,
+                processGate = processGate,
+                metrics = metrics,
+                resultCache = toolResultCache,
+            )
+        } else {
+            SpirvToolchain(finalDirectory, executables, processRunner, processGate, metrics, toolResultCache)
+        }
+        val invocation = toolchain.compileInvocation(request.stage, compilerPath, spirvPath)
+        phase(request, SpirvRoundTripPhase.RECOMPILE, finalDirectory) {
+            toolchain.execute(invocation)
+        }
+        return invocation
+    }
+
     private fun validateFinalStructuralSource(
         request: SpirvOptimizationRequest,
         source: String,
@@ -683,31 +856,33 @@ internal class SpirvOptimizer(
                 "${request.sourceName}#$moduleName",
             )
         }
-        modules.asSequence().mapNotNull { module ->
-            module.irisContracts.finalSourceDependencyIssue(source)?.let { issue -> module.name to issue }
-        }.firstOrNull()?.let { (moduleName, issue) ->
-            fail(
-                request,
-                SpirvRoundTripPhase.VALIDATE,
-                finalDirectory,
-                "$moduleName: $issue",
-                "${request.sourceName}#$moduleName",
-            )
-        }
-        SpirvFinalEmitter.finalDirectiveMacroDependencyIssue(
-            request.sourceName,
-            request.source,
-            source,
-            modules.first().irisContracts.sourceFacingContracts,
-            structuralPlan.restorationPlan,
-        )?.let { issue ->
-            fail(
-                request,
-                SpirvRoundTripPhase.VALIDATE,
-                finalDirectory,
-                issue,
+        if (request.finalSourcePolicy == null) {
+            modules.asSequence().mapNotNull { module ->
+                module.irisContracts.finalSourceDependencyIssue(source)?.let { issue -> module.name to issue }
+            }.firstOrNull()?.let { (moduleName, issue) ->
+                fail(
+                    request,
+                    SpirvRoundTripPhase.VALIDATE,
+                    finalDirectory,
+                    "$moduleName: $issue",
+                    "${request.sourceName}#$moduleName",
+                )
+            }
+            SpirvFinalEmitter.finalDirectiveMacroDependencyIssue(
                 request.sourceName,
-            )
+                request.source,
+                source,
+                modules.first().irisContracts.sourceFacingContracts,
+                structuralPlan.restorationPlan,
+            )?.let { issue ->
+                fail(
+                    request,
+                    SpirvRoundTripPhase.VALIDATE,
+                    finalDirectory,
+                    issue,
+                    request.sourceName,
+                )
+            }
         }
         val validationModules = modules.distinctBy { module ->
             requireNotNull(module.structuralSignature).canonical
@@ -727,6 +902,7 @@ internal class SpirvOptimizer(
             val selectedSource: String,
             val compilerPlan: ShaderCompilerCopyPlan,
         )
+        val derivedScalarExpressions = mergeDerivedScalarExpressions(request.sourceName, modules)
         val candidates = validationModules.mapIndexed { index, module ->
             val signature = requireNotNull(module.structuralSignature) {
                 "${request.sourceName} final structural validation is missing ${module.name} signature metadata"
@@ -758,15 +934,27 @@ internal class SpirvOptimizer(
             val selectedSource = SpirvFinalEmitter.restoreSourceFunctionConditionalOwners(
                 request.source,
                 selectedStructuralSource,
-            )
+            ).let { restoredOwners ->
+                structuralPlan.restorationPlan.materializeFinalSource(
+                    restoredOwners,
+                    module.structuralAssignment,
+                )
+            }
+            val candidateDirectory = finalDirectory.resolve(safeName(module.name))
+            candidateDirectory.createDirectories()
+            candidateDirectory.resolve("selected.glsl").writeText(selectedSource)
             val compilerPlan = phase(
                 request,
                 SpirvRoundTripPhase.VALIDATE,
                 finalDirectory,
                 "${request.sourceName}#${module.name}",
             ) {
-                val plan = ShaderCompilerCopyPlanner.plan(
+                val compilerView = IrisFinalSourceProcessor.prepareCompatibilityCompilerSource(
+                    request.source,
                     selectedSource,
+                )
+                val plan = ShaderCompilerCopyPlanner.plan(
+                    compilerView,
                     "${request.sourceName}#${module.name}",
                 )
                 plan.copy(
@@ -802,14 +990,20 @@ internal class SpirvOptimizer(
             val module = candidate.module
             val signature = candidate.signature
             val selectedSource = candidate.selectedSource
-            val compilerMacroSource = restoreMissingCompilerMacros(preprocessedSource, selectedSource)
+            val compilerMacroSource = restoreMissingCompilerDerivedMacros(
+                restoreMissingCompilerScalarMacros(
+                    restoreMissingCompilerMacros(preprocessedSource, selectedSource),
+                    source,
+                ),
+                derivedScalarExpressions,
+            )
             val materialized = phase(
                 request,
                 SpirvRoundTripPhase.VALIDATE,
                 finalDirectory,
                 "${request.sourceName}#${module.name}",
             ) {
-                module.irisContracts.prepareCompilerSource(compilerMacroSource)
+                candidate.compilerPlan.irisContracts.prepareCompilerSource(compilerMacroSource)
             }
             val moduleDirectory = finalDirectory.resolve(safeName(module.name))
             moduleDirectory.createDirectories()
@@ -849,8 +1043,7 @@ internal class SpirvOptimizer(
                     ),
                     request.stage,
                     module.generatedLayouts,
-                    module.irisContracts,
-                    module.originalContract,
+                    candidate.compilerPlan.irisContracts,
                 )
             }
             phase(
@@ -861,11 +1054,14 @@ internal class SpirvOptimizer(
             ) {
                 patcher.validateContract(
                     finalPatch.compilerSource,
-                    finalPatch.copy(originalContract = module.originalContract),
+                    finalPatch,
                     validateSourceContracts = false,
                 )
             }
-            generatedLayoutDifference(module.generatedLayouts, finalPatch.generatedLayouts)?.let { difference ->
+            val activeExpectedLayouts = module.generatedLayouts.filter { expected ->
+                finalPatch.generatedLayouts.any { it.key == expected.key }
+            }
+            generatedLayoutDifference(activeExpectedLayouts, finalPatch.generatedLayouts)?.let { difference ->
                 fail(
                     request,
                     SpirvRoundTripPhase.VALIDATE,

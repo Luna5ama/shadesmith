@@ -209,6 +209,32 @@ class ShaderCompilerCopyTest {
     }
 
     @Test
+    fun lowersExhaustiveDerivedScalarMacroWithoutElseBranch() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_UPSCALE 1 //[0 1 2]
+            #if SETTING_UPSCALE == 0
+            #define UPSCALE 1.0
+            #elif SETTING_UPSCALE == 1
+            #define UPSCALE 1.5
+            #elif SETTING_UPSCALE == 2
+            #define UPSCALE 2.0
+            #endif
+            void main() { float value = UPSCALE; }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "derived-exhaustive.csh")
+
+        assertTrue(plan.structuralBlockers.isEmpty(), plan.structuralBlockers.toString())
+        assertEquals(listOf("UPSCALE"), plan.derivedControls.map { it.name })
+        assertFalse("&&" in plan.derivedControls.single().compilerExpression)
+        val compiler = assertNotNull(plan.compilerSource)
+        assertFalse("#define UPSCALE" in compiler)
+        assertContains(compiler, "SM_SETTING_UPSCALE == 0")
+        assertContains(compiler, "SM_SETTING_UPSCALE == 1")
+    }
+
+    @Test
     fun rewritesDerivedPresenceExpressionsInPreservedDirectivesAsIfConditions() {
         val source = """
             #version 460 compatibility

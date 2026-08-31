@@ -94,12 +94,19 @@ class PipelineIntegrationTest {
         assertFalse("SPIRV_CROSS_CONSTANT_ID_" in emittedBranchShader)
         assertFalse("constant_id" in emittedBranchShader)
         assertFalse("shadesmith_resource_" in emittedBranchShader)
+        assertContains(emittedBranchShader, "//#define SETTING_BRANCH")
+        assertFalse("SETTING_BRANCH" in output.resolve("composite.csh").readText())
+        assertFalse("SETTING_BRANCH" in output.resolve("composite1.csh").readText())
+        val finalShader = output.resolve("final.fsh").readText()
+        assertContains(finalShader, "//#define SETTING_BRANCH")
+        assertContains(finalShader, "const int colortex0Format = RGBA16F; // Pack-global Iris registry entry")
+        assertFalse("colortex0Format" in emittedBranchShader)
         assertContains(properties.readText(), "image.uimg_rgba16f=usam_rgba16f RGBA RGBA16F HALF_FLOAT false true 1.0 1.0")
-        assertEquals("3", performance.getValue("validated_modules"))
-        assertEquals("3", firstPerformance.getValue("cache_misses"))
-        assertEquals("3", firstPerformance.getValue("cache_publications"))
+        assertEquals("4", performance.getValue("validated_modules"))
+        assertEquals("4", firstPerformance.getValue("cache_misses"))
+        assertEquals("4", firstPerformance.getValue("cache_publications"))
         assertTrue(firstPerformance.getValue("external_processes").toInt() > 0)
-        assertEquals("3", performance.getValue("cache_hits"))
+        assertEquals("4", performance.getValue("cache_hits"))
         assertEquals("0", performance.getValue("cache_misses"))
         assertEquals("0", performance.getValue("cache_publications"))
         assertEquals("0", performance.getValue("materialized_compiler_modules"))
@@ -121,7 +128,7 @@ class PipelineIntegrationTest {
         input.resolve("composite1.csh").writeText(input.resolve("composite1.csh").readText() + "\n// cache invalidation\n")
         Main.runShaderPipeline(input, output, artifacts, properties)
         val invalidated = performance(artifacts)
-        assertEquals("2", invalidated.getValue("cache_hits"))
+        assertEquals("3", invalidated.getValue("cache_hits"))
         assertEquals("1", invalidated.getValue("cache_misses"))
         assertEquals("1", invalidated.getValue("cache_publications"))
         assertTrue(invalidated.getValue("external_processes").toInt() > 0)
@@ -156,9 +163,9 @@ class PipelineIntegrationTest {
         copyFixture(input)
         Main.runShaderPipeline(input, output, artifacts, properties)
         val performance = performance(artifacts)
-        assertEquals("3", performance.getValue("validated_modules"))
+        assertEquals("4", performance.getValue("validated_modules"))
         assertTrue(performance.getValue("external_processes").toInt() > 0)
-        assertEquals(3, cacheEntries(artifacts))
+        assertEquals(4, cacheEntries(artifacts))
     }
 
     @Test
@@ -179,6 +186,13 @@ class PipelineIntegrationTest {
             void main() { uint value = imageAtomicAdd(target, ivec2(0), 1u); }
         """.trimIndent()
         input.resolve("composite.csh").writeText(source)
+        input.resolve("final.fsh").writeText(
+            """
+                #version 460 compatibility
+                out vec4 color;
+                void main() { color = vec4(1.0); }
+            """.trimIndent(),
+        )
         val ioContext = IOContext(input, output)
 
         val result = context(ioContext) {
@@ -188,8 +202,13 @@ class PipelineIntegrationTest {
                     OpenGlSpirvCapabilities("test", true, artifacts.resolve("capabilities"))
                 },
                 cacheIdentityProvider = { null },
-            ).optimize(listOf(requireNotNull(ioContext.readInputRoot("composite.csh"))))
-        }.single()
+            ).optimize(
+                listOf(
+                    requireNotNull(ioContext.readInputRoot("composite.csh")),
+                    requireNotNull(ioContext.readInputRoot("final.fsh")),
+                ),
+            )
+        }.single { it.file.path.name == "composite.csh" }
 
         assertEquals(ShaderProcessingMode.PRESERVED_STRUCTURAL, result.processingMode)
         assertEquals(source, result.file.code)
@@ -236,6 +255,13 @@ class PipelineIntegrationTest {
             }
         """.trimIndent()
         input.resolve("composite.csh").writeText(source)
+        input.resolve("final.fsh").writeText(
+            """
+                #version 460 compatibility
+                out vec4 color;
+                void main() { color = vec4(1.0); }
+            """.trimIndent(),
+        )
         val ioContext = IOContext(input, output)
 
         val result = context(ioContext) {
@@ -245,15 +271,19 @@ class PipelineIntegrationTest {
                     OpenGlSpirvCapabilities("test", true, artifacts.resolve("capabilities"))
                 },
                 cacheIdentityProvider = { null },
-            ).optimize(listOf(requireNotNull(ioContext.readInputRoot("composite.csh"))))
-        }.single()
+            ).optimize(
+                listOf(
+                    requireNotNull(ioContext.readInputRoot("composite.csh")),
+                    requireNotNull(ioContext.readInputRoot("final.fsh")),
+                ),
+            )
+        }.single { it.file.path.name == "composite.csh" }
 
         assertEquals(ShaderProcessingMode.SPIRV_ROUND_TRIP, result.processingMode, result.fallbackReason)
         val emitted = result.file.code
-        assertContains(emitted, "#define printString(string) { \\")
-        assertContains(emitted, "for (int i = 0; i < characters.length(); ++i) printChar(characters[i]); \\")
-        assertEquals(1, emitted.split("uint[] characters = uint[] string;").size - 1)
-        assertContains(emitted, "void printValue()")
+        assertFalse(emitted.contains("#define printString"))
+        assertFalse(emitted.contains("void printValue"))
+        assertFalse(emitted.contains("uint[] characters"))
         assertFalse(Regex("(?m)^i < characters\\.length\\(\\);").containsMatchIn(emitted))
         assertFalse(Regex("(?m)^\\+\\+i\\) printChar").containsMatchIn(emitted))
     }
@@ -340,6 +370,7 @@ class PipelineIntegrationTest {
             "composite.csh",
             "composite1.csh",
             "composite2.csh",
+            "final.fsh",
             "voxy_hook.glsl",
         )
             .forEach { name ->

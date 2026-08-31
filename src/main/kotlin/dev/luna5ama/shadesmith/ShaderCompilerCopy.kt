@@ -4,6 +4,9 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
 import kotlin.io.path.absolutePathString
 import kotlin.io.path.createDirectories
 import kotlin.io.path.isRegularFile
@@ -274,7 +277,13 @@ internal object ShaderCompilerCopyPlanner {
         var macroDependencies = resolveMacroDependencies(macroDrafts)
         val groups = buildConditionalGroups(protection.directives, sourceMap)
         populateConditionalDependencies(groups, macroDependencies)
-        val derivedControls = collectDerivedControls(planningSource, sourceMap, protection.directives, groups)
+        val derivedControls = collectDerivedControls(
+            planningSource,
+            sourceMap,
+            protection.directives,
+            groups,
+            settingsByName,
+        )
         macroDependencies = resolveMacroDependencies(macroDrafts, derivedControls)
         populateConditionalDependencies(groups, macroDependencies)
         val regions = findSourceRegions(planningSource, sourceMap)
@@ -1370,6 +1379,7 @@ internal object ShaderCompilerCopyPlanner {
         sourceMap: SourceMap,
         directives: List<PreprocessorDirective>,
         groups: List<ConditionalGroup>,
+        settings: Map<String, ShaderSetting> = emptyMap(),
     ): List<ShaderDerivedControl> {
         val delimiterIndexes = groups.flatMapTo(hashSetOf()) { group ->
             (group.delimiters + listOfNotNull(group.endif)).map { it.index }
@@ -1426,7 +1436,9 @@ internal object ShaderCompilerCopyPlanner {
                 val expression = if (presence) {
                     renderDerivedPresenceExpression(branches, bodies.map { it != null })
                 } else {
-                    if (branches.lastOrNull()?.directive?.kind != PreprocessorDirectiveKind.ELSE || bodies.any { it.isNullOrEmpty() }) {
+                    val exhaustive = branches.lastOrNull()?.directive?.kind == PreprocessorDirectiveKind.ELSE ||
+                        branchesCoverSettingDomains(branches, settings)
+                    if (!exhaustive || bodies.any { it.isNullOrEmpty() }) {
                         return@forEach
                     }
                     renderDerivedScalarExpression(branches, bodies.filterNotNull())
@@ -1462,9 +1474,9 @@ internal object ShaderCompilerCopyPlanner {
         bodies: List<String>,
     ): String {
         var expression = bodies.last()
-        val predicates = effectiveBranchPredicates(branches)
         for (index in branches.lastIndex - 1 downTo 0) {
-            expression = "((${predicates[index]}) ? (${bodies[index]}) : ($expression))"
+            val predicate = requireNotNull(rawDirectiveCondition(branches[index].directive))
+            expression = "(($predicate) ? (${bodies[index]}) : ($expression))"
         }
         return expression
     }
@@ -1481,6 +1493,45 @@ internal object ShaderCompilerCopyPlanner {
                 if (prefix.isEmpty()) "($current)" else "(($prefix) && ($current))"
             }
         }
+    }
+
+    private fun branchesCoverSettingDomains(
+        branches: List<ConditionalBranch>,
+        settings: Map<String, ShaderSetting>,
+    ): Boolean {
+        if (settings.isEmpty() || branches.isEmpty()) return false
+        val expressions = branches.mapNotNull { rawDirectiveCondition(it.directive) }
+        if (expressions.size != branches.size) return true
+        val dependencies = expressions.flatMapTo(sortedSetOf()) { identifiers(it) }.filter { it in settings }
+        if (dependencies.isEmpty()) return false
+        val domains = dependencies.map { name ->
+            settings.getValue(name).domain.mapNotNull { value ->
+                when (value) {
+                    "true" -> 1L
+                    "false" -> 0L
+                    else -> value.toLongOrNull()
+                }
+            }.distinct().takeIf { it.size == settings.getValue(name).domain.size } ?: return false
+        }
+        if (domains.fold(1L) { size, domain -> size * domain.size } > 128L) return false
+        val assignment = linkedMapOf<String, Long>()
+        fun covered(depth: Int): Boolean {
+            if (depth < dependencies.size) {
+                val name = dependencies[depth]
+                return domains[depth].all { value ->
+                    assignment[name] = value
+                    covered(depth + 1)
+                }
+            }
+            return expressions.any { expression ->
+                StructuralExpressionParser(
+                    expression,
+                    { name -> assignment[name] ?: settings[name]?.defaultValue?.toLongOrNull() ?: 0L },
+                    { name -> settings[name]?.let { !it.presenceToggle || assignment[name] != 0L } ?: false },
+                ).parse()?.let { it != 0L } == true
+            }
+        }
+        return covered(0)
     }
 
     private fun rawDirectiveCondition(directive: PreprocessorDirective): String? {
@@ -3088,6 +3139,7 @@ internal class ShaderCompilerCopyMaterializer(
                         irisContracts = request.plan.irisContracts.withMaterializedCompilerSource(result.source),
                         settings = request.plan.settings,
                         tokenPasteLowerings = request.plan.tokenPasteLowerings,
+                        derivedScalarExpressions = compilerDerivedScalarExpressions(request.plan),
                     ),
                 )
                 is SourceMaterialization.Failure -> ShaderCompilerCopyMaterialization.Failure(result.exception)
@@ -3129,12 +3181,38 @@ internal class ShaderCompilerCopyMaterializer(
             }
         }
         val pendingEntries = pending.entries.toList()
-        val materialized = pendingEntries.map { it.value.first().second }.chunked(CLANG_BATCH_SIZE).flatMap { chunk ->
+        val chunks = pendingEntries.map { it.value.first().second }.chunked(CLANG_BATCH_SIZE)
+        fun materializeChunk(chunk: List<SourceMaterializationRequest>): List<SourceMaterialization> {
             val prepared = chunk.map(::prepare)
-            if (prepared.size == 1) {
+            return if (prepared.size == 1) {
                 listOf(runSingle(prepared.single()))
             } else {
                 runBatch(prepared) ?: prepared.map(::runSingle)
+            }
+        }
+        val materialized = if (chunks.size <= 1) {
+            chunks.flatMap(::materializeChunk)
+        } else {
+            val executor = Executors.newFixedThreadPool(minOf(CLANG_BATCH_PARALLELISM, chunks.size))
+            try {
+                executor.invokeAll(chunks.map { chunk -> Callable { materializeChunk(chunk) } })
+                    .flatMap { future ->
+                        try {
+                            future.get()
+                        } catch (e: ExecutionException) {
+                            val cause = e.cause
+                            when (cause) {
+                                is RuntimeException -> throw cause
+                                is Error -> throw cause
+                                else -> throw IllegalStateException("Compiler-copy batch worker failed", cause)
+                            }
+                        }
+                    }
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw IllegalStateException("Compiler-copy batch materialization interrupted", e)
+            } finally {
+                executor.shutdownNow()
             }
         }
         pendingEntries.zip(materialized).forEach { (entry, result) ->
@@ -3472,6 +3550,7 @@ internal class ShaderCompilerCopyMaterializer(
 
     companion object {
         internal const val CLANG_BATCH_SIZE = 20
+        private const val CLANG_BATCH_PARALLELISM = 4
         internal const val DEFAULT_CACHE_CHARACTER_BUDGET = 128L * 1024L * 1024L
         private val CLANG_ARGUMENTS = listOf("-C", "-E", "-P", "-Wno-microsoft-include", "-x", "c")
 

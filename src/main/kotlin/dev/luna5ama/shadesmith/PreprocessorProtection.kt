@@ -135,19 +135,44 @@ internal data class ProtectedPreprocessorSource(
 
 internal object PreprocessorProtection {
     private const val CONST_MARKER = "/*const*/"
+    private val cache = object : LinkedHashMap<ProtectionCacheKey, ProtectedPreprocessorSource>(16, 0.75f, true) {}
+    private var cacheCharacters = 0L
 
     fun protect(source: String, sourceName: String = "<shader>"): ProtectedPreprocessorSource {
-        return protect(source, sourceName, evaluateCompilerDirectives = false)
+        return protectCached(source, sourceName, evaluateCompilerDirectives = false)
     }
 
     fun protectGeneratedCompilerSource(
         source: String,
         sourceName: String = "<shader>",
     ): ProtectedPreprocessorSource {
-        return protect(source, sourceName, evaluateCompilerDirectives = true)
+        return protectCached(source, sourceName, evaluateCompilerDirectives = true)
     }
 
-    private fun protect(
+    private fun protectCached(
+        source: String,
+        sourceName: String,
+        evaluateCompilerDirectives: Boolean,
+    ): ProtectedPreprocessorSource {
+        val key = ProtectionCacheKey(source, evaluateCompilerDirectives)
+        synchronized(cache) {
+            cache[key]?.let { return it.copy(sourceName = sourceName) }
+        }
+        val computed = protectUncached(source, sourceName, evaluateCompilerDirectives)
+        synchronized(cache) {
+            cache[key]?.let { return it.copy(sourceName = sourceName) }
+            cache[key] = computed
+            cacheCharacters += key.characterWeight
+            val iterator = cache.entries.iterator()
+            while (cacheCharacters > CACHE_CHARACTER_BUDGET && iterator.hasNext()) {
+                cacheCharacters -= iterator.next().key.characterWeight
+                iterator.remove()
+            }
+        }
+        return computed
+    }
+
+    private fun protectUncached(
         source: String,
         sourceName: String,
         evaluateCompilerDirectives: Boolean,
@@ -286,6 +311,15 @@ internal object PreprocessorProtection {
             compilerBlockers = blockers,
         )
     }
+
+    private data class ProtectionCacheKey(
+        val source: String,
+        val evaluateCompilerDirectives: Boolean,
+    ) {
+        val characterWeight: Long = source.length.toLong() * 3L
+    }
+
+    private const val CACHE_CHARACTER_BUDGET = 32L * 1024L * 1024L
 
     private fun updateConditionalState(
         directive: ParsedDirective,
