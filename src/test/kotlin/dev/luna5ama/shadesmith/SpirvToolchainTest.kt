@@ -16,7 +16,7 @@ import kotlin.test.assertTrue
 
 class SpirvToolchainTest {
     @Test
-    fun optimizerPassContractUsesTheMeasuredBaseSequenceWithoutCfgShapeShortcuts() {
+    fun optimizerPassContractUsesTheMeasuredGpuSequenceWithoutRegressingRedundancyElimination() {
         val expected = listOf(
             "--preserve-bindings",
             "--preserve-interface",
@@ -38,7 +38,6 @@ class SpirvToolchainTest {
             "--eliminate-dead-code-aggressive",
             "--ccp",
             "--eliminate-dead-code-aggressive",
-            "--redundancy-elimination",
             "--combine-access-chains",
             "--simplify-instructions",
             "--scalar-replacement=0",
@@ -58,7 +57,11 @@ class SpirvToolchainTest {
 
         assertEquals(expected, SpirvToolchain.OPTIMIZER_PASSES)
         assertEquals(expected.filterNot { it == "--inline-entry-points-exhaustive" }, SpirvToolchain.CROSS_ADAPTER_PASSES)
-        assertTrue(SpirvToolchain.OPTIMIZER_PASSES.none { it in setOf("--merge-return", "--if-conversion", "-O", "-Os") })
+        assertTrue(
+            SpirvToolchain.OPTIMIZER_PASSES.none {
+                it in setOf("--redundancy-elimination", "--merge-return", "--if-conversion", "-O", "-Os")
+            },
+        )
     }
 
     @Test

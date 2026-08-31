@@ -489,7 +489,6 @@ internal class SpirvToolchain(
             "--eliminate-dead-code-aggressive",
             "--ccp",
             "--eliminate-dead-code-aggressive",
-            "--redundancy-elimination",
             "--combine-access-chains",
             "--simplify-instructions",
             "--scalar-replacement=0",
