@@ -1034,6 +1034,194 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
+    fun restoredTokenPasteFunctionReusesSurvivingCompilerHelper() {
+        val helper = ShaderCompilerCopyPlanner.tokenPasteHelperName("APPLY_IMPL")
+        val original = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define APPLY_IMPL(mode, value) function_ ## mode(value)
+            #define APPLY(mode, value) APPLY_IMPL(mode, value)
+            float function_0(float value) { return value; }
+            float function_1(float value) { return value + 1.0; }
+            float restored(float value) { return APPLY(SETTING_MODE, value); }
+            layout(local_size_x = 1) in;
+            void main() { float value = restored(1.0); }
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define APPLY_IMPL(mode, value) function_ ## mode(value)
+            #define APPLY(mode, value) APPLY_IMPL(mode, value)
+            float $helper(int mode, float value) {
+                if (mode == 0) return value;
+                return value + 1.0;
+            }
+            float restored(float value) { return APPLY(SETTING_MODE, value); }
+            layout(local_size_x = 1) in;
+            void main() { float value = restored(1.0); }
+        """.trimIndent() + "\n"
+        val plan = ShaderCompilerCopyPlanner.plan(original, "token-paste-restored-function.csh")
+
+        val result = assertIs<ShaderStructuralRestoration.Restored>(
+            restoreTokenPasteSourceDependencies(original, restored, plan.tokenPasteLowerings),
+        ).source
+
+        assertContains(result, "#define APPLY_IMPL(mode, value) $helper(mode, value)")
+        assertFalse("##" in result)
+        assertFalse("function_0" in result)
+        assertFalse("function_1" in result)
+        assertEquals(1, Regex("float ${Regex.escape(helper)}\\([^)]*\\)\\s*\\{").findAll(result).count())
+    }
+
+    @Test
+    fun restoredTokenPasteAggregateRecoversOptimizedAwayValueDeclarations() {
+        val original = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define MATRIX_IMPL(mode) matrix_ ## mode
+            #define MATRIX(mode) MATRIX_IMPL(mode)
+            const mat3 matrix_0 = mat3(1.0);
+            const mat3 matrix_1 = mat3(2.0);
+            const vec3 restoredValue = MATRIX(SETTING_MODE) * vec3(1.0);
+            layout(local_size_x = 1) in;
+            void main() { vec3 value = restoredValue; }
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define MATRIX_IMPL(mode) matrix_ ## mode
+            #define MATRIX(mode) MATRIX_IMPL(mode)
+            const vec3 restoredValue = MATRIX(SETTING_MODE) * vec3(1.0);
+            layout(local_size_x = 1) in;
+            void main() { vec3 value = restoredValue; }
+        """.trimIndent() + "\n"
+        val lowering = ShaderTokenPasteLowering(
+            macroName = "MATRIX_IMPL",
+            sourceLine = 3,
+            sourceDirective = "#define MATRIX_IMPL(mode) matrix_ ## mode\n",
+            loweredDirective = "#define MATRIX_IMPL(mode) ((mode) == 0 ? matrix_0 : matrix_1)\n",
+            helperPrototypes = "",
+            helperNames = emptySet(),
+            candidateIdentifiers = setOf("matrix_0", "matrix_1"),
+            candidateCoverageComplete = true,
+            settingDependencies = setOf("SETTING_MODE"),
+        )
+
+        val result = assertIs<ShaderStructuralRestoration.Restored>(
+            restoreTokenPasteSourceDependencies(original, restored, listOf(lowering)),
+        ).source
+
+        assertContains(result, "#define MATRIX_IMPL(mode) ((mode) == 0 ? matrix_0 : matrix_1)")
+        assertEquals(1, Regex("const mat3 matrix_0").findAll(result).count())
+        assertEquals(1, Regex("const mat3 matrix_1").findAll(result).count())
+        assertTrue(result.indexOf("const mat3 matrix_0") < result.indexOf("const vec3 restoredValue"), result)
+        assertTrue(result.indexOf("const mat3 matrix_1") < result.indexOf("const vec3 restoredValue"), result)
+        assertFalse("##" in result)
+    }
+
+    @Test
+    fun tokenPasteDataDependencyFailuresAreAttributedAndClosed() {
+        val baseOriginal = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define CALL_IMPL(mode, value) function_ ## mode(value)
+            #define CALL(mode, value) CALL_IMPL(mode, value)
+            float restored(float value) { return CALL(SETTING_MODE, value); }
+            layout(local_size_x = 1) in;
+            void main() { float value = restored(1.0); }
+        """.trimIndent() + "\n"
+        val missingHelper = ShaderTokenPasteLowering(
+            macroName = "CALL_IMPL",
+            sourceLine = 3,
+            sourceDirective = "#define CALL_IMPL(mode, value) function_ ## mode(value)\n",
+            loweredDirective = "#define CALL_IMPL(mode, value) SM_TOKEN_PASTE_MISSING(mode, value)\n",
+            helperPrototypes = "float SM_TOKEN_PASTE_MISSING(int mode, float value);\n",
+            helperNames = setOf("SM_TOKEN_PASTE_MISSING"),
+            candidateIdentifiers = setOf("function_0"),
+            candidateCoverageComplete = false,
+            settingDependencies = setOf("SETTING_MODE"),
+        )
+        val missing = assertIs<ShaderStructuralRestoration.Preserved>(
+            restoreTokenPasteSourceDependencies(baseOriginal, baseOriginal, listOf(missingHelper)),
+        )
+        assertContains(missing.reason, "CALL_IMPL")
+        assertContains(missing.reason, "candidate coverage is incomplete")
+        assertContains(missing.reason, "SETTING_MODE")
+
+        val conflicting = baseOriginal.replace(
+            "#define CALL_IMPL(mode, value) function_ ## mode(value)",
+            "#define CALL_IMPL(mode, value) other_ ## mode(value)",
+        )
+        val conflict = assertIs<ShaderStructuralRestoration.Preserved>(
+            restoreTokenPasteSourceDependencies(baseOriginal, conflicting, listOf(missingHelper)),
+        )
+        assertContains(conflict.reason, "does not match its proven compiler-copy lowering")
+
+        val cyclicOriginal = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define SELECT_IMPL(mode) candidate_ ## mode
+            #define SELECT(mode) SELECT_IMPL(mode)
+            #define candidate_0 CYCLE_A
+            #define CYCLE_A CYCLE_B
+            #define CYCLE_B CYCLE_A
+            const float restoredValue = float(SELECT(SETTING_MODE));
+            layout(local_size_x = 1) in;
+            void main() { float value = restoredValue; }
+        """.trimIndent() + "\n"
+        val cyclicLowering = ShaderTokenPasteLowering(
+            macroName = "SELECT_IMPL",
+            sourceLine = 3,
+            sourceDirective = "#define SELECT_IMPL(mode) candidate_ ## mode\n",
+            loweredDirective = "#define SELECT_IMPL(mode) candidate_0\n",
+            helperPrototypes = "",
+            helperNames = emptySet(),
+            candidateIdentifiers = setOf("candidate_0"),
+            candidateCoverageComplete = true,
+            settingDependencies = setOf("SETTING_MODE"),
+        )
+        val cycle = assertIs<ShaderStructuralRestoration.Preserved>(
+            restoreTokenPasteSourceDependencies(cyclicOriginal, cyclicOriginal, listOf(cyclicLowering)),
+        )
+        assertContains(cycle.reason, "cyclic token-paste data dependency")
+        assertContains(cycle.reason, "CYCLE_A -> CYCLE_B -> CYCLE_A")
+
+        val ambiguousOriginal = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define SELECT_IMPL(mode) selected_ ## mode
+            #define SELECT(mode) SELECT_IMPL(mode)
+            const float selected_0 = 1.0;
+            const float selected_0 = 2.0;
+            const float restoredValue = SELECT(SETTING_MODE);
+            layout(local_size_x = 1) in;
+            void main() { float value = restoredValue; }
+        """.trimIndent() + "\n"
+        val ambiguousRestored = ambiguousOriginal.lineSequence()
+            .filterNot { line -> line.startsWith("const float selected_0") }
+            .joinToString("\n", postfix = "\n")
+        val ambiguousLowering = ShaderTokenPasteLowering(
+            macroName = "SELECT_IMPL",
+            sourceLine = 3,
+            sourceDirective = "#define SELECT_IMPL(mode) selected_ ## mode\n",
+            loweredDirective = "#define SELECT_IMPL(mode) selected_0\n",
+            helperPrototypes = "",
+            helperNames = emptySet(),
+            candidateIdentifiers = setOf("selected_0"),
+            candidateCoverageComplete = true,
+            settingDependencies = setOf("SETTING_MODE"),
+        )
+        val ambiguous = assertIs<ShaderStructuralRestoration.Preserved>(
+            restoreTokenPasteSourceDependencies(
+                ambiguousOriginal,
+                ambiguousRestored,
+                listOf(ambiguousLowering),
+            ),
+        )
+        assertContains(ambiguous.reason, "token-paste declaration dependency selected_0 is ambiguous")
+    }
+
+    @Test
     fun optimizedCapabilityFunctionRecoversSimpleOriginalGuard() {
         val original = """
             #version 460 compatibility
@@ -1703,6 +1891,29 @@ class ShaderStructuralPlannerTest {
             restored,
             base.irisContracts.contracts,
             restorationPlan,
+        )
+    }
+
+    private fun restoreTokenPasteSourceDependencies(
+        original: String,
+        restored: String,
+        lowerings: List<ShaderTokenPasteLowering>,
+    ): ShaderStructuralRestoration {
+        val base = ShaderCompilerCopyPlanner.plan(original, "token-paste-source-dependencies.csh")
+        val restorationPlan = ShaderStructuralRestorationPlan(
+            base.sourceName,
+            base.settings,
+            emptySet(),
+            emptyList(),
+            base.irisContracts.contracts,
+            null,
+        )
+        return SpirvFinalEmitter.restoreTokenPasteSourceDependencies(
+            SpirvOptimizationRequest(base.sourceName, ShaderStage.COMPUTE, original),
+            restored,
+            restorationPlan,
+            base.irisContracts,
+            lowerings,
         )
     }
 

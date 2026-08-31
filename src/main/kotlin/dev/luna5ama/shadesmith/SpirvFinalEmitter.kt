@@ -402,6 +402,15 @@ internal sealed interface ConditionalNativePrimitiveRestoration {
     data class Preserved(val reason: String) : ConditionalNativePrimitiveRestoration
 }
 
+internal sealed interface TokenPasteSourceRestoration {
+    data class Restored(
+        val source: String,
+        val dependencyIdentifiers: Set<String>,
+    ) : TokenPasteSourceRestoration
+
+    data class Preserved(val reason: String) : TokenPasteSourceRestoration
+}
+
 internal object SpirvFinalEmitter {
     fun emit(
         request: SpirvOptimizationRequest,
@@ -418,7 +427,24 @@ internal object SpirvFinalEmitter {
             if (modules.size != 1) {
                 return preserved(request, "multiple compiler modules have no structural restoration plan")
             }
-            return optimizedOrPreserved(request, restoreProbeResources(modules.single().source, modules))
+            val tokenPasteComplete = when (
+                val tokenPaste = restoreTokenPasteSourceMacros(
+                    request.sourceName,
+                    modules.single().source,
+                    modules.single().tokenPasteLowerings,
+                )
+            ) {
+                is TokenPasteSourceRestoration.Restored -> tokenPaste
+                is TokenPasteSourceRestoration.Preserved -> return preserved(request, tokenPaste.reason)
+            }
+            if (tokenPasteComplete.dependencyIdentifiers.isNotEmpty()) {
+                return preserved(
+                    request,
+                    "${request.sourceName}: token-paste source dependencies require structural restoration: " +
+                        tokenPasteComplete.dependencyIdentifiers.sorted(),
+                )
+            }
+            return optimizedOrPreserved(request, restoreProbeResources(tokenPasteComplete.source, modules))
         }
         structuralPlan.restorationPlan.issue?.let { return preserved(request, it) }
         if (modules.any { it.structuralSignature == null }) {
@@ -559,6 +585,18 @@ internal object SpirvFinalEmitter {
         finalSource = resolveAbiModifierTokens(finalSource, signatures)
         finalSource = restoreMissingSourceTypeDeclarations(request, finalSource)
         finalSource = when (
+            val tokenPaste = restoreTokenPasteSourceDependencies(
+                request,
+                finalSource,
+                structuralPlan.restorationPlan,
+                modules.first().irisContracts,
+                modules.flatMap(SpirvModuleResult::tokenPasteLowerings),
+            )
+        ) {
+            is ShaderStructuralRestoration.Restored -> tokenPaste.source
+            is ShaderStructuralRestoration.Preserved -> return preserved(request, tokenPaste.reason)
+        }
+        finalSource = when (
             val dependencies = restoreMissingSourceGlobalDependencies(
                 request,
                 finalSource,
@@ -582,6 +620,18 @@ internal object SpirvFinalEmitter {
         finalSource = deduplicateDominatedAbiLines(finalSource)
         finalSource = restoreMissingBranchOwnedMain(finalSource, modules, structuralPlan.restorationPlan)
         finalSource = removeNonBranchOwnedMainFunctions(finalSource)
+        finalSource = when (
+            val tokenPaste = restoreTokenPasteSourceDependencies(
+                request,
+                finalSource,
+                structuralPlan.restorationPlan,
+                modules.first().irisContracts,
+                modules.flatMap(SpirvModuleResult::tokenPasteLowerings),
+            )
+        ) {
+            is ShaderStructuralRestoration.Restored -> tokenPaste.source
+            is ShaderStructuralRestoration.Preserved -> return preserved(request, tokenPaste.reason)
+        }
         finalSource = when (
             val ordered = restoreDirectiveMacroDependencies(
                 request.sourceName,
@@ -1436,15 +1486,26 @@ internal object SpirvFinalEmitter {
         source: String,
         restorationPlan: ShaderStructuralRestorationPlan,
         irisContracts: IrisShaderContractPlan,
+        additionalReferences: Set<String> = emptySet(),
     ): ShaderStructuralRestoration {
         val declared = sourceStructuralEntities(source).mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
         val sourceDeclarations = sourceStructuralEntities(request.source).filter { entity ->
             entity.kind == StructuralEntityKind.DECLARATION && entity.symbol != null &&
                 !structuralDeclarationPrototype(request.source.substring(entity.range))
         }.groupBy { requireNotNull(it.symbol) }
+        additionalReferences.sorted().firstOrNull { name ->
+            sourceDeclarations[name].orEmpty().size > 1
+        }?.let { name ->
+            return ShaderStructuralRestoration.Preserved(
+                "${request.sourceName}: token-paste declaration dependency $name is ambiguous " +
+                    "(${sourceDeclarations.getValue(name).size} source declarations)",
+            )
+        }
         val selected = linkedMapOf<String, StructuralEntity>()
+        val directReferences = DECLARATION_IDENTIFIER.findAll(maskStructuralCode(source)).map(MatchResult::value)
+            .toCollection(linkedSetOf())
         val pending = ArrayDeque(
-            DECLARATION_IDENTIFIER.findAll(maskStructuralCode(source)).map(MatchResult::value)
+            (directReferences + additionalReferences).asSequence()
                 .filter { it !in declared && sourceDeclarations[it]?.size == 1 }
                 .toCollection(linkedSetOf()),
         )
@@ -1630,13 +1691,215 @@ internal object SpirvFinalEmitter {
         return "$indent#define $name ($expression)${replaced.substring(terminator + 1)}"
     }
 
+    internal fun restoreTokenPasteSourceMacros(
+        sourceName: String,
+        source: String,
+        lowerings: List<ShaderTokenPasteLowering>,
+    ): TokenPasteSourceRestoration {
+        if (lowerings.isEmpty()) return TokenPasteSourceRestoration.Restored(source, emptySet())
+        val reachable = reachableCodeAndMacroIdentifiers(source)
+        val grouped = lowerings.filter { lowering -> lowering.macroName in reachable }
+            .groupBy(ShaderTokenPasteLowering::macroName)
+        if (grouped.isEmpty()) return TokenPasteSourceRestoration.Restored(source, emptySet())
+
+        var result = source
+        val dependencies = linkedSetOf<String>()
+        grouped.toSortedMap().forEach { (macroName, items) ->
+            val mappings = linkedMapOf<String, ShaderTokenPasteLowering>()
+            items.sortedWith(compareBy(ShaderTokenPasteLowering::sourceLine).thenBy(ShaderTokenPasteLowering::sourceDirective))
+                .forEach { lowering ->
+                    val key = lowering.sourceDirective.trimEnd()
+                    val previous = mappings.putIfAbsent(key, lowering)
+                    if (
+                        previous != null &&
+                        (
+                            previous.loweredDirective.trimEnd() != lowering.loweredDirective.trimEnd() ||
+                                previous.helperPrototypes.trim() != lowering.helperPrototypes.trim() ||
+                                previous.helperNames != lowering.helperNames ||
+                                previous.candidateIdentifiers != lowering.candidateIdentifiers ||
+                                previous.candidateCoverageComplete != lowering.candidateCoverageComplete ||
+                                previous.settingDependencies != lowering.settingDependencies
+                            )
+                    ) {
+                        return TokenPasteSourceRestoration.Preserved(
+                            "$sourceName:${lowering.sourceLine}: conflicting token-paste lowerings for $macroName",
+                        )
+                    }
+                }
+
+            val definitions = sourceMacroDefinitions(result)[macroName].orEmpty()
+            if (definitions.isEmpty()) {
+                return TokenPasteSourceRestoration.Preserved(
+                    "$sourceName:${items.minOf(ShaderTokenPasteLowering::sourceLine)}: reachable token-paste macro " +
+                        "$macroName is missing after restoration",
+                )
+            }
+            val functions = (scanSourceFunctions(result) + scanNamedSourceFunctions(result))
+                .mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
+            val replacements = mutableListOf<Pair<SourceMacroDefinition, String>>()
+            val prototypeLines = linkedSetOf<String>()
+            definitions.forEach { definition ->
+                val exact = definition.exactText.trimEnd()
+                val sourceLowering = mappings[exact]
+                val lowered = mappings.values.firstOrNull { lowering ->
+                    lowering.loweredDirective.trimEnd() == exact
+                }
+                if (lowered != null) return@forEach
+                if (sourceLowering == null) {
+                    return TokenPasteSourceRestoration.Preserved(
+                        "$sourceName:${sourceLine(result, definition.offset)}: restored token-paste macro $macroName " +
+                            "does not match its proven compiler-copy lowering",
+                    )
+                }
+                val helperAvailable = sourceLowering.helperNames.all(functions::contains)
+                if (sourceLowering.helperNames.isNotEmpty() && !helperAvailable) {
+                    if (
+                        !sourceLowering.candidateCoverageComplete ||
+                        sourceLowering.candidateIdentifiers.isEmpty()
+                    ) {
+                        return TokenPasteSourceRestoration.Preserved(
+                            "$sourceName:${sourceLowering.sourceLine}: token-paste helper " +
+                                "${sourceLowering.helperNames.sorted()} for $macroName is missing and candidate " +
+                                "coverage is incomplete; settings=${sourceLowering.settingDependencies.sorted()}",
+                        )
+                    }
+                    dependencies += sourceLowering.candidateIdentifiers
+                    return@forEach
+                }
+                if (sourceLowering.helperNames.isEmpty()) {
+                    if (!sourceLowering.candidateCoverageComplete) {
+                        return TokenPasteSourceRestoration.Preserved(
+                            "$sourceName:${sourceLowering.sourceLine}: direct token-paste lowering for $macroName " +
+                                "has incomplete candidate coverage; settings=${sourceLowering.settingDependencies.sorted()}",
+                        )
+                    }
+                    dependencies += sourceLowering.candidateIdentifiers
+                }
+                sourceLowering.helperPrototypes.lineSequence().map(String::trim).filter(String::isNotEmpty)
+                    .filterNot { prototype -> result.contains(prototype) }
+                    .forEach(prototypeLines::add)
+                replacements += definition to sourceLowering.loweredDirective
+            }
+            if (replacements.isEmpty()) return@forEach
+            val firstOffset = replacements.minOf { (definition, _) -> definition.offset }
+            val prototypes = prototypeLines.joinToString(separator = "\n", postfix = "\n")
+            result = replacements.sortedByDescending { (definition, _) -> definition.offset }
+                .fold(result) { current, (definition, lowered) ->
+                    val end = definition.offset + definition.exactText.length
+                    val prefix = prototypes.takeIf { definition.offset == firstOffset }.orEmpty()
+                    current.replaceRange(definition.offset, end, prefix + lowered)
+                }
+        }
+        return TokenPasteSourceRestoration.Restored(result, dependencies)
+    }
+
+    private fun expandTokenPasteDependencyIdentifiers(
+        sourceName: String,
+        source: String,
+        seeds: Set<String>,
+    ): TokenPasteSourceRestoration {
+        if (seeds.isEmpty()) return TokenPasteSourceRestoration.Restored(source, emptySet())
+        val macros = sourceMacroDefinitions(source)
+        val expanded = linkedSetOf<String>()
+        val visited = hashSetOf<String>()
+        val active = linkedSetOf<String>()
+        var cycle: List<String>? = null
+        fun visit(name: String) {
+            if (cycle != null) return
+            expanded += name
+            if (name !in macros) return
+            if (name in active) {
+                val path = active.toList()
+                cycle = path.drop(path.indexOf(name)) + name
+                return
+            }
+            if (!visited.add(name)) return
+            active += name
+            macros[name].orEmpty().forEach { definition ->
+                DECLARATION_IDENTIFIER.findAll(definition.value).map(MatchResult::value).forEach(::visit)
+            }
+            active.remove(name)
+        }
+        seeds.sorted().forEach(::visit)
+        cycle?.let { path ->
+            return TokenPasteSourceRestoration.Preserved(
+                "$sourceName: cyclic token-paste data dependency: ${path.joinToString(" -> ")}",
+            )
+        }
+        return TokenPasteSourceRestoration.Restored(source, expanded)
+    }
+
+    internal fun restoreTokenPasteSourceDependencies(
+        request: SpirvOptimizationRequest,
+        source: String,
+        restorationPlan: ShaderStructuralRestorationPlan,
+        irisContracts: IrisShaderContractPlan,
+        lowerings: List<ShaderTokenPasteLowering>,
+    ): ShaderStructuralRestoration {
+        val restoredMacros = when (
+            val restoration = restoreTokenPasteSourceMacros(request.sourceName, source, lowerings)
+        ) {
+            is TokenPasteSourceRestoration.Restored -> restoration
+            is TokenPasteSourceRestoration.Preserved -> {
+                return ShaderStructuralRestoration.Preserved(restoration.reason)
+            }
+        }
+        if (restoredMacros.dependencyIdentifiers.isEmpty()) {
+            return ShaderStructuralRestoration.Restored(restoredMacros.source)
+        }
+        val expanded = when (
+            val expansion = expandTokenPasteDependencyIdentifiers(
+                request.sourceName,
+                request.source,
+                restoredMacros.dependencyIdentifiers,
+            )
+        ) {
+            is TokenPasteSourceRestoration.Restored -> expansion.dependencyIdentifiers
+            is TokenPasteSourceRestoration.Preserved -> {
+                return ShaderStructuralRestoration.Preserved(expansion.reason)
+            }
+        }
+        val functions = when (
+            val restoration = restoreMissingSourceFunctions(
+                request,
+                restoredMacros.source,
+                restorationPlan,
+                irisContracts,
+                expanded,
+            )
+        ) {
+            is ShaderStructuralRestoration.Restored -> restoration.source
+            is ShaderStructuralRestoration.Preserved -> return restoration
+        }
+        val macros = when (
+            val restoration = restoreMissingSourceMacros(request, functions, restorationPlan)
+        ) {
+            is ShaderStructuralRestoration.Restored -> restoration.source
+            is ShaderStructuralRestoration.Preserved -> return restoration
+        }
+        val declarations = when (
+            val restoration = restoreMissingSourceGlobalDependencies(
+                request,
+                macros,
+                restorationPlan,
+                irisContracts,
+                expanded,
+            )
+        ) {
+            is ShaderStructuralRestoration.Restored -> restoration.source
+            is ShaderStructuralRestoration.Preserved -> return restoration
+        }
+        return relocateTokenPasteDeclarationDependencies(request.sourceName, declarations, expanded)
+    }
+
     private fun restoreMissingSourceFunctions(
         request: SpirvOptimizationRequest,
         source: String,
         restorationPlan: ShaderStructuralRestorationPlan,
         irisContracts: IrisShaderContractPlan,
+        additionalReferences: Set<String> = emptySet(),
     ): ShaderStructuralRestoration {
-        val reachableIdentifiers = reachableCodeAndMacroIdentifiers(source)
+        val reachableIdentifiers = reachableCodeAndMacroIdentifiers(source) + additionalReferences
         val sourceFunctions = (sourceStructuralEntities(request.source).filter { entity ->
             entity.kind == StructuralEntityKind.FUNCTION && entity.symbol != null
         } + scanSourceFunctions(request.source) + scanNamedSourceFunctions(request.source))
@@ -1701,8 +1964,13 @@ internal object SpirvFinalEmitter {
     }
 
     private fun reachableCodeAndMacroIdentifiers(source: String): Set<String> {
-        val result = DECLARATION_IDENTIFIER.findAll(maskStructuralCode(source)).map(MatchResult::value)
+        val seeds = DECLARATION_IDENTIFIER.findAll(maskStructuralCode(source)).map(MatchResult::value)
             .toCollection(linkedSetOf())
+        return reachableMacroIdentifiers(source, seeds)
+    }
+
+    private fun reachableMacroIdentifiers(source: String, seeds: Set<String>): Set<String> {
+        val result = seeds.toCollection(linkedSetOf())
         val macros = sourceMacroDefinitions(source)
         val pending = ArrayDeque(result.filter(macros::containsKey))
         val visited = hashSetOf<String>()
@@ -1717,6 +1985,50 @@ internal object SpirvFinalEmitter {
             }
         }
         return result
+    }
+
+    private fun relocateTokenPasteDeclarationDependencies(
+        sourceName: String,
+        source: String,
+        dependencies: Set<String>,
+    ): ShaderStructuralRestoration {
+        if (dependencies.isEmpty()) return ShaderStructuralRestoration.Restored(source)
+        val entities = sourceStructuralEntities(source)
+        val declarations = entities.filter { entity ->
+            entity.kind == StructuralEntityKind.DECLARATION && entity.symbol in dependencies
+        }.groupBy { requireNotNull(it.symbol) }
+        val selected = linkedSetOf<StructuralEntity>()
+        var insertionOffset = source.length
+        val depths = preprocessorDepths(source)
+        entities.forEach { consumer ->
+            val exact = source.substring(consumer.range)
+            val seeds = DECLARATION_IDENTIFIER.findAll(maskStructuralCode(exact)).map(MatchResult::value)
+                .toCollection(linkedSetOf())
+            val reachable = reachableMacroIdentifiers(source, seeds).intersect(dependencies)
+            reachable.forEach { dependency ->
+                val declaration = declarations[dependency]?.singleOrNull() ?: return@forEach
+                if (declaration.range.first <= consumer.range.first) return@forEach
+                if (depths[declaration.range.first] != 0) {
+                    return ShaderStructuralRestoration.Preserved(
+                        "$sourceName: token-paste declaration dependency $dependency is conditional and follows " +
+                            "its first restored use at line ${sourceLine(source, consumer.range.first)}",
+                    )
+                }
+                selected += declaration
+                insertionOffset = minOf(insertionOffset, unconditionalInsertionOffset(source, consumer.range.first))
+            }
+        }
+        if (selected.isEmpty()) return ShaderStructuralRestoration.Restored(source)
+        val ordered = selected.sortedBy { entity -> entity.range.first }
+        val declarationText = ordered.joinToString(separator = "\n", postfix = "\n") { declaration ->
+            source.substring(declaration.range)
+        }
+        val ranges = ordered.map(StructuralEntity::range)
+        val adjusted = insertionOffset - ranges.filter { range -> range.first < insertionOffset }.sumOf(IntRange::count)
+        val stripped = removeRanges(source, ranges)
+        return ShaderStructuralRestoration.Restored(
+            stripped.substring(0, adjusted) + declarationText + stripped.substring(adjusted),
+        )
     }
 
     private fun scanSourceFunctions(source: String): List<StructuralEntity> {

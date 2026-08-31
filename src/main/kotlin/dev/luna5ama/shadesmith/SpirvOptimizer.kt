@@ -22,6 +22,7 @@ internal data class SpirvCompilerModule(
     val structuralSignature: ShaderStructuralSignature? = null,
     val structuralAssignment: Map<String, String> = emptyMap(),
     val structuralAssignments: List<Map<String, String>> = emptyList(),
+    val tokenPasteLowerings: List<ShaderTokenPasteLowering> = emptyList(),
 )
 
 internal data class SpirvOptimizationRequest(
@@ -103,6 +104,7 @@ internal data class SpirvModuleResult(
     val originalContract: ShaderAbiContract,
     val generatedLayouts: List<GeneratedShaderLayout>,
     val restorationFailure: String?,
+    val tokenPasteLowerings: List<ShaderTokenPasteLowering>,
     val resourceMarkers: List<TextureResourceMarker> = emptyList(),
     val textureAccess: TextureAccess,
     val artifactDirectory: Path,
@@ -639,6 +641,7 @@ internal class SpirvOptimizer(
             originalContract = emissionPatch.originalContract,
             generatedLayouts = emissionPatch.generatedLayouts,
             restorationFailure = restorationFailure,
+            tokenPasteLowerings = module.tokenPasteLowerings,
             resourceMarkers = module.resourceMarkers,
             textureAccess = TextureAccessAnalyzer.fromOptimizedSource(
                 semanticSource,

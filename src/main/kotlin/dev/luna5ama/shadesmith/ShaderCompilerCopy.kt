@@ -101,6 +101,18 @@ internal data class ShaderCompilerCopyBlocker(
     val reason: String,
 )
 
+internal data class ShaderTokenPasteLowering(
+    val macroName: String,
+    val sourceLine: Int,
+    val sourceDirective: String,
+    val loweredDirective: String,
+    val helperPrototypes: String,
+    val helperNames: Set<String>,
+    val candidateIdentifiers: Set<String>,
+    val candidateCoverageComplete: Boolean,
+    val settingDependencies: Set<String>,
+)
+
 internal data class ShaderCompilerCopyPlan(
     val sourceName: String,
     val originalSource: String,
@@ -113,6 +125,7 @@ internal data class ShaderCompilerCopyPlan(
     val conditionals: List<ShaderConditionalRegion>,
     val structuralBlockers: List<ShaderCompilerCopyBlocker>,
     val irisContracts: IrisShaderContractPlan,
+    val tokenPasteLowerings: List<ShaderTokenPasteLowering>,
 ) {
     val compilerModuleCount: Int
         get() = if (compilerSource == null) 0 else 1
@@ -334,6 +347,7 @@ internal object ShaderCompilerCopyPlanner {
             },
             structuralBlockers = distinctBlockers,
             irisContracts = irisContracts,
+            tokenPasteLowerings = tokenPasteLowering.lowerings,
         )
     }
 
@@ -343,7 +357,7 @@ internal object ShaderCompilerCopyPlanner {
         settings: List<ShaderSetting>,
     ): TokenPasteLoweringResult {
         if (settings.none { it.type == ShaderSettingType.INT } || "##" !in source) {
-            return TokenPasteLoweringResult(source, emptyList())
+            return TokenPasteLoweringResult(source, emptyList(), emptyList())
         }
         val protection = PreprocessorProtection.protect(source, sourceName)
         val sourceMap = SourceMap(source, sourceName).also { it.directives += protection.directives }
@@ -357,7 +371,7 @@ internal object ShaderCompilerCopyPlanner {
             val parameterLists = items.map(ParsedFunctionMacro::parameters).distinct()
             if (parameterLists.size != 1) null else name to FunctionMacro(name, parameterLists.single(), items)
         }.toMap()
-        if (functionMacros.isEmpty()) return TokenPasteLoweringResult(source, emptyList())
+        if (functionMacros.isEmpty()) return TokenPasteLoweringResult(source, emptyList(), emptyList())
         val objectMacros = definitions.filterNot { it.macroFunctionLike }.groupBy { requireNotNull(it.macroName) }
             .mapValues { (_, items) -> items.map { it.macroBody.orEmpty() } }
         val typeLikeObjectMacros = definitions.filter {
@@ -447,21 +461,18 @@ internal object ShaderCompilerCopyPlanner {
                     functionSignatures,
                     helperName,
                 )
-                val candidates = if (existingHelper == null) {
-                    val candidatePattern = chain.candidatePattern()
-                    identifiers.mapNotNull { identifier ->
-                        val match = candidatePattern.matchEntire(identifier) ?: return@mapNotNull null
-                        val assignment = linkedMapOf<String, String>()
-                        chain.captureParameters.forEachIndexed { index, parameter ->
-                            val value = match.groupValues[index + 1]
-                            val previous = assignment.putIfAbsent(parameter, value)
-                            if (previous != null && previous != value) return@mapNotNull null
-                        }
-                        assignment.toMap() to identifier
-                    }.toMap()
-                } else {
-                    emptyMap()
-                }
+                val candidatePattern = chain.candidatePattern()
+                val allCandidates = identifiers.mapNotNull { identifier ->
+                    val match = candidatePattern.matchEntire(identifier) ?: return@mapNotNull null
+                    val assignment = linkedMapOf<String, String>()
+                    chain.captureParameters.forEachIndexed { index, parameter ->
+                        val value = match.groupValues[index + 1]
+                        val previous = assignment.putIfAbsent(parameter, value)
+                        if (previous != null && previous != value) return@mapNotNull null
+                    }
+                    assignment.toMap() to identifier
+                }.toMap()
+                val candidates = if (existingHelper == null) allCandidates else emptyMap()
                 if (existingHelper == null && combinations.any { it !in candidates }) return@definitionLoop
                 if (existingHelper == null && combinations.any { candidates[it] in typeLikeObjectMacros }) {
                     return@definitionLoop
@@ -500,14 +511,26 @@ internal object ShaderCompilerCopyPlanner {
                 val exact = definition.directive.exactText
                 val bodyOffset = exact.indexOf(definition.body)
                 if (bodyOffset < 0) return@definitionLoop
+                val loweredDirective = exact.replaceRange(bodyOffset, bodyOffset + definition.body.length, dispatch)
                 val lowered = buildString {
                     helper?.prototypes?.let(::append)
-                    append(exact.replaceRange(bodyOffset, bodyOffset + definition.body.length, dispatch))
+                    append(loweredDirective)
                 }
                 val range = sourceMap.directiveRange(definition.directive)
                 lowerings += TokenPasteLowering(
                     Replacement(range.first, range.last + 1, lowered),
                     helper?.definitions.orEmpty().takeIf { !emittedHelperDefinitions }.orEmpty(),
+                    ShaderTokenPasteLowering(
+                        macroName = macro.name,
+                        sourceLine = definition.directive.sourceLine,
+                        sourceDirective = exact,
+                        loweredDirective = loweredDirective,
+                        helperPrototypes = helper?.prototypes.orEmpty(),
+                        helperNames = if (helper == null) emptySet() else setOf(helperName),
+                        candidateIdentifiers = combinations.mapNotNull(allCandidates::get).toSortedSet(),
+                        candidateCoverageComplete = combinations.all(allCandidates::containsKey),
+                        settingDependencies = pastedDomains.flatMapTo(sortedSetOf()) { (_, domain) -> domain.settings },
+                    ),
                 )
                 emittedHelperDefinitions = emittedHelperDefinitions || helper != null
             }
@@ -519,7 +542,11 @@ internal object ShaderCompilerCopyPlanner {
         } else {
             lowered.trimEnd() + "\n\n" + helpers.joinToString("\n") + "\n"
         }
-        return TokenPasteLoweringResult(loweredSource, loweringBlockers)
+        return TokenPasteLoweringResult(
+            loweredSource,
+            loweringBlockers,
+            lowerings.map(TokenPasteLowering::contract).distinct(),
+        )
     }
 
     internal fun tokenPasteHelperName(macroName: String): String {
@@ -1148,11 +1175,13 @@ internal object ShaderCompilerCopyPlanner {
     private data class TokenPasteLowering(
         val replacement: Replacement,
         val helperDefinitions: String,
+        val contract: ShaderTokenPasteLowering,
     )
 
     private data class TokenPasteLoweringResult(
         val source: String,
         val blockers: List<ShaderCompilerCopyBlocker>,
+        val lowerings: List<ShaderTokenPasteLowering>,
     )
 
     private data class TokenValueDomain(
@@ -3058,6 +3087,7 @@ internal class ShaderCompilerCopyMaterializer(
                         conservativeAccess = request.probe.conservativeAccess,
                         irisContracts = request.plan.irisContracts.withMaterializedCompilerSource(result.source),
                         settings = request.plan.settings,
+                        tokenPasteLowerings = request.plan.tokenPasteLowerings,
                     ),
                 )
                 is SourceMaterialization.Failure -> ShaderCompilerCopyMaterialization.Failure(result.exception)
