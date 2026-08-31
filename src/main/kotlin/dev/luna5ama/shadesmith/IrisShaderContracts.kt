@@ -678,6 +678,7 @@ internal object IrisShaderContractExtractor {
         val macroDefinitions = collectMacroDefinitions(source, directives, conditionalGroups, settingsByName)
         val lexical = ContractLexicalMap(source)
         val extractionErrors = mutableListOf<String>()
+        val commentHostRegistryBlocks = irisCommentHostRegistryBlocks(source, sourceName)
 
         val localLayouts = LOCAL_SIZE_LAYOUT.findAll(source)
             .filter { lexical.isTopLevelCode(it.range.first) }
@@ -765,6 +766,9 @@ internal object IrisShaderContractExtractor {
         directives.filter { it.directive.kind == PreprocessorDirectiveKind.PRAGMA }
             .forEach { atoms += ContractAtom(IrisSourceContractKind.PRAGMA, it.range, mask = false) }
         hostDeclarations.forEach { atoms += ContractAtom(IrisSourceContractKind.HOST_DECLARATION, it.range, mask = true) }
+        commentHostRegistryBlocks.forEach { block ->
+            atoms += ContractAtom(IrisSourceContractKind.HOST_DECLARATION, block.range, mask = true)
+        }
         localLayouts.forEach { atoms += ContractAtom(IrisSourceContractKind.LOCAL_SIZE, it.range, mask = true) }
         IRIS_COMMENT_DIRECTIVE.findAll(source).forEach { match ->
             if (!lexical.isTopLevel(match.range.first)) {
@@ -2343,6 +2347,11 @@ internal data class IrisHostRegistryDeclaration(
     val range: IntRange,
 )
 
+internal data class IrisCommentHostRegistryBlock(
+    val names: List<String>,
+    val range: IntRange,
+)
+
 internal fun irisHostRegistryDeclarations(
     source: String,
     sourceName: String,
@@ -2358,6 +2367,45 @@ internal fun irisHostRegistryDeclarations(
                 "$sourceName:${lines.lineAt(match.range.first)}: unterminated Iris host declaration $name",
             )
         IrisHostRegistryDeclaration(name, lines.fullLineRange(match.range.first..semicolon))
+    }.toList()
+}
+
+internal fun irisCommentHostRegistryBlocks(
+    source: String,
+    sourceName: String,
+): List<IrisCommentHostRegistryBlock> {
+    val lines = ContractLineMap(source)
+    val lexical = ContractLexicalMap(source)
+    return BLOCK_COMMENT.findAll(source).mapNotNull { match ->
+        if (!lexical.isTopLevel(match.range.first)) return@mapNotNull null
+        val range = lines.fullLineRange(match.range)
+        val prefix = source.substring(range.first, match.range.first)
+        val suffix = source.substring(match.range.last + 1, range.last + 1).trimEnd('\r', '\n')
+        if (prefix.isNotBlank() || suffix.isNotBlank()) return@mapNotNull null
+        val names = mutableListOf<String>()
+        var supported = true
+        for (line in match.value.substring(2, match.value.length - 2).lineSequence()) {
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) continue
+            val declaration = HOST_CONST_DECLARATION.matchEntire(trimmed.substringBefore("//").trim())
+            if (declaration == null) {
+                supported = false
+                break
+            }
+            val name = declaration.groupValues[2]
+            if (!name.endsWith("Format") || !isHostDeclarationName(name)) {
+                supported = false
+                break
+            }
+            names += name
+        }
+        if (!supported || names.isEmpty()) return@mapNotNull null
+        if (names.size != names.distinct().size) {
+            throw IllegalArgumentException(
+                "$sourceName:${lines.lineAt(match.range.first)}: duplicate Iris host format in comment registry block",
+            )
+        }
+        IrisCommentHostRegistryBlock(names, range)
     }.toList()
 }
 

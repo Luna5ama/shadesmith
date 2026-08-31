@@ -318,17 +318,45 @@ class SpirvOptimizerTest {
 
         assertFalse(firstModule.artifactDirectory.resolve("compiler.glsl").readText().contains("colortex3Format"))
         assertFalse(firstModule.artifactDirectory.resolve("validation.glsl").readText().contains("colortex3Format"))
+        assertFalse(firstModule.artifactDirectory.resolve("compiler.glsl").readText().contains("colortex4Format"))
+        assertFalse(firstModule.artifactDirectory.resolve("validation.glsl").readText().contains("colortex4Format"))
         assertContains(restored, "/* RENDERTARGETS:3 */")
         assertContains(restored, "const int noiseTextureResolution = 256;")
         assertContains(restored, "const float sunPathRotation = -20.0; //[-90.0 -20.0 0.0 20.0 90.0]")
         assertContains(restored, "const int colortex3Format = RGBA16F; // Iris string directive")
         assertContains(restored, "const bool colortex3Clear = false;")
         assertContains(restored, "const vec4 colortex3ClearColor = vec4(0.25, 0.5, 0.75, 1.0);")
-        assertFalse(restored.contains("colortex4Format"))
+        assertContains(restored, "const int colortex4Format = RGBA32F;")
         assertEquals(first.source, second.source)
         assertEquals(first.artifactDirectory, second.artifactDirectory)
         assertEquals(first.modules.single().artifactDirectory, second.modules.single().artifactDirectory)
         assertTrue(firstSpirv.contentEquals(second.modules.single().optimizedSpirv.readBytes()))
+    }
+
+    @Test
+    fun restoresCommentWrappedHostFormatsWithoutSendingThemToCompilers() = withWorkspace { workspace ->
+        val exactBlock = """
+            /*
+            const int colortex0Format = RGBA16F; // exact main format
+            const int shadowcolor0Format = R16F; // exact shadow format
+            */
+        """.trimIndent() + "\n"
+        val source = """
+            #version 460 compatibility
+            $exactBlock
+            layout(location = 0) out vec4 fragColor;
+            void main() { fragColor = vec4(1.0); }
+        """.trimIndent() + "\n"
+
+        val result = SpirvOptimizer(workspace).optimize(
+            SpirvOptimizationRequest("comment-format.fsh", ShaderStage.FRAGMENT, source),
+        )
+        val module = result.modules.single()
+
+        assertFalse(module.artifactDirectory.resolve("compiler.glsl").readText().contains("colortex0Format"))
+        assertFalse(module.artifactDirectory.resolve("validation.glsl").readText().contains("colortex0Format"))
+        assertContains(result.source, exactBlock)
+        assertEquals(1, Regex.escape(exactBlock).toRegex().findAll(result.source).count())
     }
 
     @Test

@@ -111,6 +111,17 @@ internal object IrisCorpusMetadataRegistry {
                 )
             }
         }
+        irisCommentHostRegistryBlocks(source, sourceName).forEach { block ->
+            block.names.forEach { name ->
+                result += IrisRegistryMetadataSlice(
+                    IrisRegistryMetadataKind.PACK_GLOBAL,
+                    name,
+                    source.substring(block.range),
+                    sourceName,
+                    block.range.first,
+                )
+            }
+        }
         return result.sortedBy { it.sourceOrder }
     }
 
@@ -278,9 +289,9 @@ internal object IrisFinalSourceProcessor {
             result = if (retain) deduplicateExactSlices(result, slices) else removeExactSlices(result, slices)
         }
         if (policy.globalSink) {
-            val missing = (policy.settings.values.flatten() + policy.packGlobals.values.flatten()).filter { slice ->
-                slice.exactText !in result
-            }
+            val missing = (policy.settings.values.flatten() + policy.packGlobals.values.flatten())
+                .distinctBy(IrisRegistryMetadataSlice::exactText)
+                .filter { slice -> slice.exactText !in result }
             if (missing.isNotEmpty()) {
                 result = insertAfterPreamble(result, missing.joinToString("") { it.exactText })
             }

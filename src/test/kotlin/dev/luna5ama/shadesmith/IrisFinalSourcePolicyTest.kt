@@ -30,6 +30,32 @@ class IrisFinalSourcePolicyTest {
     }
 
     @Test
+    fun scansOnlyCompleteCommentWrappedHostFormatRegistries() {
+        val exactBlock = """
+            /*
+            const int colortex0Format = RGBA16F; // exact main format
+            const int shadowcolor0Format = R16F; // exact shadow format
+            */
+        """.trimIndent() + "\n"
+        val source = "#version 460 compatibility\n$exactBlock\nvoid main() {}\n"
+
+        val blocks = irisCommentHostRegistryBlocks(source, "final.fsh")
+
+        assertEquals(1, blocks.size)
+        assertEquals(listOf("colortex0Format", "shadowcolor0Format"), blocks.single().names)
+        assertEquals(exactBlock, source.substring(blocks.single().range))
+
+        val documentation = """
+            #version 460 compatibility
+            /* Example only:
+            const int colortex0Format = RGBA8;
+            */
+            void main() {}
+        """.trimIndent() + "\n"
+        assertTrue(irisCommentHostRegistryBlocks(documentation, "documented.fsh").isEmpty())
+    }
+
+    @Test
     fun buildsUniqueFinalSinkWithExactSettingAndGlobalBundles() {
         val common = """
             #version 460 compatibility
@@ -56,6 +82,68 @@ class IrisFinalSourcePolicyTest {
             policies.getValue("final.fsh").packGlobals.getValue("colortex0Format").map { it.exactText },
         )
         assertFalse("workGroups" in policies.getValue("final.fsh").packGlobals)
+    }
+
+    @Test
+    fun buildsOneExactGlobalSliceForACommentWrappedFormatBundle() {
+        val exactBlock = """
+            /*
+            const int colortex0Format = RGBA16F; // exact main format
+            const int shadowcolor0Format = R16F; // exact shadow format
+            */
+        """.trimIndent() + "\n"
+        val source = "#version 460 compatibility\n$exactBlock\nvoid main() {}\n"
+        val policies = IrisCorpusMetadataRegistry.plan(
+            listOf(
+                ShaderFile(Path.of("final.fsh"), source),
+                ShaderFile(Path.of("composite.csh"), source),
+            ),
+        )
+
+        val sink = policies.getValue("final.fsh")
+        assertEquals(exactBlock, sink.packGlobals.getValue("colortex0Format").single().exactText)
+        assertEquals(exactBlock, sink.packGlobals.getValue("shadowcolor0Format").single().exactText)
+
+        val emitted = "#version 460 compatibility\nvoid main() {}\n"
+        val processing = IrisFinalSourceProcessor.process(
+            SpirvOptimizationRequest("final.fsh", ShaderStage.FRAGMENT, source, finalSourcePolicy = sink),
+            emitted,
+            emptyList(),
+        )
+        val processed = assertIs<IrisFinalSourceProcessing.Processed>(processing, processing.toString())
+        assertEquals(1, Regex.escape(exactBlock).toRegex().findAll(processed.source).count())
+
+        val changedSource = source.replace("RGBA16F", "RGBA32F")
+        val changedPolicy = IrisCorpusMetadataRegistry.plan(
+            listOf(
+                ShaderFile(Path.of("final.fsh"), changedSource),
+                ShaderFile(Path.of("composite.csh"), changedSource),
+            ),
+        ).getValue("final.fsh")
+        assertFalse(sink.cacheContract == changedPolicy.cacheContract)
+    }
+
+    @Test
+    fun rejectsConflictingCommentWrappedFormatBundles() {
+        fun source(format: String) = """
+            #version 460 compatibility
+            /*
+            const int colortex0Format = $format;
+            */
+            void main() {}
+        """.trimIndent() + "\n"
+
+        val conflict = assertFailsWith<IllegalArgumentException> {
+            IrisCorpusMetadataRegistry.plan(
+                listOf(
+                    ShaderFile(Path.of("final.fsh"), source("RGBA16F")),
+                    ShaderFile(Path.of("composite.csh"), source("RGBA8")),
+                ),
+            )
+        }
+
+        assertContains(conflict.message.orEmpty(), "Conflicting Iris PACK_GLOBAL registry definition")
+        assertContains(conflict.message.orEmpty(), "colortex0Format")
     }
 
     @Test

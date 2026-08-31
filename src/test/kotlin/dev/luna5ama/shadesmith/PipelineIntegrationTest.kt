@@ -99,8 +99,16 @@ class PipelineIntegrationTest {
         assertFalse("SETTING_BRANCH" in output.resolve("composite1.csh").readText())
         val finalShader = output.resolve("final.fsh").readText()
         assertContains(finalShader, "//#define SETTING_BRANCH")
-        assertContains(finalShader, "const int colortex0Format = RGBA16F; // Pack-global Iris registry entry")
+        val exactFormatRegistry = """
+            /*
+            const int colortex0Format = RGBA16F; // Pack-global Iris registry entry
+            const int shadowcolor0Format = R16F; // Pack-global Iris registry entry
+            */
+        """.trimIndent() + "\n"
+        assertContains(finalShader, exactFormatRegistry)
+        assertEquals(1, Regex.escape(exactFormatRegistry).toRegex().findAll(finalShader).count())
         assertFalse("colortex0Format" in emittedBranchShader)
+        assertFalse("shadowcolor0Format" in emittedBranchShader)
         assertContains(properties.readText(), "image.uimg_rgba16f=usam_rgba16f RGBA RGBA16F HALF_FLOAT false true 1.0 1.0")
         assertEquals("4", performance.getValue("validated_modules"))
         assertEquals("4", firstPerformance.getValue("cache_misses"))
