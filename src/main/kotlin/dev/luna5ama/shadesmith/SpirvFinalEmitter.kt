@@ -1247,6 +1247,7 @@ internal object SpirvFinalEmitter {
         dependencyTexts: List<String>,
         restorationPlan: ShaderStructuralRestorationPlan,
         includeSettingMacros: Boolean = false,
+        definitionOffsetLimit: Int? = null,
     ): List<ShaderStructuralEntitySlot> {
         fun restorable(name: String): Boolean =
             restorableSourceMacro(name) || includeSettingMacros && name.startsWith("SETTING_")
@@ -1264,7 +1265,9 @@ internal object SpirvFinalEmitter {
             while (pending.isNotEmpty()) {
                 val name = pending.removeFirst()
                 if (name in selected) continue
-                val candidates = definitions[name].orEmpty()
+                val candidates = definitions[name].orEmpty().filter { definition ->
+                    definitionOffsetLimit == null || definition.offset < definitionOffsetLimit
+                }
                 val minimumDepth = candidates.minOfOrNull(SourceMacroDefinition::depth) ?: continue
                 val shallowest = candidates.filter { it.depth == minimumDepth }
                 selected[name] = shallowest
@@ -1280,9 +1283,15 @@ internal object SpirvFinalEmitter {
             val conditionalOwners = nearestConditionalOwnerRanges(source, definitionRanges)
             ownedRanges = restorationPlan.structuralOwnerRanges(source, definitionRanges)
                 .zip(conditionalOwners).zip(definitionRanges) { (owner, conditional), definition ->
-                    val enclosing = owner ?: conditional
+                    val boundedOwner = owner?.takeIf { range ->
+                        definitionOffsetLimit == null || range.last < definitionOffsetLimit
+                    }
+                    val boundedConditional = conditional?.takeIf { range ->
+                        definitionOffsetLimit == null || range.last < definitionOffsetLimit
+                    }
+                    val enclosing = boundedOwner ?: boundedConditional
                     if (
-                        conditional != null && isIncludeGuardOwner(source, conditional) ||
+                        boundedConditional != null && isIncludeGuardOwner(source, boundedConditional) ||
                         enclosing != null && isIncludeGuardOwner(source, enclosing)
                     ) definition else enclosing ?: definition
                 }
@@ -2317,23 +2326,65 @@ internal object SpirvFinalEmitter {
                 contract.sourceRange,
             )
         }
-        val declarationTargets = sourceStructuralEntities(originalSource).filter { entity ->
+        val sourceDeclarations = sourceStructuralEntities(originalSource).filter { entity ->
             entity.kind == StructuralEntityKind.DECLARATION &&
                 presentContracts.none { contract ->
                     contract.sourceRange.overlaps(entity.range) ||
                         contract.exactText.contains(originalSource.substring(entity.range).trim())
-                } &&
-                occurrences(restoredSource, originalSource.substring(entity.range).trim()).isNotEmpty() &&
-                DECLARATION_IDENTIFIER.findAll(originalSource.substring(entity.range)).any { match ->
+                }
+        }
+        fun declarationKey(entity: StructuralEntity): Pair<String, Set<String>> =
+            entity.identity to entity.declaredSymbols()
+        val sourceDeclarationsByKey = sourceDeclarations.groupBy(::declarationKey)
+        val restoredDeclarationsByKey = structuralEntities(restoredSource)
+            .filter { entity -> entity.kind == StructuralEntityKind.DECLARATION }
+            .groupBy(::declarationKey)
+        val declarationTargets = mutableListOf<DependencyTarget>()
+        for (entity in sourceDeclarations) {
+            val exactText = originalSource.substring(entity.range)
+            if (
+                DECLARATION_IDENTIFIER.findAll(exactText).none { match ->
                     match.value in sourceDefinitions && (
                         restorableSourceMacro(match.value) || match.value.startsWith("SETTING_")
                         )
                 }
-        }.map { entity ->
-            DependencyTarget(
-                "declaration ${entity.symbol ?: entity.identity}",
-                originalSource.substring(entity.range),
-                originalSource.substring(entity.range).trim(),
+            ) {
+                continue
+            }
+            val exactMatchText = exactText.trim()
+            if (occurrences(restoredSource, exactMatchText).isNotEmpty()) {
+                declarationTargets += DependencyTarget(
+                    "declaration ${entity.symbol ?: entity.identity}",
+                    exactText,
+                    exactMatchText,
+                    sourceLine(originalSource, entity.range.first),
+                    entity.range,
+                )
+                continue
+            }
+            val key = declarationKey(entity)
+            val restoredCandidates = restoredDeclarationsByKey[key].orEmpty()
+            if (restoredCandidates.isEmpty()) continue
+            val sourceCandidates = sourceDeclarationsByKey.getValue(key)
+            if (sourceCandidates.size != 1) {
+                return ShaderStructuralRestoration.Preserved(
+                    "$sourceName:${sourceLine(originalSource, entity.range.first)}: expanded declaration " +
+                        "${entity.symbol ?: entity.identity} source mapping is ambiguous " +
+                        "(${sourceCandidates.size} candidates)",
+                )
+            }
+            if (restoredCandidates.size != 1) {
+                return ShaderStructuralRestoration.Preserved(
+                    "$sourceName:${sourceLine(originalSource, entity.range.first)}: expanded declaration " +
+                        "${entity.symbol ?: entity.identity} final mapping is ambiguous " +
+                        "(${restoredCandidates.size} candidates)",
+                )
+            }
+            val restoredEntity = restoredCandidates.single()
+            declarationTargets += DependencyTarget(
+                "expanded declaration ${entity.symbol ?: entity.identity}",
+                exactText,
+                restoredSource.substring(restoredEntity.range).trim(),
                 sourceLine(originalSource, entity.range.first),
                 entity.range,
             )
@@ -2373,6 +2424,7 @@ internal object SpirvFinalEmitter {
                 listOf(target.exactText),
                 restorationPlan,
                 includeSettingMacros = true,
+                definitionOffsetLimit = target.sourceRange.first,
             )
             do {
                 var addedOwnerDependency = false
@@ -2409,9 +2461,12 @@ internal object SpirvFinalEmitter {
                 }
                 if (range.overlaps(target.sourceRange)) continue
                 if (range.first >= target.sourceRange.first) {
+                    val coveredMacroNames = blocks.flatMapTo(linkedSetOf(), DependencyBlock::macroNames)
+                    val missingMacroNames = requiredSlotMacros - coveredMacroNames
+                    if (missingMacroNames.isEmpty()) continue
                     return ShaderStructuralRestoration.Preserved(
                         "$sourceName:${target.sourceLine}: ${target.label} uses macro dependency " +
-                            "${slotDefinitions.keys.sorted()} before its source definition at line ${slot.sourceLine}",
+                            "${missingMacroNames.sorted()} before its source definition at line ${slot.sourceLine}",
                     )
                 }
                 selectedMacroNames += requiredSlotMacros

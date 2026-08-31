@@ -947,6 +947,219 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
+    fun expandedStructuralDeclarationRestoresCompleteMacroClosure() {
+        val original = """
+            #version 460 compatibility
+            #define SETTING_VOXEL_GRID_SIZE 32 //[16 32 64]
+            #define VOXEL_GRID_SIZE SETTING_VOXEL_GRID_SIZE
+            #define VOXEL_GRID_BRICKS (VOXEL_GRID_SIZE * VOXEL_GRID_SIZE * VOXEL_GRID_SIZE)
+            #define NUM_DIST_BUCKETS 1024
+            #define VOXEL_BRICK_DATA_MODIFIER restrict readonly buffer
+            #define VOXEL_ELEMENT_TYPE uint
+            layout(std430, binding = 3) VOXEL_BRICK_DATA_MODIFIER VoxelBrickData {
+                VOXEL_ELEMENT_TYPE voxel_brickOccupancy[VOXEL_GRID_BRICKS];
+                VOXEL_ELEMENT_TYPE voxel_bucketCounts[NUM_DIST_BUCKETS];
+            };
+            void main() { uint value = voxel_brickOccupancy[0]; }
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            layout(binding = 3, std430) restrict readonly buffer VoxelBrickData {
+                uint voxel_brickOccupancy[VOXEL_GRID_BRICKS];
+                uint voxel_bucketCounts[NUM_DIST_BUCKETS];
+            };
+            void main() { uint value = voxel_brickOccupancy[0]; }
+            #define SETTING_VOXEL_GRID_SIZE 32 //[16 32 64]
+            #define VOXEL_GRID_SIZE SETTING_VOXEL_GRID_SIZE
+            #define VOXEL_GRID_BRICKS (VOXEL_GRID_SIZE * VOXEL_GRID_SIZE * VOXEL_GRID_SIZE)
+            #define NUM_DIST_BUCKETS 1024
+            #define VOXEL_BRICK_DATA_MODIFIER restrict readonly buffer
+            #define VOXEL_ELEMENT_TYPE uint
+        """.trimIndent() + "\n"
+        val base = ShaderCompilerCopyPlanner.plan(original, "expanded-declaration-order.csh")
+        val restorationPlan = ShaderStructuralRestorationPlan(
+            base.sourceName,
+            base.settings,
+            emptySet(),
+            emptyList(),
+            base.irisContracts.contracts,
+            null,
+        )
+
+        assertNotNull(
+            SpirvFinalEmitter.finalDirectiveMacroDependencyIssue(
+                base.sourceName,
+                original,
+                restored,
+                base.irisContracts.contracts,
+                restorationPlan,
+            ),
+        )
+        val result = assertIs<ShaderStructuralRestoration.Restored>(
+            SpirvFinalEmitter.restoreDirectiveMacroDependencies(
+                base.sourceName,
+                original,
+                restored,
+                base.irisContracts.contracts,
+                restorationPlan,
+            ),
+        ).source
+
+        val declaration = result.indexOf("buffer VoxelBrickData")
+        listOf(
+            "#define SETTING_VOXEL_GRID_SIZE",
+            "#define VOXEL_GRID_SIZE",
+            "#define VOXEL_GRID_BRICKS",
+            "#define NUM_DIST_BUCKETS",
+            "#define VOXEL_BRICK_DATA_MODIFIER",
+            "#define VOXEL_ELEMENT_TYPE",
+        ).forEach { definition ->
+            assertTrue(result.indexOf(definition) in 0 until declaration, result)
+            assertEquals(1, Regex("(?m)^${Regex.escape(definition)}\\b").findAll(result).count(), result)
+        }
+        assertEquals(
+            result,
+            assertIs<ShaderStructuralRestoration.Restored>(
+                SpirvFinalEmitter.restoreDirectiveMacroDependencies(
+                    base.sourceName,
+                    original,
+                    result,
+                    base.irisContracts.contracts,
+                    restorationPlan,
+                ),
+            ).source,
+        )
+        assertNull(
+            SpirvFinalEmitter.finalDirectiveMacroDependencyIssue(
+                base.sourceName,
+                original,
+                result,
+                base.irisContracts.contracts,
+                restorationPlan,
+            ),
+        )
+    }
+
+    @Test
+    fun ambiguousExpandedStructuralDeclarationMappingFailsClosed() {
+        val original = """
+            #version 460 compatibility
+            #define SETTING_MODE 0 //[0 1]
+            #define ARRAY_COUNT 4
+            #define BLOCK_MODIFIER readonly buffer
+            #if SETTING_MODE == 0
+            layout(std430, binding = 0) BLOCK_MODIFIER Data { uint values[ARRAY_COUNT]; };
+            #else
+            layout(std430, binding = 0) BLOCK_MODIFIER Data { uint values[ARRAY_COUNT * 2]; };
+            #endif
+            void main() { uint value = values[0]; }
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            layout(binding = 0, std430) readonly buffer Data { uint values[ARRAY_COUNT]; };
+            void main() { uint value = values[0]; }
+            #define SETTING_MODE 0 //[0 1]
+            #define ARRAY_COUNT 4
+            #define BLOCK_MODIFIER readonly buffer
+        """.trimIndent() + "\n"
+
+        val result = assertIs<ShaderStructuralRestoration.Preserved>(
+            restoreDirectiveMacroDependencies(original, restored),
+        )
+
+        assertContains(result.reason, "expanded declaration Data source mapping is ambiguous")
+    }
+
+    @Test
+    fun expandedDeclarationIgnoresLaterMacroOverrides() {
+        val original = """
+            #version 460 compatibility
+            #ifndef GLOBAL_DATA_MODIFIER
+            #define GLOBAL_DATA_MODIFIER restrict readonly buffer
+            #endif
+            layout(std430, binding = 0) GLOBAL_DATA_MODIFIER GlobalData { uint values[4]; };
+            #ifdef DEBUG_PASS
+            #define GLOBAL_DATA_MODIFIER buffer
+            #endif
+            void main() { uint value = values[0]; }
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            layout(binding = 0, std430) restrict readonly buffer GlobalData { uint values[4]; };
+            #ifdef DEBUG_PASS
+            #define GLOBAL_DATA_MODIFIER buffer
+            #endif
+            void main() { uint value = values[0]; }
+            #ifndef GLOBAL_DATA_MODIFIER
+            #define GLOBAL_DATA_MODIFIER restrict readonly buffer
+            #endif
+        """.trimIndent() + "\n"
+
+        val result = assertIs<ShaderStructuralRestoration.Restored>(
+            restoreDirectiveMacroDependencies(original, restored),
+        ).source
+
+        val declaration = result.indexOf("buffer GlobalData")
+        val defaultDefinition = result.indexOf("#define GLOBAL_DATA_MODIFIER restrict readonly buffer")
+        val debugDefinition = result.indexOf("#define GLOBAL_DATA_MODIFIER buffer")
+        assertTrue(defaultDefinition in 0 until declaration, result)
+        assertTrue(debugDefinition > declaration, result)
+        assertEquals(2, Regex("(?m)^#define GLOBAL_DATA_MODIFIER\\b").findAll(result).count(), result)
+        assertEquals(
+            result,
+            assertIs<ShaderStructuralRestoration.Restored>(
+                restoreDirectiveMacroDependencies(original, result),
+            ).source,
+        )
+    }
+
+    @Test
+    fun expandedDeclarationPrefersEarlierNestedDefaultOverShallowerOverride() {
+        val original = """
+            #version 460 compatibility
+            #ifdef PROGRAM_ENABLED
+            #ifndef GLOBAL_DATA_MODIFIER
+            #define GLOBAL_DATA_MODIFIER restrict readonly buffer
+            #endif
+            layout(std430, binding = 0) GLOBAL_DATA_MODIFIER GlobalData { uint values[4]; };
+            #endif
+            #ifdef DEBUG_PASS
+            #define GLOBAL_DATA_MODIFIER buffer
+            #endif
+            void main() { uint value = values[0]; }
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            layout(binding = 0, std430) restrict readonly buffer GlobalData { uint values[4]; };
+            #ifdef DEBUG_PASS
+            #define GLOBAL_DATA_MODIFIER buffer
+            #endif
+            void main() { uint value = values[0]; }
+            #ifdef PROGRAM_ENABLED
+            #ifndef GLOBAL_DATA_MODIFIER
+            #define GLOBAL_DATA_MODIFIER restrict readonly buffer
+            #endif
+            #endif
+        """.trimIndent() + "\n"
+
+        val result = assertIs<ShaderStructuralRestoration.Restored>(
+            restoreDirectiveMacroDependencies(original, restored),
+        ).source
+
+        val declaration = result.indexOf("buffer GlobalData")
+        val defaultDefinition = result.indexOf("#define GLOBAL_DATA_MODIFIER restrict readonly buffer")
+        val debugDefinition = result.indexOf("#define GLOBAL_DATA_MODIFIER buffer")
+        assertTrue(defaultDefinition in 0 until declaration, result)
+        assertTrue(debugDefinition > declaration, result)
+        assertEquals(
+            result,
+            assertIs<ShaderStructuralRestoration.Restored>(
+                restoreDirectiveMacroDependencies(original, result),
+            ).source,
+        )
+    }
+
+    @Test
     fun functionMacroTypeAndArrayClosurePrecedesStructuralBlock() {
         val original = """
             #version 460 compatibility
