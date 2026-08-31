@@ -1246,13 +1246,16 @@ internal object SpirvFinalEmitter {
         commonCore: String,
         dependencyTexts: List<String>,
         restorationPlan: ShaderStructuralRestorationPlan,
+        includeSettingMacros: Boolean = false,
     ): List<ShaderStructuralEntitySlot> {
+        fun restorable(name: String): Boolean =
+            restorableSourceMacro(name) || includeSettingMacros && name.startsWith("SETTING_")
         val definitions = sourceMacroDefinitions(source)
         val dependencyIdentifiers = dependencyTexts.flatMapTo(linkedSetOf()) { text ->
             DECLARATION_IDENTIFIER.findAll(text).map(MatchResult::value)
         }
         val required = dependencyIdentifiers.filterTo(linkedSetOf()) {
-            it in definitions && restorableSourceMacro(it)
+            it in definitions && restorable(it)
         }
         val selected = linkedMapOf<String, List<SourceMacroDefinition>>()
         val pending = ArrayDeque(required)
@@ -1268,7 +1271,7 @@ internal object SpirvFinalEmitter {
                 shallowest.asSequence().flatMap { definition ->
                     DECLARATION_IDENTIFIER.findAll(definition.value).map(MatchResult::value)
                 }
-                    .filter { it in definitions && it !in selected && restorableSourceMacro(it) }
+                    .filter { it in definitions && it !in selected && restorable(it) }
                     .forEach(pending::addLast)
             }
             val definitionRanges = selected.values.flatten().map { definition ->
@@ -1293,7 +1296,7 @@ internal object SpirvFinalEmitter {
                     }
                     .flatMap { line -> DECLARATION_IDENTIFIER.findAll(line).map(MatchResult::value) }
             }
-                .filter { it in definitions && it !in selected && restorableSourceMacro(it) }
+                .filter { it in definitions && it !in selected && restorable(it) }
                 .distinct()
                 .toList()
             if (ownerDependencies.isEmpty()) break
@@ -2302,9 +2305,10 @@ internal object SpirvFinalEmitter {
             val blocks: List<DependencyBlock>,
         )
 
-        val contractTargets = contracts.filter { contract ->
+        val presentContracts = contracts.filter { contract ->
             occurrences(restoredSource, contract.exactText.trim()).isNotEmpty()
-        }.map { contract ->
+        }
+        val contractTargets = presentContracts.map { contract ->
             DependencyTarget(
                 "${contract.kind} contract",
                 contract.exactText,
@@ -2315,13 +2319,15 @@ internal object SpirvFinalEmitter {
         }
         val declarationTargets = sourceStructuralEntities(originalSource).filter { entity ->
             entity.kind == StructuralEntityKind.DECLARATION &&
-                contracts.none { contract ->
+                presentContracts.none { contract ->
                     contract.sourceRange.overlaps(entity.range) ||
                         contract.exactText.contains(originalSource.substring(entity.range).trim())
                 } &&
                 occurrences(restoredSource, originalSource.substring(entity.range).trim()).isNotEmpty() &&
                 DECLARATION_IDENTIFIER.findAll(originalSource.substring(entity.range)).any { match ->
-                    match.value in sourceDefinitions && restorableSourceMacro(match.value)
+                    match.value in sourceDefinitions && (
+                        restorableSourceMacro(match.value) || match.value.startsWith("SETTING_")
+                        )
                 }
         }.map { entity ->
             DependencyTarget(
@@ -2366,6 +2372,7 @@ internal object SpirvFinalEmitter {
                 "",
                 listOf(target.exactText),
                 restorationPlan,
+                includeSettingMacros = true,
             )
             do {
                 var addedOwnerDependency = false
@@ -2384,7 +2391,7 @@ internal object SpirvFinalEmitter {
             val blocks = mutableListOf<DependencyBlock>()
             for (slot in slots) {
                 val slotDefinitions = sourceMacroDefinitions(slot.exactText)
-                    .filterKeys(::restorableSourceMacro)
+                    .filterKeys { name -> restorableSourceMacro(name) || name.startsWith("SETTING_") }
                 if (slotDefinitions.isEmpty()) continue
                 val requiredSlotMacros = slotDefinitions.keys.intersect(requiredMacroNames)
                 if (requiredSlotMacros.isEmpty()) continue
@@ -2515,11 +2522,19 @@ internal object SpirvFinalEmitter {
             dependency.blocks.forEach blockLoop@{ block ->
                 val blockMatches = dependencyBlockOccurrences(result, block.exactText)
                 when {
-                    blockMatches.any { match -> match.first < targetOffset } -> Unit
-                    blockMatches.size > 1 -> return ShaderStructuralRestoration.Preserved(
-                        "$sourceName:${block.sourceLine}: directive macro dependency " +
-                            "${block.macroNames.sorted()} is duplicated (${blockMatches.size} restored matches)",
-                    )
+                    blockMatches.any { match -> match.first < targetOffset } -> {
+                        val keep = blockMatches.first { match -> match.first < targetOffset }
+                        val duplicates = blockMatches.filterNot { match -> match == keep }
+                        if (duplicates.isNotEmpty()) {
+                            result = removeRanges(result, duplicates)
+                            targetOffset = occurrences(result, dependency.target.matchText).single().first
+                        }
+                    }
+                    blockMatches.size > 1 -> {
+                        result = removeRanges(result, blockMatches)
+                        insertions += block
+                        targetOffset = occurrences(result, dependency.target.matchText).single().first
+                    }
                     blockMatches.size == 1 -> {
                         result = result.removeRange(blockMatches.single())
                         insertions += block
@@ -2583,6 +2598,31 @@ internal object SpirvFinalEmitter {
             result = result.substring(0, targetOffset) + insertion + result.substring(targetOffset)
         }
         return ShaderStructuralRestoration.Restored(result)
+    }
+
+    internal fun finalDirectiveMacroDependencyIssue(
+        sourceName: String,
+        originalSource: String,
+        finalSource: String,
+        contracts: List<IrisSourceContractSlice>,
+        restorationPlan: ShaderStructuralRestorationPlan,
+    ): String? {
+        return when (
+            val ordered = restoreDirectiveMacroDependencies(
+                sourceName,
+                originalSource,
+                finalSource,
+                contracts,
+                restorationPlan,
+            )
+        ) {
+            is ShaderStructuralRestoration.Preserved -> ordered.reason
+            is ShaderStructuralRestoration.Restored -> if (ordered.source == finalSource) {
+                null
+            } else {
+                "$sourceName: final structural declaration macro dependencies are not ordered before validation"
+            }
+        }
     }
 
     private fun ensureForwardFunctionDeclarations(source: String): String {

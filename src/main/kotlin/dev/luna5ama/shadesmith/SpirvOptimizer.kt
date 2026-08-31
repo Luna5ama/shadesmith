@@ -694,6 +694,21 @@ internal class SpirvOptimizer(
                 "${request.sourceName}#$moduleName",
             )
         }
+        SpirvFinalEmitter.finalDirectiveMacroDependencyIssue(
+            request.sourceName,
+            request.source,
+            source,
+            modules.first().irisContracts.sourceFacingContracts,
+            structuralPlan.restorationPlan,
+        )?.let { issue ->
+            fail(
+                request,
+                SpirvRoundTripPhase.VALIDATE,
+                finalDirectory,
+                issue,
+                request.sourceName,
+            )
+        }
         val validationModules = modules.distinctBy { module ->
             requireNotNull(module.structuralSignature).canonical
         }

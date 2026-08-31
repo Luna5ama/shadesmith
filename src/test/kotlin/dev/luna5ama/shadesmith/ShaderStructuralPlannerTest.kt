@@ -9,6 +9,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ShaderStructuralPlannerTest {
@@ -872,6 +873,108 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
+    fun absentOverlappingContractDoesNotHideStructuralDeclarationDependencies() {
+        val declaration = "shared uint spreadLut[VOXEL_GRID_SIZE * VOXEL_BRICK_SIZE];"
+        val original = """
+            #version 460 compatibility
+            #define SETTING_VOXEL_GRID_SIZE 64 //[16 32 64]
+            const int VOXEL_BRICK_SIZE = 16;
+            #define VOXEL_GRID_SIZE SETTING_VOXEL_GRID_SIZE
+            $declaration
+            void main() { spreadLut[0] = 0u; }
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            const int VOXEL_BRICK_SIZE = 16;
+            $declaration
+            void main() { spreadLut[0] = 0u; }
+            #define SETTING_VOXEL_GRID_SIZE 64 //[16 32 64]
+            #define VOXEL_GRID_SIZE SETTING_VOXEL_GRID_SIZE
+        """.trimIndent() + "\n"
+        val base = ShaderCompilerCopyPlanner.plan(original, "structural-macro-order.csh")
+        val declarationStart = original.indexOf(declaration)
+        val absentOverlap = IrisSourceContractSlice(
+            ordinal = 0,
+            kind = IrisSourceContractKind.HOST_DECLARATION,
+            exactText = "// intentionally absent contract\n",
+            sourceLine = original.take(declarationStart).count { it == '\n' } + 1,
+            sourceRange = declarationStart until declarationStart + declaration.length,
+            beforeAnchor = null,
+            afterAnchor = null,
+            placement = IrisAnchorPlacement.AFTER_BEFORE,
+        )
+        val restorationPlan = ShaderStructuralRestorationPlan(
+            base.sourceName,
+            base.settings,
+            emptySet(),
+            emptyList(),
+            listOf(absentOverlap),
+            null,
+        )
+
+        assertNotNull(
+            SpirvFinalEmitter.finalDirectiveMacroDependencyIssue(
+                base.sourceName,
+                original,
+                restored,
+                listOf(absentOverlap),
+                restorationPlan,
+            ),
+        )
+        val result = assertIs<ShaderStructuralRestoration.Restored>(
+            SpirvFinalEmitter.restoreDirectiveMacroDependencies(
+                base.sourceName,
+                original,
+                restored,
+                listOf(absentOverlap),
+                restorationPlan,
+            ),
+        ).source
+
+        assertTrue(result.indexOf("#define SETTING_VOXEL_GRID_SIZE") < result.indexOf("#define VOXEL_GRID_SIZE"))
+        assertTrue(result.indexOf("#define VOXEL_GRID_SIZE") < result.indexOf(declaration))
+        assertEquals(1, Regex("#define SETTING_VOXEL_GRID_SIZE\\b").findAll(result).count())
+        assertEquals(1, Regex("#define VOXEL_GRID_SIZE\\b").findAll(result).count())
+        assertNull(
+            SpirvFinalEmitter.finalDirectiveMacroDependencyIssue(
+                base.sourceName,
+                original,
+                result,
+                listOf(absentOverlap),
+                restorationPlan,
+            ),
+        )
+    }
+
+    @Test
+    fun functionMacroTypeAndArrayClosurePrecedesStructuralBlock() {
+        val original = """
+            #version 460 compatibility
+            #define TYPE_IMPL(value) value
+            #define VALUE_TYPE TYPE_IMPL(float)
+            #define ARRAY_COUNT 4
+            layout(std430, binding = 0) buffer Data { VALUE_TYPE values[ARRAY_COUNT]; };
+            void main() { values[0] = 1.0; }
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            layout(std430, binding = 0) buffer Data { VALUE_TYPE values[ARRAY_COUNT]; };
+            void main() { values[0] = 1.0; }
+            #define TYPE_IMPL(value) value
+            #define VALUE_TYPE TYPE_IMPL(float)
+            #define ARRAY_COUNT 4
+        """.trimIndent() + "\n"
+
+        val result = assertIs<ShaderStructuralRestoration.Restored>(
+            restoreDirectiveMacroDependencies(original, restored),
+        ).source
+
+        assertTrue(result.indexOf("#define TYPE_IMPL") < result.indexOf("#define VALUE_TYPE"))
+        assertTrue(result.indexOf("#define VALUE_TYPE") < result.indexOf("buffer Data"))
+        assertTrue(result.indexOf("#define ARRAY_COUNT") < result.indexOf("buffer Data"))
+    }
+
+    @Test
     fun restoredConditionalMacroOwnerAndCapabilityDependencyPrecedeUses() {
         val original = """
             #version 460 compatibility
@@ -1014,10 +1117,11 @@ class ShaderStructuralPlannerTest {
             #define SAMPLE_COUNT 64
             #define SAMPLE_COUNT 64
         """.trimIndent() + "\n"
-        val duplicateDependency = assertIs<ShaderStructuralRestoration.Preserved>(
+        val duplicateDependency = assertIs<ShaderStructuralRestoration.Restored>(
             restoreDirectiveMacroDependencies(original, duplicatedDependency),
-        )
-        assertContains(duplicateDependency.reason, "directive macro dependency [SAMPLE_COUNT] is duplicated")
+        ).source
+        assertEquals(1, Regex("#define SAMPLE_COUNT 64").findAll(duplicateDependency).count())
+        assertTrue(duplicateDependency.indexOf("#define SAMPLE_COUNT 64") < duplicateDependency.indexOf("layout(local_size_x"))
 
         val ambiguous = """
             #version 460 compatibility
