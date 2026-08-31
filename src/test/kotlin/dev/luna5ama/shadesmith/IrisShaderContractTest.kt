@@ -318,6 +318,10 @@ class IrisShaderContractTest {
         assertContains(restored, "const vec2 SHADOW_MAP_SIZE = vec2(float(shadowMapResolution), SHADOW_TEXEL_SIZE);")
         assertContains(restored, "return SHADOW_MAP_SIZE.x + SHADOW_TEXEL_SIZE;")
         assertContains(restored, "float value = nestedValue() + float(shadowMapResolution);")
+        assertTrue(restored.indexOf("#define SETTING_SHADOW_MAP_RESOLUTION") < restored.indexOf("const int shadowMapResolution"))
+        assertTrue(restored.indexOf("const int shadowMapResolution") < restored.indexOf("const float SHADOW_TEXEL_SIZE"))
+        assertTrue(restored.indexOf("const float SHADOW_TEXEL_SIZE") < restored.indexOf("const vec2 SHADOW_MAP_SIZE"))
+        assertNull(plan.irisContracts.finalSourceDependencyIssue(restored))
         assertFalse("SM_IRIS_HOST_" in restored)
         assertFalse("SM_DYNAMIC_" in restored)
     }
@@ -362,6 +366,7 @@ class IrisShaderContractTest {
                     const int SM_IRIS_HOST_shadowMapResolution = 1024;
                     layout(std430, binding = 0) buffer OutputBuffer { float outputValue; };
                     layout(local_size_x = 1) in;
+                    #define MATERIAL_TRANSLUCENT
                     void main() { outputValue = $outerName + $dynamicName; }
                 """.trimIndent() + "\n",
             ),
@@ -377,7 +382,9 @@ class IrisShaderContractTest {
         assertContains(restored, "outputValue = OUTER_SCALE + MATERIAL_SCALE;")
         assertTrue(restored.indexOf("const int shadowMapResolution") < restored.indexOf("const float OUTER_SCALE"))
         assertTrue(restored.indexOf("const float OUTER_SCALE") < restored.indexOf("#ifdef MATERIAL_TRANSLUCENT"))
+        assertTrue(restored.indexOf("#define MATERIAL_TRANSLUCENT") < restored.indexOf("#ifdef MATERIAL_TRANSLUCENT"))
         assertTrue(restored.indexOf("#ifdef MATERIAL_TRANSLUCENT") < restored.indexOf("void main()"))
+        assertNull(plan.irisContracts.finalSourceDependencyIssue(restored))
         assertFalse(dynamicName in restored)
         assertFalse(outerName in restored)
     }
@@ -392,12 +399,69 @@ class IrisShaderContractTest {
             void main() { vec2 value = SM_DYNAMIC_SHADOW_MAP_SIZE; }
         """.trimIndent() + "\n"
 
+        val restoredContracts = assertIs<IrisContractRestoration.Restored>(
+            plan.irisContracts.restore(emitted),
+        ).source
         val result = assertIs<IrisContractRestoration.StructuralPreservation>(
-            plan.irisContracts.restoreSourceReferences(emitted),
+            plan.irisContracts.restoreSourceReferences(restoredContracts),
         )
 
         assertContains(result.reason, "conflicting final definitions")
         assertContains(result.reason, "SM_DYNAMIC_SHADOW_MAP_SIZE")
+    }
+
+    @Test
+    fun finalSourceDependencyValidationRejectsLateMissingAndAmbiguousDefinitions() {
+        val plan = ShaderCompilerCopyPlanner.plan(dynamicShadowHostSource(), "invalid-final-order.csh")
+        val late = """
+            #version 460 compatibility
+            const float SHADOW_TEXEL_SIZE = 1.0 / float(shadowMapResolution);
+            const vec2 SHADOW_MAP_SIZE = vec2(float(shadowMapResolution), SHADOW_TEXEL_SIZE);
+            #define SETTING_SHADOW_MAP_RESOLUTION 2048 //[1024 2048]
+            #if SETTING_SHADOW_MAP_RESOLUTION == 1024
+            const int shadowMapResolution = 1024;
+            #else
+            const int shadowMapResolution = 2048;
+            #endif
+            layout(local_size_x = 1) in;
+            void main() { float value = SHADOW_MAP_SIZE.x; }
+        """.trimIndent() + "\n"
+        val missing = """
+            #version 460 compatibility
+            const float SHADOW_TEXEL_SIZE = 1.0 / float(shadowMapResolution);
+            const vec2 SHADOW_MAP_SIZE = vec2(float(shadowMapResolution), SHADOW_TEXEL_SIZE);
+            layout(local_size_x = 1) in;
+            void main() { float value = SHADOW_MAP_SIZE.x; }
+        """.trimIndent() + "\n"
+        val ambiguous = """
+            #version 460 compatibility
+            #define SETTING_SHADOW_MAP_RESOLUTION 2048 //[1024 2048]
+            const int shadowMapResolution = 1024;
+            const int shadowMapResolution = 2048;
+            const float SHADOW_TEXEL_SIZE = 1.0 / float(shadowMapResolution);
+            const vec2 SHADOW_MAP_SIZE = vec2(float(shadowMapResolution), SHADOW_TEXEL_SIZE);
+            layout(local_size_x = 1) in;
+            void main() { float value = SHADOW_MAP_SIZE.x; }
+        """.trimIndent() + "\n"
+
+        assertContains(assertNotNull(plan.irisContracts.finalSourceDependencyIssue(late)), "precedes")
+        assertContains(assertNotNull(plan.irisContracts.finalSourceDependencyIssue(missing)), "is missing")
+        assertContains(assertNotNull(plan.irisContracts.finalSourceDependencyIssue(ambiguous)), "is ambiguous")
+    }
+
+    @Test
+    fun finalSourceDependencyValidationRejectsCycles() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_SCALE 1 //[1 2]
+            const float FIRST_SCALE = SECOND_SCALE + float(SETTING_SCALE);
+            const float SECOND_SCALE = FIRST_SCALE + 1.0;
+            layout(local_size_x = 1) in;
+            void main() { float value = SECOND_SCALE; }
+        """.trimIndent() + "\n"
+        val plan = ShaderCompilerCopyPlanner.plan(source, "cyclic-final-order.csh")
+
+        assertContains(assertNotNull(plan.irisContracts.finalSourceDependencyIssue(source)), "cyclic")
     }
 
     @Test
@@ -475,6 +539,7 @@ class IrisShaderContractTest {
         assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode)
         assertContains(result.source, "const int shadowMapResolution = 1024;")
         assertContains(result.source, "float(shadowMapResolution)")
+        assertNull(plan.irisContracts.finalSourceDependencyIssue(result.source))
         assertFalse("SM_IRIS_HOST_" in result.source)
         assertFalse("SM_DYNAMIC_" in result.source)
     }

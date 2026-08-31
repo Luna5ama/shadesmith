@@ -93,6 +93,7 @@ internal data class IrisShaderContractPlan(
     private val compilerHostNames: Map<String, String>,
     private val compilerDynamicNames: Map<String, String>,
     private val originalIdentifiers: Set<String>,
+    private val originalSource: String,
 ) {
     val localSizeSpecializationIds: Set<Int>
         get() = localSize?.specializationIds?.values.orEmpty().toSet()
@@ -185,6 +186,128 @@ internal data class IrisShaderContractPlan(
         return replaceCodeIdentifiers(source, replacements)
     }
 
+    private fun sourceDependencyPlacement(
+        source: String,
+        targets: List<IrisSourceContractSlice>,
+        anchorOffsets: Map<IrisSourceContractSlice, Int?> = emptyMap(),
+    ): SourceDependencyPlacement {
+        if (targets.isEmpty()) return SourceDependencyPlacement(anchorOffsets)
+        val originalDefinitions = sourceDefinitionRanges(originalSource, sourceName)
+        val currentDefinitions = sourceDefinitionRanges(source, sourceName)
+        val targetDefinitions = targets.associateWith { contract -> sourceDefinedNames(contract.exactText) }
+        val targetByName = linkedMapOf<String, IrisSourceContractSlice>()
+        targetDefinitions.forEach { (contract, names) ->
+            names.forEach { name ->
+                val previous = targetByName.putIfAbsent(name, contract)
+                if (previous != null && previous.sourceRange != contract.sourceRange) {
+                    return SourceDependencyPlacement(
+                        issue = "$sourceName: final source declaration dependency $name has ambiguous contract ownership",
+                    )
+                }
+            }
+        }
+        val placements = linkedMapOf<IrisSourceContractSlice, Int?>()
+        targets.sortedBy { it.sourceRange.first }.forEach { target ->
+            val localDefinitions = sourceDefinitionRanges(
+                target.exactText,
+                "<source-declaration-contract-${target.sourceLine}>",
+            )
+            localDefinitions.forEach { (name, ranges) ->
+                val firstDefinition = ranges.minOf(IntRange::first)
+                ranges.forEach { range ->
+                    identifiers(target.exactText.substring(range)).filter { dependency ->
+                        dependency != name && dependency in localDefinitions
+                    }.forEach { dependency ->
+                        if (localDefinitions.getValue(dependency).minOf(IntRange::first) >= firstDefinition) {
+                            return SourceDependencyPlacement(
+                                issue = "$sourceName:${target.sourceLine}: final source declaration dependency " +
+                                    "$dependency is cyclic or owned after its consumer $name",
+                            )
+                        }
+                    }
+                }
+            }
+            val required = linkedSetOf<String>()
+            val visited = hashSetOf<String>()
+            val active = linkedSetOf<String>()
+            var issue: String? = null
+            fun visit(name: String) {
+                if (issue != null || name in targetDefinitions.getValue(target)) return
+                targetByName[name]?.let { owner ->
+                    if (owner.sourceRange.first >= target.sourceRange.first) {
+                        issue = "$sourceName:${target.sourceLine}: final source declaration dependency $name " +
+                            "is cyclic or owned after its consumer"
+                    }
+                    return
+                }
+                val definitions = originalDefinitions[name].orEmpty().filter { range ->
+                    range.last < target.sourceRange.first
+                }
+                if (definitions.isEmpty()) return
+                if (name in active) {
+                    issue = "$sourceName:${target.sourceLine}: cyclic final source declaration dependency " +
+                        (active.toList() + name).joinToString(" -> ")
+                    return
+                }
+                if (!visited.add(name)) return
+                active += name
+                required += name
+                definitions.forEach { range ->
+                    val text = originalSource.substring(range)
+                    val locallyDefined = sourceDefinedNames(text)
+                    identifiers(text).filterNot(locallyDefined::contains).forEach(::visit)
+                }
+                active.remove(name)
+            }
+            val locallyDefined = targetDefinitions.getValue(target)
+            identifiers(target.exactText).filterNot(locallyDefined::contains).forEach(::visit)
+            issue?.let { return SourceDependencyPlacement(issue = it) }
+
+            var dependencyOffset: Int? = null
+            required.sorted().forEach { name ->
+                val ranges = currentDefinitions[name].orEmpty()
+                if (ranges.isEmpty()) {
+                    return SourceDependencyPlacement(
+                        issue = "$sourceName:${target.sourceLine}: final source declaration dependency $name is missing",
+                    )
+                }
+                val boundary = sourceDefinitionBoundary(source, name, ranges)
+                    ?: return SourceDependencyPlacement(
+                        issue = "$sourceName:${target.sourceLine}: final source declaration dependency $name is ambiguous",
+                    )
+                dependencyOffset = maxOf(dependencyOffset ?: 0, boundary)
+            }
+            val anchorOffset = anchorOffsets[target]
+            placements[target] = when {
+                dependencyOffset != null && anchorOffset != null -> maxOf(dependencyOffset, anchorOffset)
+                dependencyOffset != null -> dependencyOffset
+                else -> anchorOffset
+            }
+        }
+        return SourceDependencyPlacement(placements)
+    }
+
+    fun finalSourceDependencyIssue(source: String): String? {
+        val targets = dynamicSourceContracts.filter { contract ->
+            exactOccurrences(source, contract.exactText).isNotEmpty()
+        }
+        val placement = sourceDependencyPlacement(source, targets)
+        placement.issue?.let { return it }
+        targets.forEach { target ->
+            val matches = exactOccurrences(source, target.exactText)
+            if (matches.size != 1) {
+                return "$sourceName:${target.sourceLine}: final source declaration is " +
+                    if (matches.isEmpty()) "missing" else "ambiguous (${matches.size} matches)"
+            }
+            placement.offsets[target]?.let { offset ->
+                if (matches.single().first < offset) {
+                    return "$sourceName:${target.sourceLine}: final source declaration precedes an authoritative dependency"
+                }
+            }
+        }
+        return null
+    }
+
     fun restoreSourceReferences(source: String): IrisContractRestoration {
         val pairs = buildList {
             compilerHostNames.forEach { (sourceName, compilerName) -> add(compilerName to sourceName) }
@@ -217,7 +340,7 @@ internal data class IrisShaderContractPlan(
                 )
             }
         }
-        val insertionOffsets = activeDynamicSourceContracts.associateWith { dynamic ->
+        val anchorOffsets = activeDynamicSourceContracts.associateWith { dynamic ->
             val before = presentContracts.keys
                 .filter { contract -> contract.sourceRange.last < dynamic.sourceRange.first }
                 .maxByOrNull { contract -> contract.sourceRange.last }
@@ -230,11 +353,15 @@ internal data class IrisShaderContractPlan(
                 else -> null
             }
         }
+        val dependencyPlacement = sourceDependencyPlacement(source, activeDynamicSourceContracts, anchorOffsets)
+        dependencyPlacement.issue?.let {
+            return IrisContractRestoration.StructuralPreservation(it)
+        }
         val sourceWithDynamicContracts = when (
             val restored = restoreContractSlices(
                 source,
                 activeDynamicSourceContracts,
-                insertionOffsets,
+                dependencyPlacement.offsets,
                 allowAlternateAnchor = true,
             )
         ) {
@@ -278,6 +405,9 @@ internal data class IrisShaderContractPlan(
         }
         val stripped = removeContractRanges(sourceWithDynamicContracts, removals.distinct())
         val restored = replaceSourceIdentifiers(stripped, replacements)
+        finalSourceDependencyIssue(restored)?.let {
+            return IrisContractRestoration.StructuralPreservation(it)
+        }
         finalSourceReferenceIssue(restored)?.let {
             return IrisContractRestoration.StructuralPreservation(it)
         }
@@ -994,6 +1124,7 @@ internal object IrisShaderContractExtractor {
             hostCompilerNames,
             dynamicTopLevel.aliases,
             identifiers(source).toSet(),
+            source,
         )
     }
 
@@ -1321,6 +1452,11 @@ private data class DynamicTopLevelConstant(
 private data class DynamicTopLevelLowering(
     val source: String,
     val aliases: Map<String, String> = emptyMap(),
+)
+
+private data class SourceDependencyPlacement(
+    val offsets: Map<IrisSourceContractSlice, Int?> = emptyMap(),
+    val issue: String? = null,
 )
 
 private data class ContractSourceReplacement(
@@ -2193,6 +2329,40 @@ private fun compilerMacroDefinition(name: String): Regex {
         "(?m)^[\\t ]*#define[\\t ]+${Regex.escape(name)}\\b[^\\r\\n]*" +
             "(?:\\r\\n|\\n|\\r|$)",
     )
+}
+
+private fun sourceDefinitionRanges(source: String, sourceName: String): Map<String, List<IntRange>> {
+    val lines = ContractLineMap(source)
+    val definitions = linkedMapOf<String, MutableList<IntRange>>()
+    PreprocessorProtection.protect(source, sourceName).directives.filter { directive ->
+        directive.kind == PreprocessorDirectiveKind.DEFINE && directive.macroName != null
+    }.forEach { directive ->
+        definitions.getOrPut(requireNotNull(directive.macroName), ::mutableListOf) += lines.directiveRange(directive)
+    }
+    topLevelConstants(source).forEach { declaration ->
+        definitions.getOrPut(declaration.name, ::mutableListOf) += declaration.range
+    }
+    return definitions.mapValues { (_, ranges) -> ranges.distinct().sortedBy(IntRange::first) }
+}
+
+private fun sourceDefinedNames(source: String): Set<String> =
+    sourceDefinitionRanges(source, "<source-declaration-dependencies>").keys
+
+private fun sourceDefinitionBoundary(source: String, name: String, ranges: List<IntRange>): Int? {
+    if (ranges.size == 1) return ranges.single().last + 1
+    val lines = ContractLineMap(source)
+    val directives = PreprocessorProtection.protect(source, "<source-declaration-dependency-$name>").directives
+        .map { directive -> ContractDirective(directive, lines.directiveRange(directive)) }
+    val owner = buildConditionalGroups(directives).asSequence()
+        .filter { group -> ranges.all { range -> range.first in group.range } }
+        .filter { group ->
+            val arms = ranges.map { range ->
+                group.delimiters.indexOfLast { delimiter -> delimiter.range.last < range.first }
+            }
+            arms.none { it < 0 } && arms.distinct().size == ranges.size
+        }
+        .maxByOrNull(ContractConditionalGroup::depth)
+    return owner?.range?.last?.plus(1)
 }
 
 private fun hasLiveCompilerReference(source: String, name: String): Boolean {

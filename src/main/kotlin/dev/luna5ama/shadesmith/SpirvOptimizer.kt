@@ -683,6 +683,17 @@ internal class SpirvOptimizer(
                 "${request.sourceName}#$moduleName",
             )
         }
+        modules.asSequence().mapNotNull { module ->
+            module.irisContracts.finalSourceDependencyIssue(source)?.let { issue -> module.name to issue }
+        }.firstOrNull()?.let { (moduleName, issue) ->
+            fail(
+                request,
+                SpirvRoundTripPhase.VALIDATE,
+                finalDirectory,
+                "$moduleName: $issue",
+                "${request.sourceName}#$moduleName",
+            )
+        }
         val validationModules = modules.distinctBy { module ->
             requireNotNull(module.structuralSignature).canonical
         }
