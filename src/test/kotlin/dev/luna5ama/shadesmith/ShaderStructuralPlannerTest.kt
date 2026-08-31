@@ -873,6 +873,170 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
+    fun liveIncludeGuardDependencyRestoresGuardDefinitionBeforeHostMetadata() {
+        val original = """
+            #version 460 compatibility
+            #ifndef INCLUDE_clouds_ss_Common_glsl
+            #define INCLUDE_clouds_ss_Common_glsl a
+            #if SETTING_CLOUDS_LOW_UPSCALE_FACTOR == 0
+            #define RENDER_MULTIPLIER 1.0
+            #else
+            #define RENDER_MULTIPLIER 0.5
+            #endif
+            #endif
+            const vec2 workGroupsRender = vec2(RENDER_MULTIPLIER);
+            void main() {}
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            #define INCLUDE_clouds_ss_Common_glsl a
+            #ifndef INCLUDE_clouds_ss_Common_glsl
+            #if SETTING_CLOUDS_LOW_UPSCALE_FACTOR == 0
+            #define RENDER_MULTIPLIER 1.0
+            #else
+            #define RENDER_MULTIPLIER 0.5
+            #endif
+            #endif
+            const vec2 workGroupsRender = vec2(RENDER_MULTIPLIER);
+            void main() {}
+        """.trimIndent() + "\n"
+
+        assertNotNull(
+            SpirvFinalEmitter.finalLiveIncludeGuardDependencyIssue(
+                "include-guard-order.csh",
+                original,
+                restored,
+                setOf("RENDER_MULTIPLIER"),
+            ),
+        )
+        val result = assertIs<ShaderStructuralRestoration.Restored>(
+            restoreDirectiveMacroDependencies(original, restored),
+        ).source
+
+        val opener = result.indexOf("#ifndef INCLUDE_clouds_ss_Common_glsl")
+        val marker = result.indexOf("#define INCLUDE_clouds_ss_Common_glsl a")
+        val render = result.indexOf("#define RENDER_MULTIPLIER")
+        val host = result.indexOf("const vec2 workGroupsRender")
+        assertTrue(opener in 0 until marker, result)
+        assertTrue(marker in 0 until render, result)
+        assertTrue(render in 0 until host, result)
+        assertEquals(1, Regex("(?m)^#define INCLUDE_clouds_ss_Common_glsl\\b").findAll(result).count(), result)
+        assertEquals(0, Regex("(?m)^#ifndef RENDER_MULTIPLIER\\b").findAll(result).count(), result)
+        assertNull(
+            SpirvFinalEmitter.finalLiveIncludeGuardDependencyIssue(
+                "include-guard-order.csh",
+                original,
+                result,
+                setOf("RENDER_MULTIPLIER"),
+            ),
+        )
+        assertEquals(
+            result,
+            assertIs<ShaderStructuralRestoration.Restored>(
+                restoreDirectiveMacroDependencies(original, result),
+            ).source,
+        )
+    }
+
+    @Test
+    fun nestedLiveIncludeGuardDependencyRestorationIsIdempotent() {
+        val original = """
+            #version 460 compatibility
+            #ifndef INCLUDE_OUTER
+            #define INCLUDE_OUTER
+            #ifndef INCLUDE_INNER
+            #define INCLUDE_INNER
+            #define GROUP_SIZE 8
+            #endif
+            #endif
+            layout(local_size_x = GROUP_SIZE) in;
+            void main() {}
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            #ifndef INCLUDE_OUTER
+            #define INCLUDE_OUTER
+            #define INCLUDE_INNER
+            #ifndef INCLUDE_INNER
+            #define GROUP_SIZE 8
+            #endif
+            #endif
+            layout(local_size_x = GROUP_SIZE) in;
+            void main() {}
+        """.trimIndent() + "\n"
+
+        val result = assertIs<ShaderStructuralRestoration.Restored>(
+            restoreDirectiveMacroDependencies(original, restored),
+        ).source
+
+        assertTrue(result.indexOf("#ifndef INCLUDE_INNER") < result.indexOf("#define INCLUDE_INNER"), result)
+        assertTrue(result.indexOf("#define INCLUDE_INNER") < result.indexOf("#define GROUP_SIZE"), result)
+        assertEquals(
+            result,
+            assertIs<ShaderStructuralRestoration.Restored>(
+                restoreDirectiveMacroDependencies(original, result),
+            ).source,
+        )
+    }
+
+    @Test
+    fun ambiguousAndConflictingLiveIncludeGuardDependenciesFailClosed() {
+        val ambiguous = """
+            #version 460 compatibility
+            #ifndef INCLUDE_A
+            #define INCLUDE_A
+            #define GROUP_SIZE 8
+            #endif
+            #ifndef INCLUDE_B
+            #define INCLUDE_B
+            #define GROUP_SIZE 8
+            #endif
+            layout(local_size_x = GROUP_SIZE) in;
+            void main() {}
+        """.trimIndent() + "\n"
+        val ambiguousRestored = """
+            #version 460 compatibility
+            #define INCLUDE_A
+            #ifndef INCLUDE_A
+            #define GROUP_SIZE 8
+            #endif
+            #define INCLUDE_B
+            #ifndef INCLUDE_B
+            #define GROUP_SIZE 8
+            #endif
+            layout(local_size_x = GROUP_SIZE) in;
+            void main() {}
+        """.trimIndent() + "\n"
+        val ambiguousResult = assertIs<ShaderStructuralRestoration.Preserved>(
+            restoreDirectiveMacroDependencies(ambiguous, ambiguousRestored),
+        )
+        assertContains(ambiguousResult.reason, "ownership is ambiguous")
+
+        val original = """
+            #version 460 compatibility
+            #ifndef INCLUDE_COMMON
+            #define INCLUDE_COMMON 1
+            #define GROUP_SIZE 8
+            #endif
+            layout(local_size_x = GROUP_SIZE) in;
+            void main() {}
+        """.trimIndent() + "\n"
+        val conflicting = """
+            #version 460 compatibility
+            #define INCLUDE_COMMON 2
+            #ifndef INCLUDE_COMMON
+            #define GROUP_SIZE 8
+            #endif
+            layout(local_size_x = GROUP_SIZE) in;
+            void main() {}
+        """.trimIndent() + "\n"
+        val conflictingResult = assertIs<ShaderStructuralRestoration.Preserved>(
+            restoreDirectiveMacroDependencies(original, conflicting),
+        )
+        assertContains(conflictingResult.reason, "conflicting external definition")
+    }
+
+    @Test
     fun absentOverlappingContractDoesNotHideStructuralDeclarationDependencies() {
         val declaration = "shared uint spreadLut[VOXEL_GRID_SIZE * VOXEL_BRICK_SIZE];"
         val original = """

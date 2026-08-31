@@ -694,6 +694,9 @@ internal object SpirvFinalEmitter {
             return preserved(request, processed.reason)
         }
         val finalSource = (processed as IrisFinalSourceProcessing.Processed).source
+        finalLiveIncludeGuardDependencyIssue(request.sourceName, request.source, finalSource)?.let { issue ->
+            return preserved(request, issue)
+        }
         val artifact = FINAL_SPECIALIZATION_ARTIFACT.find(finalSource)?.value
         return if (artifact == null) {
             SpirvFinalEmission(
@@ -2270,9 +2273,12 @@ internal object SpirvFinalEmitter {
     ): ShaderStructuralRestoration {
         val outputMacros = sourceMacroDefinitions(source).keys
         val sourceMacros = sourceMacroDefinitions(request.source)
+        val includeGuardNames = sourceIncludeGuards(request.source, request.sourceName).mapTo(hashSetOf()) { it.name }
         val pending = ArrayDeque(
             DECLARATION_IDENTIFIER.findAll(maskStructuralSource(source)).map(MatchResult::value)
-                .filter { it !in outputMacros && it in sourceMacros && restorableSourceMacro(it) }
+                .filter {
+                    it !in outputMacros && it in sourceMacros && it !in includeGuardNames && restorableSourceMacro(it)
+                }
                 .toCollection(linkedSetOf()),
         )
         val selected = linkedSetOf<SourceMacroDefinition>()
@@ -2281,7 +2287,9 @@ internal object SpirvFinalEmitter {
             sourceMacros[name].orEmpty().forEach { definition ->
                 if (!selected.add(definition)) return@forEach
                 DECLARATION_IDENTIFIER.findAll(definition.value).map(MatchResult::value)
-                    .filter { it !in outputMacros && it in sourceMacros && restorableSourceMacro(it) }
+                    .filter {
+                        it !in outputMacros && it in sourceMacros && it !in includeGuardNames && restorableSourceMacro(it)
+                    }
                     .forEach(pending::addLast)
             }
         }
@@ -2686,7 +2694,227 @@ internal object SpirvFinalEmitter {
                 .let { text -> if (text.endsWith('\n') || text.endsWith('\r')) text else "$text\n" }
             result = result.substring(0, targetOffset) + insertion + result.substring(targetOffset)
         }
+        return restoreLiveIncludeGuardDependencies(
+            sourceName,
+            originalSource,
+            result,
+            selectedMacroNames,
+        )
+    }
+
+    private fun restoreLiveIncludeGuardDependencies(
+        sourceName: String,
+        originalSource: String,
+        restoredSource: String,
+        requiredMacroNames: Set<String>,
+    ): ShaderStructuralRestoration {
+        if (requiredMacroNames.isEmpty()) return ShaderStructuralRestoration.Restored(restoredSource)
+        val owners = sourceIncludeGuards(originalSource, sourceName).filter { guard ->
+            (guard.definedNames - guard.name).any(requiredMacroNames::contains)
+        }
+        owners.firstOrNull { guard -> guard.definitionCount != 1 }?.let { guard ->
+            return ShaderStructuralRestoration.Preserved(
+                "$sourceName: live include guard ${guard.name} has ambiguous source definitions",
+            )
+        }
+        val ownership = owners.flatMap { guard ->
+            (guard.definedNames - guard.name).filter(requiredMacroNames::contains).map { name -> name to guard }
+        }.groupBy({ it.first }, { it.second }).filterValues { guards ->
+            guards.map(SourceIncludeGuard::range).distinct().size > 1
+        }
+        if (ownership.isNotEmpty()) {
+            return ShaderStructuralRestoration.Preserved(
+                "$sourceName: live include-guard dependency ownership is ambiguous: " +
+                    ownership.mapValues { (_, guards) -> guards.map(SourceIncludeGuard::name).distinct().sorted() },
+            )
+        }
+        val conflictingGuards = owners.groupBy(SourceIncludeGuard::name).filterValues { guards ->
+            guards.map(SourceIncludeGuard::definitionText).distinct().size > 1
+        }
+        if (conflictingGuards.isNotEmpty()) {
+            return ShaderStructuralRestoration.Preserved(
+                "$sourceName: conflicting live include-guard definitions: ${conflictingGuards.keys.sorted()}",
+            )
+        }
+
+        var result = restoredSource
+        owners.distinctBy(SourceIncludeGuard::name).forEach { owner ->
+            val parsed = parsedIncludeGuardSource(result, "$sourceName<restored-include-guards>")
+            val candidates = parsed.groups.filter { group ->
+                group.name == owner.name && group.definedNames.any(requiredMacroNames::contains)
+            }
+            if (candidates.isEmpty()) return@forEach
+            if (candidates.size != 1) {
+                return ShaderStructuralRestoration.Preserved(
+                    "$sourceName: live include guard ${owner.name} is ambiguous (${candidates.size} candidates)",
+                )
+            }
+            val candidate = candidates.single()
+            if (candidate.definitionIsFirstChild) return@forEach
+            if (candidate.guardDefinitions.isNotEmpty()) {
+                return ShaderStructuralRestoration.Preserved(
+                    "$sourceName: live include guard ${owner.name} has a misplaced internal definition",
+                )
+            }
+            val external = parsed.definitions[owner.name].orEmpty().filterNot(candidate.range::containsRange)
+            if (external.size > 1) {
+                return ShaderStructuralRestoration.Preserved(
+                    "$sourceName: live include guard ${owner.name} has ambiguous external definitions",
+                )
+            }
+            external.singleOrNull()?.let { range ->
+                val text = result.substring(range)
+                if (normalizeStructuralEntity(text) != normalizeStructuralEntity(owner.definitionText)) {
+                    return ShaderStructuralRestoration.Preserved(
+                        "$sourceName: live include guard ${owner.name} has a conflicting external definition",
+                    )
+                }
+            }
+            val removal = external.singleOrNull()
+            val stripped = removal?.let(result::removeRange) ?: result
+            val adjustedInsertion = candidate.openerRange.last + 1 -
+                if (removal != null && removal.first < candidate.openerRange.first) removal.last - removal.first + 1 else 0
+            result = stripped.substring(0, adjustedInsertion) + owner.definitionText +
+                stripped.substring(adjustedInsertion)
+        }
+        finalLiveIncludeGuardDependencyIssue(sourceName, originalSource, result, requiredMacroNames)?.let { issue ->
+            return ShaderStructuralRestoration.Preserved(issue)
+        }
         return ShaderStructuralRestoration.Restored(result)
+    }
+
+    internal fun finalLiveIncludeGuardDependencyIssue(
+        sourceName: String,
+        originalSource: String,
+        finalSource: String,
+        requiredMacroNames: Set<String>? = null,
+    ): String? {
+        val sourceGuards = sourceIncludeGuards(originalSource, sourceName)
+        if (sourceGuards.isEmpty()) return null
+        val parsed = parsedIncludeGuardSource(finalSource, "$sourceName<final-include-guards>")
+        val finalDefinitions = sourceMacroDefinitions(finalSource).values.flatten().map { definition ->
+            definition.offset until definition.offset + definition.exactText.length
+        }
+        val liveNamesByGuard = sourceGuards.associateWith { guard ->
+            val finalGroups = parsed.groups.filter { group -> group.name == guard.name }
+            val finalGroupNames = finalGroups.flatMapTo(linkedSetOf()) { group ->
+                group.definedNames - group.name
+            }
+            if (requiredMacroNames != null) {
+                (guard.definedNames - guard.name).intersect(requiredMacroNames).intersect(finalGroupNames)
+            } else {
+                (guard.definedNames - guard.name).intersect(finalGroupNames).filterTo(linkedSetOf()) { name ->
+                    DECLARATION_IDENTIFIER.findAll(maskStructuralSource(finalSource)).any { match ->
+                        finalDefinitions.none { definition -> match.range.first in definition } &&
+                            finalGroups.none { group -> match.range.first in group.range }
+                    }
+                }
+            }
+        }
+        val owners = sourceGuards.filter { guard -> liveNamesByGuard.getValue(guard).isNotEmpty() }
+        owners.firstOrNull { guard -> guard.definitionCount != 1 }?.let { guard ->
+            return "$sourceName: live include guard ${guard.name} has ambiguous source definitions"
+        }
+        val ambiguous = owners.flatMap { guard ->
+            liveNamesByGuard.getValue(guard).map { name -> name to guard.range }
+        }.groupBy({ it.first }, { it.second }).filterValues { ranges -> ranges.distinct().size > 1 }
+        if (ambiguous.isNotEmpty()) {
+            return "$sourceName: live include-guard dependency ownership is ambiguous: ${ambiguous.keys.sorted()}"
+        }
+        owners.distinctBy(SourceIncludeGuard::name).forEach { owner ->
+            val liveNames = liveNamesByGuard.getValue(owner)
+            val candidates = parsed.groups.filter { group ->
+                group.name == owner.name && group.definedNames.any(liveNames::contains)
+            }
+            if (candidates.size != 1) {
+                return "$sourceName: live include guard ${owner.name} is " +
+                    if (candidates.isEmpty()) "missing" else "ambiguous (${candidates.size} candidates)"
+            }
+            val candidate = candidates.single()
+            if (!candidate.definitionIsFirstChild) {
+                return "$sourceName: live include guard ${owner.name} is inactive because its definition " +
+                    "does not immediately follow the guard opener"
+            }
+            if (parsed.definitions[owner.name].orEmpty().any { definition ->
+                    !candidate.range.containsRange(definition)
+                }
+            ) {
+                return "$sourceName: live include guard ${owner.name} has an external definition that disables it"
+            }
+        }
+        return null
+    }
+
+    private fun sourceIncludeGuards(source: String, sourceName: String): List<SourceIncludeGuard> {
+        val parsed = parsedIncludeGuardSource(source, "$sourceName<source-include-guards>")
+        return parsed.groups.filter(ParsedIncludeGuardGroup::definitionIsFirstChild).map { group ->
+            val definition = group.guardDefinitions.first()
+            SourceIncludeGuard(
+                group.name,
+                source.substring(definition),
+                group.range,
+                group.definedNames,
+                group.guardDefinitions.size,
+            )
+        }
+    }
+
+    private fun parsedIncludeGuardSource(source: String, sourceName: String): ParsedIncludeGuardSource {
+        val directives = PreprocessorProtection.protect(source, sourceName).directives
+        val lineStarts = mutableListOf(0)
+        source.forEachIndexed { index, char ->
+            if (char == '\n' || char == '\r' && source.getOrNull(index + 1) != '\n') lineStarts += index + 1
+        }
+        fun directiveRange(directive: PreprocessorDirective): IntRange {
+            val start = lineStarts.getOrElse(directive.sourceLine - 1) { source.length }
+            val end = lineStarts.getOrElse(directive.endLine) { source.length }
+            return start until end
+        }
+        val ranges = directives.associate { directive -> directive.index to directiveRange(directive) }
+        val definitions = directives.filter { directive ->
+            directive.kind == PreprocessorDirectiveKind.DEFINE && directive.macroName != null
+        }.groupBy({ requireNotNull(it.macroName) }, { ranges.getValue(it.index) })
+        val groups = directives.mapNotNull { opener ->
+            if (opener.kind != PreprocessorDirectiveKind.IFNDEF || opener.macroName == null) return@mapNotNull null
+            val closing = directives.firstOrNull { directive ->
+                directive.index > opener.index && directive.kind == PreprocessorDirectiveKind.ENDIF &&
+                    directive.conditionalId == opener.conditionalId
+            } ?: return@mapNotNull null
+            val children = directives.filter { directive ->
+                directive.index in opener.index + 1 until closing.index &&
+                    directive.conditionalId == opener.conditionalId &&
+                    directive.conditionalDepth == opener.conditionalDepth + 1
+            }
+            val enclosed = directives.filter { directive ->
+                directive.index in opener.index + 1 until closing.index
+            }
+            val guardDefinitions = enclosed.filter { directive ->
+                directive.kind == PreprocessorDirectiveKind.DEFINE && directive.macroName == opener.macroName
+            }.map { directive -> ranges.getValue(directive.index) }
+            ParsedIncludeGuardGroup(
+                requireNotNull(opener.macroName),
+                ranges.getValue(opener.index).first..ranges.getValue(closing.index).last,
+                ranges.getValue(opener.index),
+                guardDefinitions,
+                emptySet(),
+                children.firstOrNull()?.let { directive ->
+                    directive.kind == PreprocessorDirectiveKind.DEFINE && directive.macroName == opener.macroName
+                } == true,
+            )
+        }
+        val ownedNames = groups.associateWith { linkedSetOf<String>() }
+        directives.filter { directive ->
+            directive.kind == PreprocessorDirectiveKind.DEFINE && directive.macroName != null
+        }.forEach { directive ->
+            val range = ranges.getValue(directive.index)
+            groups.filter { group -> group.range.containsRange(range) }
+                .minByOrNull { group -> group.range.last - group.range.first }
+                ?.let { owner -> ownedNames.getValue(owner) += requireNotNull(directive.macroName) }
+        }
+        return ParsedIncludeGuardSource(
+            groups.map { group -> group.copy(definedNames = ownedNames.getValue(group)) },
+            definitions,
+        )
     }
 
     internal fun finalDirectiveMacroDependencyIssue(
@@ -3929,6 +4157,28 @@ private data class SourceMacroDefinition(
     val exactText: String,
     val offset: Int,
     val depth: Int,
+)
+
+private data class SourceIncludeGuard(
+    val name: String,
+    val definitionText: String,
+    val range: IntRange,
+    val definedNames: Set<String>,
+    val definitionCount: Int,
+)
+
+private data class ParsedIncludeGuardGroup(
+    val name: String,
+    val range: IntRange,
+    val openerRange: IntRange,
+    val guardDefinitions: List<IntRange>,
+    val definedNames: Set<String>,
+    val definitionIsFirstChild: Boolean,
+)
+
+private data class ParsedIncludeGuardSource(
+    val groups: List<ParsedIncludeGuardGroup>,
+    val definitions: Map<String, List<IntRange>>,
 )
 
 internal data class StructuralEntity(
