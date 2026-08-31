@@ -88,10 +88,16 @@ class IrisShaderContractTest {
         assertFalse("const int shadowMapResolution" in compiler)
         val restored = assertIs<IrisContractRestoration.Restored>(
             plan.irisContracts.restore(
-                "#version 460 core\nconst int SM_IRIS_HOST_shadowMapResolution = 2048;\nvoid main() {}\n",
+                "#version 460 core\nconst int SM_IRIS_HOST_shadowMapResolution = 2048;\n" +
+                    "void main() { int value = SM_IRIS_HOST_shadowMapResolution; }\n",
             ),
-        ).source
+        ).source.let { restoredContracts ->
+            assertIs<IrisContractRestoration.Restored>(
+                plan.irisContracts.restoreSourceReferences(restoredContracts),
+            ).source
+        }
         assertContains(restored, declaration)
+        assertContains(restored, "int value = shadowMapResolution;")
         assertFalse("SM_IRIS_HOST_" in restored)
     }
 
@@ -278,6 +284,199 @@ class IrisShaderContractTest {
         )
         assertFalse("const float SHADOW_TEXEL_SIZE" in compiler)
         assertFalse("const vec2 SHADOW_MAP_SIZE" in compiler)
+    }
+
+    @Test
+    fun finalSourceReferencesRestoreConditionalHostsAndDerivedConstants() {
+        val source = dynamicShadowHostSource()
+        val plan = ShaderCompilerCopyPlanner.plan(source, "final-shadow-host.csh")
+        val emitted = """
+            #version 460 core
+            #define SM_DYNAMIC_SHADOW_TEXEL_SIZE (1.0 / float(SM_IRIS_HOST_shadowMapResolution))
+            #define SM_DYNAMIC_SHADOW_MAP_SIZE (vec2(float(SM_IRIS_HOST_shadowMapResolution), SM_DYNAMIC_SHADOW_TEXEL_SIZE))
+            #define SM_DYNAMIC_SHADOW_MAP_SIZE (vec2(float(SM_IRIS_HOST_shadowMapResolution), SM_DYNAMIC_SHADOW_TEXEL_SIZE))
+            const int SM_IRIS_HOST_shadowMapResolution = 2048;
+            float nestedValue()
+            {
+                return SM_DYNAMIC_SHADOW_MAP_SIZE.x + SM_DYNAMIC_SHADOW_TEXEL_SIZE;
+            }
+            void main()
+            {
+                float value = nestedValue() + float(SM_IRIS_HOST_shadowMapResolution);
+            }
+        """.trimIndent() + "\n"
+
+        val restoredContracts = assertIs<IrisContractRestoration.Restored>(
+            plan.irisContracts.restore(emitted),
+        ).source
+        val restored = assertIs<IrisContractRestoration.Restored>(
+            plan.irisContracts.restoreSourceReferences(restoredContracts),
+        ).source
+
+        assertContains(restored, "#if SETTING_SHADOW_MAP_RESOLUTION == 1024")
+        assertContains(restored, "const int shadowMapResolution = 1024;")
+        assertContains(restored, "const vec2 SHADOW_MAP_SIZE = vec2(float(shadowMapResolution), SHADOW_TEXEL_SIZE);")
+        assertContains(restored, "return SHADOW_MAP_SIZE.x + SHADOW_TEXEL_SIZE;")
+        assertContains(restored, "float value = nestedValue() + float(shadowMapResolution);")
+        assertFalse("SM_IRIS_HOST_" in restored)
+        assertFalse("SM_DYNAMIC_" in restored)
+    }
+
+    @Test
+    fun mutuallyExclusiveDynamicDeclarationsRestoreAsOneConditionalContract() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_SCALE 1 //[1 2]
+            #if SETTING_SCALE == 1
+            const int shadowMapResolution = 1024;
+            #else
+            const int shadowMapResolution = 2048;
+            #endif
+            const float OUTER_SCALE = float(shadowMapResolution);
+            #define MATERIAL_TRANSLUCENT
+            #ifdef MATERIAL_TRANSLUCENT
+            const float MATERIAL_SCALE = float(shadowMapResolution);
+            #else
+            const float MATERIAL_SCALE = 1.0 / float(shadowMapResolution);
+            #endif
+            layout(std430, binding = 0) buffer OutputBuffer { float outputValue; };
+            layout(local_size_x = 1) in;
+            void main() { outputValue = OUTER_SCALE + MATERIAL_SCALE; }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "conditional-dynamic-host.csh")
+        val dynamicName = assertNotNull(
+            "#define (SM_DYNAMIC_MATERIAL_SCALE_*)".toRegex()
+                .find(assertNotNull(plan.compilerSource)),
+        ).groupValues[1]
+        val outerName = assertNotNull(
+            "#define (SM_DYNAMIC_OUTER_SCALE_*)".toRegex()
+                .find(assertNotNull(plan.compilerSource)),
+        ).groupValues[1]
+        val restoredContracts = assertIs<IrisContractRestoration.Restored>(
+            plan.irisContracts.restore(
+                """
+                    #version 460 core
+                    #define $outerName (float(SM_IRIS_HOST_shadowMapResolution))
+                    #define $dynamicName (float(SM_IRIS_HOST_shadowMapResolution))
+                    const int SM_IRIS_HOST_shadowMapResolution = 1024;
+                    layout(std430, binding = 0) buffer OutputBuffer { float outputValue; };
+                    layout(local_size_x = 1) in;
+                    void main() { outputValue = $outerName + $dynamicName; }
+                """.trimIndent() + "\n",
+            ),
+        ).source
+        val restoration = plan.irisContracts.restoreSourceReferences(restoredContracts)
+        val restored = assertIs<IrisContractRestoration.Restored>(restoration, restoration.toString()).source
+
+        assertTrue(plan.structuralBlockers.isEmpty(), plan.structuralBlockers.toString())
+        assertContains(restored, "#ifdef MATERIAL_TRANSLUCENT")
+        assertFalse(";#ifdef MATERIAL_TRANSLUCENT" in restored)
+        assertContains(restored, "const float MATERIAL_SCALE = float(shadowMapResolution);")
+        assertContains(restored, "const float MATERIAL_SCALE = 1.0 / float(shadowMapResolution);")
+        assertContains(restored, "outputValue = OUTER_SCALE + MATERIAL_SCALE;")
+        assertTrue(restored.indexOf("const int shadowMapResolution") < restored.indexOf("const float OUTER_SCALE"))
+        assertTrue(restored.indexOf("const float OUTER_SCALE") < restored.indexOf("#ifdef MATERIAL_TRANSLUCENT"))
+        assertTrue(restored.indexOf("#ifdef MATERIAL_TRANSLUCENT") < restored.indexOf("void main()"))
+        assertFalse(dynamicName in restored)
+        assertFalse(outerName in restored)
+    }
+
+    @Test
+    fun conflictingFinalCompilerHostDefinitionsFailClosed() {
+        val plan = ShaderCompilerCopyPlanner.plan(dynamicShadowHostSource(), "conflicting-shadow-host.csh")
+        val emitted = """
+            #version 460 core
+            #define SM_DYNAMIC_SHADOW_MAP_SIZE vec2(1024.0)
+            #define SM_DYNAMIC_SHADOW_MAP_SIZE vec2(2048.0)
+            void main() { vec2 value = SM_DYNAMIC_SHADOW_MAP_SIZE; }
+        """.trimIndent() + "\n"
+
+        val result = assertIs<IrisContractRestoration.StructuralPreservation>(
+            plan.irisContracts.restoreSourceReferences(emitted),
+        )
+
+        assertContains(result.reason, "conflicting final definitions")
+        assertContains(result.reason, "SM_DYNAMIC_SHADOW_MAP_SIZE")
+    }
+
+    @Test
+    fun unknownCompilerHostReferencesFailBeforeValidationRelowering() {
+        val plan = ShaderCompilerCopyPlanner.plan(dynamicShadowHostSource(), "missing-shadow-host.csh")
+        val emitted = """
+            #version 460 core
+            void main() { int value = SM_IRIS_HOST_missingMapping; }
+        """.trimIndent() + "\n"
+
+        val result = assertIs<IrisContractRestoration.StructuralPreservation>(
+            plan.irisContracts.restoreSourceReferences(emitted),
+        )
+
+        assertContains(result.reason, "compiler-only Iris host references remain")
+        assertContains(result.reason, "SM_IRIS_HOST_missingMapping")
+        assertNotNull(plan.irisContracts.finalSourceReferenceIssue(emitted))
+    }
+
+    @Test
+    fun sourceOwnedPrivatePrefixNamesDoNotCollideWithCompilerAliases() {
+        val source = """
+            #version 460 compatibility
+            const int SM_IRIS_HOST_shadowMapResolution = 17;
+            const int shadowMapResolution = 2048;
+            layout(local_size_x = 1) in;
+            void main() {
+                int value = SM_IRIS_HOST_shadowMapResolution + shadowMapResolution;
+            }
+        """.trimIndent()
+        val plan = ShaderCompilerCopyPlanner.plan(source, "host-name-collision.csh")
+        val compiler = assertNotNull(plan.compilerSource)
+
+        assertContains(compiler, "const int SM_IRIS_HOST_shadowMapResolution_ = 2048;")
+        val restored = assertIs<IrisContractRestoration.Restored>(
+            plan.irisContracts.restoreSourceReferences(
+                """
+                    #version 460 core
+                    const int SM_IRIS_HOST_shadowMapResolution = 17;
+                    const int SM_IRIS_HOST_shadowMapResolution_ = 2048;
+                    void main() {
+                        int value = SM_IRIS_HOST_shadowMapResolution + SM_IRIS_HOST_shadowMapResolution_;
+                    }
+                """.trimIndent() + "\n",
+            ),
+        ).source
+
+        assertContains(restored, "const int SM_IRIS_HOST_shadowMapResolution = 17;")
+        assertContains(restored, "SM_IRIS_HOST_shadowMapResolution + shadowMapResolution")
+        assertFalse("SM_IRIS_HOST_shadowMapResolution_" in restored)
+        assertNull(plan.irisContracts.finalSourceReferenceIssue(restored))
+    }
+
+    @Test
+    fun optimizerPublishesOnlySourceFacingHostReferences() = withWorkspace { workspace ->
+        val source = dynamicShadowHostSource().replace(
+            "layout(local_size_x = 1) in;\n" +
+                "void main() { float value = SHADOW_MAP_SIZE.x + SHADOW_TEXEL_SIZE; }",
+            "layout(std430, binding = 0) buffer OutputBuffer { float outputValue; };\n" +
+                "layout(local_size_x = 1) in;\n" +
+                "void main() { outputValue = SHADOW_MAP_SIZE.x + SHADOW_TEXEL_SIZE; }",
+        )
+        val plan = ShaderCompilerCopyPlanner.plan(source, "published-shadow-host.csh")
+        val module = ShaderCompilerCopyMaterializer(workspace.resolve("compiler-copy")).materialize(
+            "published-shadow-host.csh",
+            ShaderStage.COMPUTE,
+            plan,
+            TextureAccessProbe(source, emptyList(), TextureAccess()),
+        )
+
+        val result = SpirvOptimizer(workspace.resolve("optimizer")).optimize(
+            SpirvOptimizationRequest("published-shadow-host.csh", ShaderStage.COMPUTE, source, listOf(module)),
+        )
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode)
+        assertContains(result.source, "const int shadowMapResolution = 1024;")
+        assertContains(result.source, "float(shadowMapResolution)")
+        assertFalse("SM_IRIS_HOST_" in result.source)
+        assertFalse("SM_DYNAMIC_" in result.source)
     }
 
     @Test
@@ -761,6 +960,20 @@ class IrisShaderContractTest {
         assertContains(source.substring(mainAnchors.single().range), "#ifdef SETTING_BRANCH")
         assertContains(source.substring(mainAnchors.single().range), "#else")
     }
+
+    private fun dynamicShadowHostSource(): String = """
+        #version 460 compatibility
+        #define SETTING_SHADOW_MAP_RESOLUTION 2048 //[1024 2048]
+        #if SETTING_SHADOW_MAP_RESOLUTION == 1024
+        const int shadowMapResolution = 1024;
+        #else
+        const int shadowMapResolution = 2048;
+        #endif
+        const float SHADOW_TEXEL_SIZE = 1.0 / float(shadowMapResolution);
+        const vec2 SHADOW_MAP_SIZE = vec2(float(shadowMapResolution), SHADOW_TEXEL_SIZE);
+        layout(local_size_x = 1) in;
+        void main() { float value = SHADOW_MAP_SIZE.x + SHADOW_TEXEL_SIZE; }
+    """.trimIndent()
 
     private fun epipolarSource(): String = """
         #version 460 compatibility

@@ -444,7 +444,13 @@ internal object SpirvFinalEmitter {
                         tokenPasteComplete.dependencyIdentifiers.sorted(),
                 )
             }
-            return optimizedOrPreserved(request, restoreProbeResources(tokenPasteComplete.source, modules))
+            val sourceFacing = when (
+                val references = modules.single().irisContracts.restoreSourceReferences(tokenPasteComplete.source)
+            ) {
+                is IrisContractRestoration.Restored -> references.source
+                is IrisContractRestoration.StructuralPreservation -> return preserved(request, references.reason)
+            }
+            return optimizedOrPreserved(request, restoreProbeResources(sourceFacing, modules))
         }
         structuralPlan.restorationPlan.issue?.let { return preserved(request, it) }
         if (modules.any { it.structuralSignature == null }) {
@@ -632,12 +638,16 @@ internal object SpirvFinalEmitter {
             is ShaderStructuralRestoration.Restored -> tokenPaste.source
             is ShaderStructuralRestoration.Preserved -> return preserved(request, tokenPaste.reason)
         }
+        finalSource = when (val references = restorationContracts.restoreSourceReferences(finalSource)) {
+            is IrisContractRestoration.Restored -> references.source
+            is IrisContractRestoration.StructuralPreservation -> return preserved(request, references.reason)
+        }
         finalSource = when (
             val ordered = restoreDirectiveMacroDependencies(
                 request.sourceName,
                 request.source,
                 finalSource,
-                restorationContracts.contracts,
+                restorationContracts.sourceFacingContracts,
                 structuralPlan.restorationPlan,
             )
         ) {

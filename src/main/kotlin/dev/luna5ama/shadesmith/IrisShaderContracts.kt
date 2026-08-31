@@ -87,16 +87,21 @@ internal data class IrisShaderContractPlan(
     val derivedMacros: List<IrisDerivedMacroContract>,
     val localSize: LocalSizeSpecializationContract?,
     val structuralIssues: List<IrisStructuralIssue>,
+    private val dynamicSourceContracts: List<IrisSourceContractSlice>,
     private val compilerPrelude: String,
     private val compilerSettings: List<ShaderSetting>,
     private val compilerHostNames: Map<String, String>,
     private val compilerDynamicNames: Map<String, String>,
+    private val originalIdentifiers: Set<String>,
 ) {
     val localSizeSpecializationIds: Set<Int>
         get() = localSize?.specializationIds?.values.orEmpty().toSet()
 
     val structuralReason: String?
         get() = structuralIssues.takeIf { it.isNotEmpty() }?.joinToString("; ") { it.reason }
+
+    val sourceFacingContracts: List<IrisSourceContractSlice>
+        get() = (contracts + dynamicSourceContracts).distinctBy(IrisSourceContractSlice::sourceRange)
 
     fun withRestorationContracts(restorationContracts: List<IrisSourceContractSlice>): IrisShaderContractPlan {
         return copy(contracts = restorationContracts)
@@ -180,6 +185,126 @@ internal data class IrisShaderContractPlan(
         return replaceCodeIdentifiers(source, replacements)
     }
 
+    fun restoreSourceReferences(source: String): IrisContractRestoration {
+        val pairs = buildList {
+            compilerHostNames.forEach { (sourceName, compilerName) -> add(compilerName to sourceName) }
+            derivedMacros.forEach { macro -> add(macro.compilerName to macro.sourceName) }
+            compilerDynamicNames.forEach { (sourceName, compilerName) -> add(compilerName to sourceName) }
+        }
+        val conflicts = pairs.groupBy { it.first }.filterValues { mappings ->
+            mappings.map { it.second }.distinct().size > 1
+        }
+        if (conflicts.isNotEmpty()) {
+            return IrisContractRestoration.StructuralPreservation(
+                "$sourceName: compiler host references have ambiguous source ownership: " +
+                    conflicts.mapValues { (_, mappings) -> mappings.map { it.second }.distinct().sorted() },
+            )
+        }
+        val liveCompilerNames = pairs.map { it.first }.distinct()
+            .filterTo(linkedSetOf()) { name -> hasLiveCompilerReference(source, name) }
+        val liveDynamicSourceNames = compilerDynamicNames.filterValues(liveCompilerNames::contains).keys
+        val activeDynamicSourceContracts = dynamicSourceContracts.filter { contract ->
+            identifiers(contract.exactText).any(liveDynamicSourceNames::contains)
+        }
+        val restoredContractRanges = contracts.associateWith { contract ->
+            exactOccurrences(source, contract.exactText)
+        }
+        val presentContracts = restoredContractRanges.filterValues(List<IntRange>::isNotEmpty)
+        if (activeDynamicSourceContracts.isNotEmpty() && presentContracts.isNotEmpty()) {
+            presentContracts.values.firstOrNull { it.size != 1 }?.let { ambiguous ->
+                return IrisContractRestoration.StructuralPreservation(
+                    "$sourceName: final source has ambiguous restored Iris contract ownership (${ambiguous.size} matches)",
+                )
+            }
+        }
+        val insertionOffsets = activeDynamicSourceContracts.associateWith { dynamic ->
+            val before = presentContracts.keys
+                .filter { contract -> contract.sourceRange.last < dynamic.sourceRange.first }
+                .maxByOrNull { contract -> contract.sourceRange.last }
+            val after = presentContracts.keys
+                .filter { contract -> contract.sourceRange.first > dynamic.sourceRange.last }
+                .minByOrNull { contract -> contract.sourceRange.first }
+            when {
+                before != null -> requireNotNull(presentContracts.getValue(before).singleOrNull()).last + 1
+                after != null -> requireNotNull(presentContracts.getValue(after).singleOrNull()).first
+                else -> null
+            }
+        }
+        val sourceWithDynamicContracts = when (
+            val restored = restoreContractSlices(
+                source,
+                activeDynamicSourceContracts,
+                insertionOffsets,
+                allowAlternateAnchor = true,
+            )
+        ) {
+            is IrisContractRestoration.Restored -> restored.source
+            is IrisContractRestoration.StructuralPreservation -> return IrisContractRestoration.StructuralPreservation(
+                "$sourceName: dynamic source reference restoration failed for ${liveDynamicSourceNames.sorted()} " +
+                    "at lines ${activeDynamicSourceContracts.map(IrisSourceContractSlice::sourceLine).sorted()}: " +
+                    restored.reason,
+            )
+        }
+        val replacements = pairs.toMap()
+        if (replacements.isEmpty()) {
+            finalSourceReferenceIssue(sourceWithDynamicContracts)?.let {
+                return IrisContractRestoration.StructuralPreservation(it)
+            }
+            return IrisContractRestoration.Restored(sourceWithDynamicContracts)
+        }
+
+        val removals = mutableListOf<IntRange>()
+        replacements.keys.sorted().forEach { compilerName ->
+            val declarations = compilerHostDeclaration(compilerName).findAll(sourceWithDynamicContracts).toList()
+            if (
+                declarations.map { it.value.trim() }.distinct().size > 1 &&
+                compilerName in liveCompilerNames && !areMutuallyExclusiveDefinitions(sourceWithDynamicContracts, declarations)
+            ) {
+                return IrisContractRestoration.StructuralPreservation(
+                    "$sourceName: compiler host value $compilerName has conflicting final declarations",
+                )
+            }
+            removals += declarations.map(MatchResult::range)
+            val macros = compilerMacroDefinition(compilerName).findAll(sourceWithDynamicContracts).toList()
+            if (
+                macros.map { it.value.trim() }.distinct().size > 1 &&
+                compilerName in liveCompilerNames && !areMutuallyExclusiveDefinitions(sourceWithDynamicContracts, macros)
+            ) {
+                return IrisContractRestoration.StructuralPreservation(
+                    "$sourceName: compiler dynamic value $compilerName has conflicting final definitions",
+                )
+            }
+            removals += macros.map(MatchResult::range)
+        }
+        val stripped = removeContractRanges(sourceWithDynamicContracts, removals.distinct())
+        val restored = replaceSourceIdentifiers(stripped, replacements)
+        finalSourceReferenceIssue(restored)?.let {
+            return IrisContractRestoration.StructuralPreservation(it)
+        }
+        return IrisContractRestoration.Restored(restored.trimEnd() + "\n")
+    }
+
+    fun finalSourceReferenceIssue(source: String): String? {
+        val lexical = ContractLexicalMap(source)
+        val compilerNames = buildSet {
+            addAll(compilerHostNames.values)
+            addAll(derivedMacros.map(IrisDerivedMacroContract::compilerName))
+            addAll(compilerDynamicNames.values)
+        }
+        val leaked = IDENTIFIER.findAll(source).filter { match ->
+            val name = match.value
+            val compilerPrefixed = name.startsWith(COMPILER_HOST_PREFIX) ||
+                name.startsWith(COMPILER_DERIVED_PREFIX) || name.startsWith(COMPILER_DYNAMIC_PREFIX)
+            lexical.isCode(match.range.first) && (
+                name in compilerNames ||
+                    name !in originalIdentifiers && compilerPrefixed
+                )
+        }.map(MatchResult::value).distinct().sorted().toList()
+        return leaked.takeIf { it.isNotEmpty() }?.let { names ->
+            "$sourceName: compiler-only Iris host references remain in final source: $names"
+        }
+    }
+
     fun sourceDynamicName(compilerName: String): String? =
         compilerDynamicNames.entries.singleOrNull { it.value == compilerName }?.key
 
@@ -235,28 +360,40 @@ internal data class IrisShaderContractPlan(
             )
         result = result.replaceRange(version.range, originalVersion)
 
+        return restoreContractSlices(result, contracts)
+    }
+
+    private fun restoreContractSlices(
+        source: String,
+        slices: List<IrisSourceContractSlice>,
+        insertionOffsets: Map<IrisSourceContractSlice, Int?> = emptyMap(),
+        allowAlternateAnchor: Boolean = false,
+    ): IrisContractRestoration {
+        var result = source
         val anchors = findStableAnchors(result)
         data class PendingInsertion(val offset: Int, val contract: IrisSourceContractSlice)
         val pending = mutableListOf<PendingInsertion>()
-        contracts.forEach { contract ->
-            val before = contract.beforeAnchor?.let { anchor ->
-                val matches = anchors.filter { it.anchor == anchor }
-                if (matches.size != 1) {
+        slices.forEach { contract ->
+            insertionOffsets[contract]?.let { offset ->
+                pending += PendingInsertion(offset, contract)
+                return@forEach
+            }
+            val beforeMatches = contract.beforeAnchor?.let { anchor -> anchors.filter { it.anchor == anchor } }.orEmpty()
+            val afterMatches = contract.afterAnchor?.let { anchor -> anchors.filter { it.anchor == anchor } }.orEmpty()
+            if (!allowAlternateAnchor) {
+                contract.beforeAnchor?.takeIf { beforeMatches.size != 1 }?.let { anchor ->
                     return IrisContractRestoration.StructuralPreservation(
-                        anchorFailure(contract, anchor, matches.size),
+                        anchorFailure(contract, anchor, beforeMatches.size),
                     )
                 }
-                matches.single()
-            }
-            val after = contract.afterAnchor?.let { anchor ->
-                val matches = anchors.filter { it.anchor == anchor }
-                if (matches.size != 1) {
+                contract.afterAnchor?.takeIf { afterMatches.size != 1 }?.let { anchor ->
                     return IrisContractRestoration.StructuralPreservation(
-                        anchorFailure(contract, anchor, matches.size),
+                        anchorFailure(contract, anchor, afterMatches.size),
                     )
                 }
-                matches.single()
             }
+            val before = beforeMatches.singleOrNull()
+            val after = afterMatches.singleOrNull()
             if (before == null && after == null) {
                 return IrisContractRestoration.StructuralPreservation(
                     "$sourceName:${contract.sourceLine}: Iris ${contract.kind} contract has no stable restoration anchor",
@@ -267,15 +404,35 @@ internal data class IrisShaderContractPlan(
                     "$sourceName:${contract.sourceLine}: Iris ${contract.kind} anchors changed relative order",
                 )
             }
-            val offset = when (contract.placement) {
-                IrisAnchorPlacement.AFTER_BEFORE -> requireNotNull(before).range.last + 1
-                IrisAnchorPlacement.BEFORE_AFTER -> requireNotNull(after).range.first
+            val offset = when {
+                contract.placement == IrisAnchorPlacement.AFTER_BEFORE && before != null -> before.range.last + 1
+                contract.placement == IrisAnchorPlacement.BEFORE_AFTER && after != null -> after.range.first
+                allowAlternateAnchor && before != null -> before.range.last + 1
+                allowAlternateAnchor && after != null -> after.range.first
+                contract.placement == IrisAnchorPlacement.AFTER_BEFORE -> {
+                    val anchor = requireNotNull(contract.beforeAnchor)
+                    return IrisContractRestoration.StructuralPreservation(
+                        anchorFailure(contract, anchor, beforeMatches.size),
+                    )
+                }
+                else -> {
+                    val anchor = requireNotNull(contract.afterAnchor)
+                    return IrisContractRestoration.StructuralPreservation(
+                        anchorFailure(contract, anchor, afterMatches.size),
+                    )
+                }
             }
             pending += PendingInsertion(offset, contract)
         }
 
         pending.groupBy { it.offset }.entries.sortedByDescending { it.key }.forEach { (offset, insertions) ->
-            val exact = insertions.sortedBy { it.contract.ordinal }.joinToString("") { it.contract.exactText }
+            val exact = buildString {
+                insertions.sortedBy { it.contract.sourceRange.first }.forEach { insertion ->
+                    val text = insertion.contract.exactText
+                    if (isNotEmpty() && last() !in "\r\n" && text.firstOrNull() !in listOf('\r', '\n')) append('\n')
+                    append(text)
+                }
+            }
             val prefix = if (offset > 0 && result[offset - 1] !in "\r\n" && exact.firstOrNull() !in listOf('\r', '\n')) "\n" else ""
             val suffix = if (offset < result.length && result[offset] !in "\r\n" && exact.lastOrNull() !in listOf('\r', '\n')) "\n" else ""
             result = result.substring(0, offset) + prefix + exact + suffix + result.substring(offset)
@@ -689,9 +846,73 @@ internal object IrisShaderContractExtractor {
         compilerSource = dynamicTopLevel.source
         compilerSource = insertAfterVersion(compilerSource, compilerPrelude)
 
+        val sourceDynamicNames = lowerDynamicTopLevelConstants(
+            source,
+            settings.mapTo(linkedSetOf()) { it.name } +
+                hostDeclarations.map { it.name } +
+                derivedMacros.map { it.sourceName } +
+                localAnalysis?.axisMacros.orEmpty().keys +
+                "gl_WorkGroupSize",
+        ).aliases.keys
+        val dynamicContractNames = (dynamicTopLevel.aliases.keys + sourceDynamicNames).toSortedSet()
+        val sourceTopLevelConstants = topLevelConstants(source).groupBy(DynamicTopLevelConstant::name)
+        val dynamicContractIssues = mutableListOf<String>()
+        val dynamicContractDrafts = mutableListOf<ContractDraft>()
+        dynamicContractNames.forEach { name ->
+            val declarations = sourceTopLevelConstants[name].orEmpty()
+            if (declarations.isEmpty()) {
+                dynamicContractIssues += "$sourceName: dynamic top-level value $name has no source declaration"
+                return@forEach
+            }
+            if (declarations.all { declaration ->
+                    dynamicContractDrafts.any { draft -> draft.range.containsRange(declaration.range) }
+                }
+            ) {
+                return@forEach
+            }
+            if (declarations.size == 1) {
+                val declaration = declarations.single()
+                dynamicContractDrafts += ContractDraft(
+                    IrisSourceContractKind.HOST_DECLARATION,
+                    declaration.range,
+                    source.substring(declaration.range),
+                )
+                return@forEach
+            }
+            val owner = conditionalGroups.asSequence()
+                .filter { group -> declarations.all { declaration -> declaration.range.first in group.range } }
+                .filter { group ->
+                    val arms = declarations.map { declaration ->
+                        group.delimiters.indexOfLast { delimiter -> delimiter.range.last < declaration.range.first }
+                    }
+                    arms.none { it < 0 } && arms.distinct().size == declarations.size
+                }
+                .maxByOrNull(ContractConditionalGroup::depth)
+            if (owner == null) {
+                dynamicContractIssues +=
+                    "$sourceName: dynamic top-level value $name has ${declarations.size} ambiguous source declarations"
+                return@forEach
+            }
+            val ownedDeclarations = dynamicContractNames.flatMap { dynamicName ->
+                sourceTopLevelConstants[dynamicName].orEmpty()
+            }.filter { declaration -> declaration.range.first in owner.range }
+            dynamicContractDrafts.removeAll { draft -> owner.range.containsRange(draft.range) }
+            dynamicContractDrafts += ContractDraft(
+                IrisSourceContractKind.CONDITIONAL_CONTRACT,
+                owner.range,
+                synthesizeConditionalContract(
+                    source,
+                    owner,
+                    ownedDeclarations.map { declaration ->
+                        ContractAtom(IrisSourceContractKind.HOST_DECLARATION, declaration.range, mask = true)
+                    },
+                    conditionalGroups,
+                ),
+            )
+        }
         val anchors = findStableAnchors(source)
-        val orderedDrafts = contractDrafts.sortedBy { it.range.first }
-        val exactDrafts = buildList<ContractDraft> {
+        fun mergeDrafts(drafts: List<ContractDraft>) = buildList<ContractDraft> {
+            val orderedDrafts = drafts.sortedBy { it.range.first }
             orderedDrafts.forEach { draft ->
                 val previous = lastOrNull()
                 val gap = previous?.let { source.substring(it.range.last + 1, draft.range.first) }.orEmpty()
@@ -716,33 +937,38 @@ internal object IrisShaderContractExtractor {
                 }
             }
         }
-        val contracts = exactDrafts.mapIndexed { ordinal, draft ->
-            val nearestBefore = anchors.filter { it.range.last < draft.range.first }.maxByOrNull { it.range.last }
-            val nearestAfter = anchors.filter { it.range.first > draft.range.last }.minByOrNull { it.range.first }
-            val placement = when {
-                nearestAfter == null -> IrisAnchorPlacement.AFTER_BEFORE
-                nearestBefore == null -> IrisAnchorPlacement.BEFORE_AFTER
-                draft.kind == IrisSourceContractKind.EXTENSION -> IrisAnchorPlacement.AFTER_BEFORE
-                draft.range.first - nearestBefore.range.last <= nearestAfter.range.first - draft.range.last ->
-                    IrisAnchorPlacement.AFTER_BEFORE
-                else -> IrisAnchorPlacement.BEFORE_AFTER
+        fun buildSlices(drafts: List<ContractDraft>): List<IrisSourceContractSlice> {
+            return mergeDrafts(drafts).mapIndexed { ordinal, draft ->
+                val nearestBefore = anchors.filter { it.range.last < draft.range.first }.maxByOrNull { it.range.last }
+                val nearestAfter = anchors.filter { it.range.first > draft.range.last }.minByOrNull { it.range.first }
+                val placement = when {
+                    nearestAfter == null -> IrisAnchorPlacement.AFTER_BEFORE
+                    nearestBefore == null -> IrisAnchorPlacement.BEFORE_AFTER
+                    draft.kind == IrisSourceContractKind.EXTENSION -> IrisAnchorPlacement.AFTER_BEFORE
+                    draft.range.first - nearestBefore.range.last <= nearestAfter.range.first - draft.range.last ->
+                        IrisAnchorPlacement.AFTER_BEFORE
+                    else -> IrisAnchorPlacement.BEFORE_AFTER
+                }
+                IrisSourceContractSlice(
+                    ordinal,
+                    draft.kind,
+                    draft.exactText,
+                    lines.lineAt(draft.range.first),
+                    draft.range,
+                    nearestBefore?.anchor,
+                    nearestAfter?.anchor,
+                    placement,
+                )
             }
-            IrisSourceContractSlice(
-                ordinal,
-                draft.kind,
-                draft.exactText,
-                lines.lineAt(draft.range.first),
-                draft.range,
-                nearestBefore?.anchor,
-                nearestAfter?.anchor,
-                placement,
-            )
         }
+        val contracts = buildSlices(contractDrafts)
+        val dynamicSourceContracts = buildSlices(dynamicContractDrafts)
         val structuralIssues = buildList {
             extractionErrors.forEach { add(IrisStructuralIssue(IrisStructuralIssueKind.UNSUPPORTED, it)) }
             localAnalysis?.error?.let { add(IrisStructuralIssue(IrisStructuralIssueKind.UNSUPPORTED, it)) }
             derivedAnalysis.error?.let { add(IrisStructuralIssue(IrisStructuralIssueKind.UNSUPPORTED, it)) }
             hostCompilerAnalysis.error?.let { add(IrisStructuralIssue(IrisStructuralIssueKind.UNSUPPORTED, it)) }
+            dynamicContractIssues.forEach { add(IrisStructuralIssue(IrisStructuralIssueKind.UNSUPPORTED, it)) }
             if (localAnalysis?.contract?.fallbackRequired == true) add(
                 IrisStructuralIssue(
                     IrisStructuralIssueKind.LOCAL_SIZE_FALLBACK,
@@ -762,10 +988,12 @@ internal object IrisShaderContractExtractor {
             derivedMacros,
             localAnalysis?.contract,
             structuralIssues,
+            dynamicSourceContracts,
             compilerPrelude,
             settings,
             hostCompilerNames,
             dynamicTopLevel.aliases,
+            identifiers(source).toSet(),
         )
     }
 
@@ -1669,21 +1897,28 @@ private fun replaceCodeIdentifiers(source: String, replacements: Map<String, Str
     }
 }
 
+private fun replaceSourceIdentifiers(source: String, replacements: Map<String, String>): String {
+    if (replacements.isEmpty()) return source
+    val lexical = ContractLexicalMap(source)
+    val matches = IDENTIFIER.findAll(source).filter { match ->
+        match.value in replacements && lexical.isCode(match.range.first)
+    }.toList()
+    if (matches.isEmpty()) return source
+    return buildString(source.length) {
+        var cursor = 0
+        matches.forEach { match ->
+            append(source, cursor, match.range.first)
+            append(replacements.getValue(match.value))
+            cursor = match.range.last + 1
+        }
+        append(source, cursor, source.length)
+    }
+}
+
 private fun lowerDynamicTopLevelConstants(source: String, initialDynamicNames: Set<String>): DynamicTopLevelLowering {
     if (initialDynamicNames.isEmpty()) return DynamicTopLevelLowering(source)
     val lexical = ContractLexicalMap(source)
-    val constants = DYNAMIC_TOP_LEVEL_CONST_START.findAll(source).mapNotNull { match ->
-        if (!lexical.isTopLevelCode(match.range.first)) return@mapNotNull null
-        val semicolon = lexical.findCodeCharacter(';', match.range.last + 1)
-            ?.takeIf(lexical::isTopLevelCode)
-            ?: return@mapNotNull null
-        DynamicTopLevelConstant(
-            match.range.first..semicolon,
-            match.groupValues[2],
-            source.substring(match.range.last + 1, semicolon).trim(),
-            match.groupValues[1],
-        )
-    }.toList()
+    val constants = topLevelConstants(source, lexical)
     if (constants.isEmpty()) return DynamicTopLevelLowering(source)
 
     val dynamicNames = initialDynamicNames.toMutableSet()
@@ -1737,6 +1972,24 @@ private fun lowerDynamicTopLevelConstants(source: String, initialDynamicNames: S
         },
         aliases,
     )
+}
+
+private fun topLevelConstants(
+    source: String,
+    lexical: ContractLexicalMap = ContractLexicalMap(source),
+): List<DynamicTopLevelConstant> {
+    return DYNAMIC_TOP_LEVEL_CONST_START.findAll(source).mapNotNull { match ->
+        if (!lexical.isTopLevelCode(match.range.first)) return@mapNotNull null
+        val semicolon = lexical.findCodeCharacter(';', match.range.last + 1)
+            ?.takeIf(lexical::isTopLevelCode)
+            ?: return@mapNotNull null
+        DynamicTopLevelConstant(
+            match.range.first..semicolon,
+            match.groupValues[2],
+            source.substring(match.range.last + 1, semicolon).trim(),
+            match.groupValues[1],
+        )
+    }.toList()
 }
 
 private fun localShadowRanges(
@@ -1909,6 +2162,7 @@ private fun insertAfterVersion(source: String, insertion: String): String {
 }
 
 private fun normalizeCompilerText(source: String): String = source.replace("\r\n", "\n").replace('\r', '\n').trimEnd() + "\n"
+private fun IntRange.containsRange(other: IntRange): Boolean = first <= other.first && last >= other.last
 private fun identifiers(source: String): List<String> = IDENTIFIER.findAll(stripComments(source)).map { it.value }.toList()
 private fun identifierRegex(name: String): Regex = "(?<![A-Za-z0-9_])${Regex.escape(name)}(?![A-Za-z0-9_])".toRegex()
 private fun stripComments(source: String): String = BLOCK_COMMENT.replace(LINE_COMMENT.replace(source, ""), "")
@@ -1916,6 +2170,10 @@ private fun stripComments(source: String): String = BLOCK_COMMENT.replace(LINE_C
 private fun isHostDeclarationName(name: String): Boolean {
     return name in IRIS_HOST_NAMES || IRIS_HOST_NAME_PATTERNS.any { it.matches(name) }
 }
+
+private const val COMPILER_HOST_PREFIX = "SM_IRIS_HOST_"
+private const val COMPILER_DERIVED_PREFIX = "SM_DERIVED_"
+private const val COMPILER_DYNAMIC_PREFIX = "SM_DYNAMIC_"
 
 private fun uniqueHostCompilerName(source: String, name: String): String {
     var candidate = "SM_IRIS_HOST_$name"
@@ -1928,6 +2186,63 @@ private fun compilerHostDeclaration(name: String): Regex {
         "(?m)^[\\t ]*const[\\t ]+(?:int|float|bool|vec[234]|ivec3)[\\t ]+" +
             Regex.escape(name) + "\\b[^;\\r\\n]*;[^\\r\\n]*(?:\\r\\n|\\n|\\r|$)"
         ).toRegex()
+}
+
+private fun compilerMacroDefinition(name: String): Regex {
+    return Regex(
+        "(?m)^[\\t ]*#define[\\t ]+${Regex.escape(name)}\\b[^\\r\\n]*" +
+            "(?:\\r\\n|\\n|\\r|$)",
+    )
+}
+
+private fun hasLiveCompilerReference(source: String, name: String): Boolean {
+    val definitions = compilerHostDeclaration(name).findAll(source).map(MatchResult::range).toList() +
+        compilerMacroDefinition(name).findAll(source).map(MatchResult::range).toList()
+    val lexical = ContractLexicalMap(source)
+    return identifierRegex(name).findAll(source).any { match ->
+        lexical.isCode(match.range.first) && definitions.none { range -> match.range.first in range }
+    }
+}
+
+private fun areMutuallyExclusiveDefinitions(source: String, definitions: List<MatchResult>): Boolean {
+    if (definitions.size < 2) return false
+    val lines = ContractLineMap(source)
+    val directives = PreprocessorProtection.protect(source, "<compiler-host-definitions>").directives.map { directive ->
+        ContractDirective(directive, lines.directiveRange(directive))
+    }
+    return buildConditionalGroups(directives).any { group ->
+        if (definitions.any { definition -> definition.range.first !in group.range }) return@any false
+        val arms = definitions.map { definition ->
+            group.delimiters.indexOfLast { delimiter -> delimiter.range.last < definition.range.first }
+        }
+        arms.none { it < 0 } && arms.distinct().size == definitions.size
+    }
+}
+
+private fun exactOccurrences(source: String, text: String): List<IntRange> {
+    if (text.isEmpty()) return emptyList()
+    return buildList {
+        var offset = 0
+        while (offset <= source.length - text.length) {
+            val match = source.indexOf(text, offset)
+            if (match < 0) break
+            add(match until match + text.length)
+            offset = match + text.length
+        }
+    }
+}
+
+private fun removeContractRanges(source: String, ranges: List<IntRange>): String {
+    if (ranges.isEmpty()) return source
+    return buildString(source.length - ranges.sumOf(IntRange::count)) {
+        var cursor = 0
+        ranges.sortedBy(IntRange::first).forEach { range ->
+            require(range.first >= cursor && range.last < source.length) { "contract removal ranges overlap" }
+            append(source, cursor, range.first)
+            cursor = range.last + 1
+        }
+        append(source, cursor, source.length)
+    }
 }
 
 private fun compilerSettingDeclaration(name: String): Regex {
