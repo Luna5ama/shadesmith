@@ -290,6 +290,17 @@ internal class ShaderPipeline(
                 ),
             )
         }
+        if (sourceName in ioContext.config.preserveShaders) {
+            return ShaderPreparation.Completed(
+                file,
+                entryPoint.stage,
+                preservedStructural(
+                    file,
+                    entryPoint.stage,
+                    "$sourceName: explicitly preserved by shadesmith.json preserveShaders",
+                ),
+            )
+        }
         val activation = ioContext.programActivations.contractFor(file.path.nameWithoutExtension)
         val planContract = buildString {
             appendLine(ROOT_DERIVED_PLAN_CONTRACT)
