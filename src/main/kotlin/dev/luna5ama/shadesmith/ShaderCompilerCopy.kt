@@ -2639,7 +2639,20 @@ internal object ShaderCompilerCopyPlanner {
     }
 
     private fun localDeclarations(source: String): List<String> {
-        return LOCAL_DECLARATION.findAll(maskCommentsAndStrings(source)).map { it.groupValues[1] }.toList()
+        val masked = maskCommentsAndStrings(source)
+        var braceDepth = 0
+        val braceDepths = IntArray(masked.length + 1)
+        masked.forEachIndexed { index, character ->
+            braceDepths[index] = braceDepth
+            when (character) {
+                '{' -> braceDepth++
+                '}' -> braceDepth--
+            }
+        }
+        braceDepths[masked.length] = braceDepth
+        return LOCAL_DECLARATION.findAll(masked).mapNotNull { match ->
+            match.groupValues[1].takeIf { braceDepths[match.groups[1]!!.range.first] == 0 }
+        }.toList()
     }
 
     private fun inferExpressionType(source: String): String? {

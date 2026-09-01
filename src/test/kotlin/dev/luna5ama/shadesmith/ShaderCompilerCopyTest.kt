@@ -17,6 +17,52 @@ import kotlin.test.assertTrue
 
 class ShaderCompilerCopyTest {
     @Test
+    fun lowersNestedRadianceCacheDebugModeIntoControlFlow() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_RC_ENABLE
+            #define SETTING_DEBUG_RC_MODE 0 //[0 1 2 3 4 5 6 7 8 9 10]
+            void debugOutput(inout vec4 outputColor) {
+            #ifdef SETTING_RC_ENABLE
+            #if SETTING_DEBUG_RC_MODE
+                if (true) {
+                    float viewZ = 1.0;
+                    vec4 gData = vec4(1.0);
+                    vec4 material = vec4(1.0);
+                    bool rcHit = viewZ > 0.0;
+                    vec3 radiance = gData.rgb + material.rgb;
+                #if SETTING_DEBUG_RC_MODE == 1
+                outputColor.rgb = vec3(0.25);
+                #elif SETTING_DEBUG_RC_MODE == 7
+                outputColor.rgb = rcHit ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+                #elif SETTING_DEBUG_RC_MODE == 8
+                outputColor.rgb = rcHit ? radiance : vec3(0.0);
+                #endif
+                }
+                outputColor.a = 1.0;
+            #endif
+            #endif
+                float viewZ = 2.0;
+                vec4 gData = vec4(viewZ);
+                vec4 material = gData;
+            }
+            void main() {
+                vec4 outputColor = vec4(0.0);
+                debugOutput(outputColor);
+            }
+        """.trimIndent()
+
+        val plan = ShaderCompilerCopyPlanner.plan(source, "radiance-cache-debug.csh")
+
+        assertTrue(plan.structuralBlockers.isEmpty(), plan.structuralBlockers.toString())
+        val compiler = assertNotNull(plan.compilerSource)
+        assertContains(compiler, "SM_SETTING_DEBUG_RC_MODE != 0")
+        assertContains(compiler, "SM_SETTING_DEBUG_RC_MODE == 7")
+        assertContains(compiler, "SM_SETTING_DEBUG_RC_MODE == 8")
+        assertFalse("#if SETTING_DEBUG_RC_MODE" in compiler)
+    }
+
+    @Test
     fun lowersTwentyFiveIndependentBooleanSettingsIntoOneCompilerModule() {
         val source = buildString {
             appendLine("#version 460 compatibility")
