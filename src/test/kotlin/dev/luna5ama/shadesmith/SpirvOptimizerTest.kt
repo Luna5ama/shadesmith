@@ -524,7 +524,7 @@ class SpirvOptimizerTest {
         assertContains(vertex, "readonly buffer GlobalData")
         assertContains(vertex, "sharedCoord = globalValue.xy;")
         assertFalse(Regex("""\b_[0-9]+\s*\.""").containsMatchIn(vertex))
-        assertFalse(fragment.contains("readonly buffer GlobalData"))
+        assertContains(fragment, "readonly buffer GlobalData")
         assertFalse(Regex("""}\s+_[0-9]+\s*;""").containsMatchIn(fragment))
 
         val linkDirectory = workspace.resolve("linked")
@@ -554,6 +554,58 @@ class SpirvOptimizerTest {
 
         assertEquals(0, exitCode, log)
         assertTrue(output.isRegularFile())
+    }
+
+    @Test
+    fun preservesGraphicsDeclarationShellWhileOptimizingEntryFunction() = withWorkspace { workspace ->
+        val fixtures = listOf(
+            Triple(
+                "driver-shell.fsh",
+                ShaderStage.FRAGMENT,
+                """
+                    #version 460 compatibility
+                    uniform sampler2D retainedShellSampler;
+                    layout(location = 0) out vec4 fragColor;
+                    void main() {
+                        vec4 color = vec4(1.0);
+                        if (false) color = texture(retainedShellSampler, vec2(0.0));
+                        fragColor = color;
+                    }
+                """.trimIndent() + "\n",
+            ),
+            Triple(
+                "driver-shell.gsh",
+                ShaderStage.GEOMETRY,
+                """
+                    #version 460 compatibility
+                    const int retainedShellMarker = 7;
+                    layout(points) in;
+                    layout(points, max_vertices = 1) out;
+                    void main() {
+                        gl_Position = gl_in[0].gl_Position;
+                        if (false) gl_Position.x += float(retainedShellMarker);
+                        EmitVertex();
+                        EndPrimitive();
+                    }
+                """.trimIndent() + "\n",
+            ),
+        )
+
+        fixtures.forEach { (name, stage, source) ->
+            val result = SpirvOptimizer(workspace.resolve(stage.glslangName)).optimize(
+                SpirvOptimizationRequest(name, stage, source),
+            )
+
+            assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+            if (stage == ShaderStage.FRAGMENT) {
+                assertContains(result.source, "uniform sampler2D retainedShellSampler;")
+                assertFalse("texture(retainedShellSampler" in result.source)
+            } else {
+                assertContains(result.source, "const int retainedShellMarker = 7;")
+                assertFalse("float(retainedShellMarker)" in result.source)
+            }
+            assertContains(result.source, "void main()\n{")
+        }
     }
 
     @Test

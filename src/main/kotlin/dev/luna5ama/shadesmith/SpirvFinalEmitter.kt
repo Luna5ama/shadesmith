@@ -693,7 +693,15 @@ internal object SpirvFinalEmitter {
         if (processed is IrisFinalSourceProcessing.Preserved) {
             return preserved(request, processed.reason)
         }
-        val finalSource = (processed as IrisFinalSourceProcessing.Processed).source
+        val processedSource = (processed as IrisFinalSourceProcessing.Processed).source
+        val finalSource = if (request.stage in DRIVER_STABLE_SOURCE_SHELL_STAGES) {
+            when (val shell = restoreDriverStableSourceShell(request, processedSource, modules)) {
+                is ShaderStructuralRestoration.Restored -> shell.source
+                is ShaderStructuralRestoration.Preserved -> return preserved(request, shell.reason)
+            }
+        } else {
+            processedSource
+        }
         finalLiveIncludeGuardDependencyIssue(request.sourceName, request.source, finalSource)?.let { issue ->
             return preserved(request, issue)
         }
@@ -711,6 +719,122 @@ internal object SpirvFinalEmitter {
         } else {
             preserved(request, "final optimized GLSL still contains specialization artifact '$artifact'")
         }
+    }
+
+    private fun restoreDriverStableSourceShell(
+        request: SpirvOptimizationRequest,
+        optimizedSource: String,
+        modules: List<SpirvModuleResult>,
+    ): ShaderStructuralRestoration {
+        val sourceFunctions = (
+            sourceStructuralEntities(request.source) +
+                scanSourceFunctions(request.source) +
+                scanNamedSourceFunctions(request.source)
+            ).filter { it.kind == StructuralEntityKind.FUNCTION }.distinctBy(StructuralEntity::range)
+        val sourceEntries = sourceFunctions.filter { it.identity == "function:main()" }
+        if (sourceEntries.isEmpty()) return ShaderStructuralRestoration.Restored(optimizedSource)
+        if (sourceEntries.size != 1) {
+            return ShaderStructuralRestoration.Preserved(
+                "${request.sourceName}: driver-stable source shell has ${sourceEntries.size} source main functions",
+            )
+        }
+
+        val optimizedEntities = structuralEntities(optimizedSource)
+        val optimizedFunctions = optimizedEntities.filter { it.kind == StructuralEntityKind.FUNCTION }
+        val optimizedEntries = optimizedFunctions.filter { it.identity == "function:main()" }
+        if (optimizedEntries.size != 1) {
+            return ShaderStructuralRestoration.Preserved(
+                "${request.sourceName}: driver-stable source shell has ${optimizedEntries.size} optimized main functions",
+            )
+        }
+
+        val sourceFunctionNames = sourceFunctions.mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
+        val optimizedFunctionsByName = optimizedFunctions.filter { it.symbol != null }
+            .groupBy { requireNotNull(it.symbol) }
+        val selectedFunctions = linkedSetOf(optimizedEntries.single())
+        val pendingFunctions = ArrayDeque(optimizedEntries.single().references)
+        val visitedFunctionNames = linkedSetOf<String>()
+        while (pendingFunctions.isNotEmpty()) {
+            val name = pendingFunctions.removeFirst()
+            if (!visitedFunctionNames.add(name) || name in sourceFunctionNames) continue
+            optimizedFunctionsByName[name].orEmpty().forEach { function ->
+                if (selectedFunctions.add(function)) function.references.forEach(pendingFunctions::addLast)
+            }
+        }
+
+        val sourceEntities = sourceStructuralEntities(request.source)
+        val sourceSymbols = sourceEntities.flatMapTo(hashSetOf()) { entity -> entity.declaredSymbols() }
+        sourceSymbols += sourceFunctionNames
+        sourceSymbols += sourceMacroDefinitions(request.source).keys
+        val optimizedDeclarations = optimizedEntities.filter { it.kind == StructuralEntityKind.DECLARATION }
+        val optimizedDeclarationsByName = optimizedDeclarations.flatMap { declaration ->
+            declaration.declaredSymbols().map { symbol -> symbol to declaration }
+        }.groupBy({ it.first }, { it.second })
+        val selectedDeclarations = linkedSetOf<StructuralEntity>()
+        val pendingDeclarations = ArrayDeque(selectedFunctions.flatMap(StructuralEntity::references))
+        val visitedDeclarationNames = linkedSetOf<String>()
+        while (pendingDeclarations.isNotEmpty()) {
+            val name = pendingDeclarations.removeFirst()
+            if (!visitedDeclarationNames.add(name) || name in sourceSymbols) continue
+            val candidates = optimizedDeclarationsByName[name].orEmpty().distinctBy(StructuralEntity::range)
+            if (candidates.size > 1) {
+                return ShaderStructuralRestoration.Preserved(
+                    "${request.sourceName}: driver-stable source shell dependency $name is ambiguous " +
+                        "(${candidates.size} optimized declarations)",
+                )
+            }
+            candidates.singleOrNull()?.let { declaration ->
+                if (selectedDeclarations.add(declaration)) {
+                    declaration.references.forEach(pendingDeclarations::addLast)
+                }
+            }
+        }
+
+        val optimizedMain = optimizedSource.substring(optimizedEntries.single().range).trimEnd()
+        val dependencies = buildString {
+            selectedDeclarations.sortedBy { it.range.first }.forEach { declaration ->
+                append(optimizedSource.substring(declaration.range).trimEnd())
+                appendLine()
+            }
+            selectedFunctions.filterNot { it.identity == "function:main()" }
+                .sortedBy { it.range.first }.forEach { function ->
+                    append(optimizedSource.substring(function.range).trimEnd())
+                    appendLine()
+                }
+        }
+        val sourceMain = sourceEntries.single()
+        var shell = request.source.replaceRange(
+            sourceMain.range,
+            buildString {
+                if (dependencies.isNotBlank()) {
+                    append(dependencies.trimEnd())
+                    appendLine()
+                    appendLine()
+                }
+                append(optimizedMain)
+            },
+        )
+        shell = ensureForwardFunctionDeclarations(shell)
+        val bridgeSettings = modules.flatMap(SpirvModuleResult::bridgeSettings)
+            .distinctBy(ShaderSetting::name)
+            .sortedBy(ShaderSetting::name)
+        val completed = when (
+            val result = SpirvSettingBridge.completeRestoredSettings(shell, emptyList(), bridgeSettings)
+        ) {
+            is SpirvSettingBridgeRestoration.Restored -> result
+            is SpirvSettingBridgeRestoration.Preserved -> return ShaderStructuralRestoration.Preserved(result.reason)
+        }
+        val placed = when (
+            val result = SpirvSettingBridge.placeAfterDefinitions(
+                completed.source,
+                completed.settings,
+                modules.first().irisContracts.contracts,
+            )
+        ) {
+            is SpirvSettingBridgeRestoration.Restored -> result.source
+            is SpirvSettingBridgeRestoration.Preserved -> return ShaderStructuralRestoration.Preserved(result.reason)
+        }
+        return ShaderStructuralRestoration.Restored(placed)
     }
 
     private fun preserved(request: SpirvOptimizationRequest, reason: String): SpirvFinalEmission {
@@ -4614,6 +4738,7 @@ private val ASSIGNED_SYMBOL =
     "(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)\\s*(?:[+\\-*/%&|^]?=(?!=)|\\+\\+|--)".toRegex()
 private val GENERATED_IDENTIFIER = "(?<![A-Za-z0-9_])_[0-9]+(?![A-Za-z0-9_])".toRegex()
 private val STRUCTURAL_ARRAY_SUFFIX = "\\[[^]]*]".toRegex()
+private val DRIVER_STABLE_SOURCE_SHELL_STAGES = setOf(ShaderStage.GEOMETRY, ShaderStage.FRAGMENT)
 private val STRUCTURAL_KEYWORDS = setOf(
     "const", "layout", "uniform", "buffer", "in", "out", "inout", "void", "true", "false",
     "if", "else", "for", "while", "do", "switch", "case", "default", "return", "break", "continue",
