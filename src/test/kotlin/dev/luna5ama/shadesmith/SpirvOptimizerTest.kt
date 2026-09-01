@@ -21,6 +21,30 @@ import kotlin.test.assertTrue
 
 class SpirvOptimizerTest {
     @Test
+    fun preservesUnreferencedIrisDispatchMetadataInFinalSource() = withWorkspace { workspace ->
+        val cases = listOf(
+            "const ivec3 workGroups = ivec3(5120, 1, 1);",
+            "const vec2 workGroupsRender = vec2(0.25, 0.25);",
+        )
+
+        cases.forEachIndexed { index, declaration ->
+            val source = """
+                #version 460 compatibility
+                layout(local_size_x = 1) in;
+                $declaration
+                void main() {}
+            """.trimIndent() + "\n"
+            val result = SpirvOptimizer(workspace.resolve("dispatch-$index")).optimize(
+                SpirvOptimizationRequest("dispatch-$index.csh", ShaderStage.COMPUTE, source),
+            )
+
+            assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+            assertContains(result.source, declaration)
+            assertEquals(1, Regex.escape(declaration).toRegex().findAll(result.source).count())
+        }
+    }
+
+    @Test
     fun roundTripsRepresentativeComputeVertexFragmentAndGeometryShaders() = withWorkspace { workspace ->
         val fixtures = listOf(
             "dead-code.csh" to ShaderStage.COMPUTE,

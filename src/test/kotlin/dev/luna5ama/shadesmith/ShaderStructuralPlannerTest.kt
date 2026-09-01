@@ -695,6 +695,73 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
+    fun multipleStructuralComponentsPreserveUnreferencedIrisDispatchMetadata() = withWorkspace { workspace ->
+        val dispatch = "const vec2 workGroupsRender = vec2(0.25, 0.25);"
+        val source = """
+            #version 460 compatibility
+            //#define SETTING_A
+            //#define SETTING_B
+            #ifdef SETTING_A
+            layout(rgba16f, binding = 0) uniform image2D targetA;
+            #else
+            layout(r32f, binding = 0) uniform image2D targetA;
+            #endif
+            #ifdef SETTING_B
+            layout(rgba16f, binding = 1) uniform image2D targetB;
+            #else
+            layout(r32f, binding = 1) uniform image2D targetB;
+            #endif
+            layout(local_size_x = 1) in;
+            $dispatch
+            void main() {
+                imageStore(targetA, ivec2(0), vec4(1.0));
+                imageStore(targetB, ivec2(0), vec4(1.0));
+            }
+        """.trimIndent() + "\n"
+
+        val policy = IrisCorpusMetadataRegistry.plan(
+            listOf(
+                ShaderFile(Path.of("final.fsh"), "#version 460 compatibility\nvoid main() {}\n"),
+                ShaderFile(Path.of("four-dispatch.csh"), source),
+            ),
+        ).getValue("four-dispatch.csh")
+        val result = optimizeStructural(
+            workspace,
+            "four-dispatch.csh",
+            source,
+            ShaderStage.COMPUTE,
+            policy,
+        )
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertTrue(result.structuralSignatures.size > 1)
+        assertContains(result.source, dispatch)
+        assertEquals(1, Regex.escape(dispatch).toRegex().findAll(result.source).count())
+    }
+
+    @Test
+    fun conditionalTypeDefinitionsDoNotHideFollowingDispatchContractDuringExtraction() {
+        val dispatch = "const vec2 workGroupsRender = vec2(1.0, 1.0);"
+        val source = """
+            #version 460 compatibility
+            //#define SETTING_FLOAT
+            #ifdef SETTING_FLOAT
+            struct Payload {
+            #else
+            struct Payload {
+            #endif
+                float value;
+            };
+            layout(local_size_x = 1) in;
+            $dispatch
+            void main() {}
+        """.trimIndent() + "\n"
+        val plan = ShaderCompilerCopyPlanner.plan(source, "conditional-dispatch.csh")
+
+        assertTrue(plan.irisContracts.contracts.any { dispatch in it.exactText })
+    }
+
+    @Test
     fun optimizedAwayStructuralFunctionDoesNotForceSourcePreservation() = withWorkspace { workspace ->
         val source = optimizedAwayStructuralFunction()
         val result = optimizeStructural(workspace, "dead-function.csh", source, ShaderStage.COMPUTE)
@@ -2102,6 +2169,7 @@ class ShaderStructuralPlannerTest {
         name: String,
         source: String,
         stage: ShaderStage,
+        finalSourcePolicy: IrisFinalSourcePolicy? = null,
     ): SpirvOptimizationResult {
         val base = ShaderCompilerCopyPlanner.plan(source, name)
         val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
@@ -2114,7 +2182,14 @@ class ShaderStructuralPlannerTest {
             name,
         ).modules.map { it.module }
         return SpirvOptimizer(workspace.resolve("spirv")).optimize(
-            SpirvOptimizationRequest(name, stage, source, modules, planned),
+            SpirvOptimizationRequest(
+                name,
+                stage,
+                source,
+                modules,
+                planned,
+                finalSourcePolicy = finalSourcePolicy,
+            ),
         )
     }
 

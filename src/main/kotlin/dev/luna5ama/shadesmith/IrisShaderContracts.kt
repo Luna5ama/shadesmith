@@ -1555,6 +1555,7 @@ private class ContractLineMap(private val source: String) {
 private class ContractLexicalMap(private val source: String) {
     private val code = BooleanArray(source.length + 1) { true }
     private val depth = IntArray(source.length + 1)
+    private val conditionalTopLevel: BooleanArray
 
     init {
         val directiveOffsets = BooleanArray(source.length)
@@ -1636,11 +1637,12 @@ private class ContractLexicalMap(private val source: String) {
             }
         }
         depth[source.length] = braceDepth
+        conditionalTopLevel = buildConditionalTopLevel()
     }
 
     fun isCode(offset: Int): Boolean = offset in code.indices && code[offset]
-    fun isTopLevel(offset: Int): Boolean = offset in depth.indices && depth[offset] == 0
-    fun isTopLevelCode(offset: Int): Boolean = isCode(offset) && depth[offset] == 0
+    fun isTopLevel(offset: Int): Boolean = offset in conditionalTopLevel.indices && conditionalTopLevel[offset]
+    fun isTopLevelCode(offset: Int): Boolean = isCode(offset) && isTopLevel(offset)
 
     fun depthAt(offset: Int): Int = depth.getOrElse(offset) { 0 }
 
@@ -1667,6 +1669,56 @@ private class ContractLexicalMap(private val source: String) {
             if (source[offset] == character && isCode(offset)) return offset
         }
         return null
+    }
+
+    private fun buildConditionalTopLevel(): BooleanArray {
+        class Frame(val entryDepths: Set<Int>) {
+            val completedDepths = linkedSetOf<Int>()
+            var hasElse = false
+        }
+
+        val events = directivePhysicalRanges(source).mapNotNull { range ->
+            val kind = CONDITIONAL_DIRECTIVE.find(source.substring(range))?.groupValues?.get(1) ?: return@mapNotNull null
+            range.first to kind
+        }.groupBy({ it.first }, { it.second })
+        val result = BooleanArray(source.length + 1)
+        val stack = mutableListOf<Frame>()
+        var possibleDepths: Set<Int> = setOf(0)
+        for (offset in source.indices) {
+            events[offset].orEmpty().forEach { kind ->
+                when (kind) {
+                    "if", "ifdef", "ifndef" -> stack += Frame(possibleDepths)
+                    "elif" -> {
+                        val frame = stack.last()
+                        frame.completedDepths += possibleDepths
+                        possibleDepths = frame.entryDepths
+                    }
+                    "else" -> {
+                        val frame = stack.last()
+                        frame.completedDepths += possibleDepths
+                        frame.hasElse = true
+                        possibleDepths = frame.entryDepths
+                    }
+                    "endif" -> {
+                        val frame = stack.removeAt(stack.lastIndex)
+                        frame.completedDepths += possibleDepths
+                        if (!frame.hasElse) frame.completedDepths += frame.entryDepths
+                        possibleDepths = frame.completedDepths
+                    }
+                }
+            }
+            result[offset] = possibleDepths.size == 1 && 0 in possibleDepths
+            if (!code[offset]) continue
+            possibleDepths = when (source[offset]) {
+                '{' -> possibleDepths.mapTo(linkedSetOf()) { it + 1 }
+                '}' -> possibleDepths.mapNotNullTo(linkedSetOf()) { depth ->
+                    (depth - 1).takeIf { it >= 0 }
+                }
+                else -> possibleDepths
+            }
+        }
+        result[source.length] = possibleDepths.size == 1 && 0 in possibleDepths
+        return result
     }
 }
 
@@ -2705,6 +2757,8 @@ private val IRIS_COMMENT_DIRECTIVE =
 private val EXTENSION_DECLARATION =
     "#\\s*extension\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*:\\s*(require|enable|warn|disable)".toRegex()
 private val DIRECTIVE_NAME = "[\\t ]*#[\\t ]*([A-Za-z]+)\\b[^\\r\\n]*".toRegex()
+private val CONDITIONAL_DIRECTIVE =
+    "(?m)^[\\t ]*#[\\t ]*(if|ifdef|ifndef|elif|else|endif)\\b".toRegex()
 private val FUNCTION_START =
     "(?m)^[\\t ]*(?:[A-Za-z_][A-Za-z0-9_]*[\\t ]+)+([A-Za-z_][A-Za-z0-9_]*)[\\t ]*\\([^;{}]*\\)\\s*\\{".toRegex()
 private val STABLE_ABI_DECLARATION = (

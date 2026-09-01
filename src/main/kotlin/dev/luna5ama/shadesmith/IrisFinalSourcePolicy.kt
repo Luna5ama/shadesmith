@@ -56,7 +56,7 @@ internal object IrisCorpusMetadataRegistry {
         }
         val sinkName = sinks.singleOrNull()?.let(::sourceName)
         val registryContract = buildString {
-            appendLine("iris-final-source-policy-v1")
+            appendLine("iris-final-source-policy-v2")
             appendLine("sink=${sinkName.orEmpty()}")
             (settings.values.flatten() + globals.values.flatten()).forEach { slice ->
                 append(slice.kind)
@@ -89,7 +89,11 @@ internal object IrisCorpusMetadataRegistry {
         val protection = PreprocessorProtection.protect(source, sourceName)
         protection.directives.filter { directive ->
             directive.kind in setOf(PreprocessorDirectiveKind.DEFINE, PreprocessorDirectiveKind.DISABLED_DEFINE) &&
-                directive.macroName?.startsWith("SETTING_") == true
+                !directive.macroFunctionLike &&
+                (
+                    directive.macroName?.startsWith("SETTING_") == true ||
+                        IRIS_OPTION_DOMAIN_COMMENT.containsMatchIn(directive.exactText)
+                    )
         }.forEach { directive ->
             result += IrisRegistryMetadataSlice(
                 IrisRegistryMetadataKind.SETTING,
@@ -151,6 +155,9 @@ internal object IrisCorpusMetadataRegistry {
     }
 
     private fun sourceName(file: ShaderFile): String = file.path.toString().replace('\\', '/')
+
+    private val IRIS_OPTION_DOMAIN_COMMENT =
+        "(?://|/\\*)[^\\r\\n]*\\[[^]\\r\\n]+]".toRegex()
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.encodeToByteArray())

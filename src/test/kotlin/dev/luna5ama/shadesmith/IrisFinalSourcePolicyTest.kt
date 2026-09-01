@@ -85,6 +85,39 @@ class IrisFinalSourcePolicyTest {
     }
 
     @Test
+    fun buildsFinalSinkWithEveryExplicitIrisOptionDefinition() {
+        val title = "#define TITLE_VERSION 3//[0 1 2 3 4 5]\n"
+        val text = "#define GLOBAL_SCALING 0//[0]\n"
+        val source = buildString {
+            appendLine("#version 460 compatibility")
+            append(title)
+            append(text)
+            appendLine("#define INTERNAL_HELPER 1")
+            appendLine("void main() {}")
+        }
+        val policy = IrisCorpusMetadataRegistry.plan(
+            listOf(
+                ShaderFile(Path.of("final.fsh"), source),
+                ShaderFile(Path.of("composite.csh"), source),
+            ),
+        ).getValue("final.fsh")
+
+        assertEquals(listOf(title), policy.settings.getValue("TITLE_VERSION").map { it.exactText })
+        assertEquals(listOf(text), policy.settings.getValue("GLOBAL_SCALING").map { it.exactText })
+        assertFalse("INTERNAL_HELPER" in policy.settings)
+
+        val processing = IrisFinalSourceProcessor.process(
+            SpirvOptimizationRequest("final.fsh", ShaderStage.FRAGMENT, source, finalSourcePolicy = policy),
+            "#version 460 compatibility\nvoid main() {}\n",
+            emptyList(),
+        )
+        val processed = assertIs<IrisFinalSourceProcessing.Processed>(processing, processing.toString())
+        assertContains(processed.source, title)
+        assertContains(processed.source, text)
+        assertFalse("INTERNAL_HELPER" in processed.source)
+    }
+
+    @Test
     fun buildsOneExactGlobalSliceForACommentWrappedFormatBundle() {
         val exactBlock = """
             /*
