@@ -557,7 +557,7 @@ class SpirvOptimizerTest {
     }
 
     @Test
-    fun preservesGraphicsDeclarationShellWhileOptimizingEntryFunction() = withWorkspace { workspace ->
+    fun preservesUnmeasuredGraphicsDeclarationShellWhileOptimizingEntryFunction() = withWorkspace { workspace ->
         val fixtures = listOf(
             Triple(
                 "driver-shell.fsh",
@@ -603,6 +603,85 @@ class SpirvOptimizerTest {
             } else {
                 assertContains(result.source, "const int retainedShellMarker = 7;")
                 assertFalse("float(retainedShellMarker)" in result.source)
+            }
+            assertContains(result.source, "void main()\n{")
+        }
+    }
+
+    @Test
+    fun preservesGraphicsStageInterfaceOrderWithoutRetainingWholeSourceShell() = withWorkspace { workspace ->
+        val fixtures = listOf(
+            Triple(
+                "shadow_cutout.fsh",
+                ShaderStage.FRAGMENT,
+                """
+                    #version 460 compatibility
+                    uniform sampler2D removedShellSampler;
+                    in vec2 fragTexcoord;
+                    in vec2 fragScreenPos;
+                    flat in uint fragMetadata;
+                    layout(location = 3) out vec4 lateTarget;
+                    layout(location = 0) out vec4 earlyTarget;
+                    void main() {
+                        vec4 color = vec4(fragTexcoord, fragScreenPos.x + float(fragMetadata), 1.0);
+                        if (false) color += texture(removedShellSampler, vec2(0.0));
+                        earlyTarget = color;
+                        lateTarget = color;
+                    }
+                """.trimIndent() + "\n",
+            ),
+            Triple(
+                "shadow_water.gsh",
+                ShaderStage.GEOMETRY,
+                """
+                    #version 460 compatibility
+                    layout(points) in;
+                    layout(points, max_vertices = 1) out;
+                    in vec2 vertTexcoord[];
+                    in vec2 vertScreenPos[];
+                    flat in uint vertMetadata[];
+                    out vec2 fragTexcoord;
+                    out vec2 fragScreenPos;
+                    flat out uint fragMetadata;
+                    const int removedShellMarker = 7;
+                    void main() {
+                        fragTexcoord = vertTexcoord[0];
+                        fragScreenPos = vertScreenPos[0];
+                        fragMetadata = vertMetadata[0];
+                        gl_Position = vec4(vertScreenPos[0], float(vertMetadata[0] & 1u), 1.0);
+                        if (false) gl_Position.x += float(removedShellMarker);
+                        EmitVertex();
+                        EndPrimitive();
+                    }
+                """.trimIndent() + "\n",
+            ),
+        )
+
+        fixtures.forEach { (name, stage, source) ->
+            val result = SpirvOptimizer(workspace.resolve(stage.glslangName)).optimize(
+                SpirvOptimizationRequest(name, stage, source),
+            )
+
+            assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+            if (stage == ShaderStage.FRAGMENT) {
+                assertFalse("removedShellSampler" in result.source)
+                assertOrdered(
+                    result.source,
+                    "in vec2 fragTexcoord;",
+                    "in vec2 fragScreenPos;",
+                    "flat in uint fragMetadata;",
+                )
+            } else {
+                assertFalse("removedShellMarker" in result.source)
+                assertOrdered(
+                    result.source,
+                    "in vec2 vertTexcoord[];",
+                    "in vec2 vertScreenPos[];",
+                    "flat in uint vertMetadata[];",
+                    "out vec2 fragTexcoord;",
+                    "out vec2 fragScreenPos;",
+                    "flat out uint fragMetadata;",
+                )
             }
             assertContains(result.source, "void main()\n{")
         }
@@ -965,6 +1044,15 @@ class SpirvOptimizerTest {
             logs.listDirectoryEntries("*.log").any { it.fileSize() > 0 },
             "glslang diagnostics should be retained in stdout or stderr",
         )
+    }
+
+    private fun assertOrdered(source: String, vararg declarations: String) {
+        var previous = -1
+        declarations.forEach { declaration ->
+            val offset = source.indexOf(declaration)
+            assertTrue(offset > previous, "Expected '$declaration' after offset $previous in:\n$source")
+            previous = offset
+        }
     }
 
     private fun fixture(name: String): String {

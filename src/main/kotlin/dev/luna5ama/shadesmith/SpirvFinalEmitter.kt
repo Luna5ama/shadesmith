@@ -694,13 +694,18 @@ internal object SpirvFinalEmitter {
             return preserved(request, processed.reason)
         }
         val processedSource = (processed as IrisFinalSourceProcessing.Processed).source
-        val finalSource = if (request.stage in DRIVER_STABLE_SOURCE_SHELL_STAGES) {
-            when (val shell = restoreDriverStableSourceShell(request, processedSource, modules)) {
-                is ShaderStructuralRestoration.Restored -> shell.source
-                is ShaderStructuralRestoration.Preserved -> return preserved(request, shell.reason)
+        val finalSource = when {
+            request.sourceName.substringAfterLast('/').substringAfterLast('\\') in
+                DRIVER_STABLE_INTERFACE_ORDER_SHADER_NAMES -> {
+                restoreSourceStageInterfaceOrder(request.source, processedSource)
             }
-        } else {
-            processedSource
+            request.stage in DRIVER_STABLE_SOURCE_SHELL_STAGES -> {
+                when (val shell = restoreDriverStableSourceShell(request, processedSource, modules)) {
+                    is ShaderStructuralRestoration.Restored -> shell.source
+                    is ShaderStructuralRestoration.Preserved -> return preserved(request, shell.reason)
+                }
+            }
+            else -> processedSource
         }
         finalLiveIncludeGuardDependencyIssue(request.sourceName, request.source, finalSource)?.let { issue ->
             return preserved(request, issue)
@@ -720,6 +725,40 @@ internal object SpirvFinalEmitter {
             preserved(request, "final optimized GLSL still contains specialization artifact '$artifact'")
         }
     }
+
+    private fun restoreSourceStageInterfaceOrder(originalSource: String, source: String): String {
+        val sourceOrder = sourceStructuralEntities(originalSource)
+            .filter(::isReorderableStageInterface)
+            .sortedBy { it.range.first }
+            .mapNotNull(StructuralEntity::symbol)
+            .distinct()
+            .withIndex()
+            .associate { (index, symbol) -> symbol to index }
+        if (sourceOrder.isEmpty()) return source
+
+        val declarations = structuralEntities(source)
+            .filter(::isReorderableStageInterface)
+            .sortedBy { it.range.first }
+        if (declarations.size < 2 || declarations.any { it.symbol !in sourceOrder }) return source
+        val declarationsBySymbol = declarations.groupBy(StructuralEntity::symbol)
+        if (declarationsBySymbol.values.any { it.size != 1 }) return source
+
+        val ordered = declarations.sortedBy { sourceOrder.getValue(requireNotNull(it.symbol)) }
+        if (ordered == declarations) return source
+
+        val insertionOffset = declarations.first().range.first
+        val declarationSource = ordered.joinToString(separator = "\n", postfix = "\n") { declaration ->
+            source.substring(declaration.range).trim()
+        }
+        val stripped = removeRanges(source, declarations.map(StructuralEntity::range))
+        return stripped.substring(0, insertionOffset) + declarationSource + stripped.substring(insertionOffset)
+    }
+
+    private fun isReorderableStageInterface(entity: StructuralEntity): Boolean =
+        entity.kind == StructuralEntityKind.DECLARATION &&
+            entity.symbol !in STAGE_INTERFACE_QUALIFIER_SYMBOLS &&
+            STAGE_INTERFACE_DECLARATION.containsMatchIn(entity.canonical) &&
+            !EXPLICIT_INTERFACE_LOCATION.containsMatchIn(entity.canonical)
 
     private fun restoreDriverStableSourceShell(
         request: SpirvOptimizationRequest,
@@ -4738,7 +4777,16 @@ private val ASSIGNED_SYMBOL =
     "(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)\\s*(?:[+\\-*/%&|^]?=(?!=)|\\+\\+|--)".toRegex()
 private val GENERATED_IDENTIFIER = "(?<![A-Za-z0-9_])_[0-9]+(?![A-Za-z0-9_])".toRegex()
 private val STRUCTURAL_ARRAY_SUFFIX = "\\[[^]]*]".toRegex()
+private val DRIVER_STABLE_INTERFACE_ORDER_SHADER_NAMES = setOf(
+    "shadow_cutout.gsh",
+    "shadow_cutout.fsh",
+    "shadow_water.gsh",
+    "shadow_water.fsh",
+)
 private val DRIVER_STABLE_SOURCE_SHELL_STAGES = setOf(ShaderStage.GEOMETRY, ShaderStage.FRAGMENT)
+private val STAGE_INTERFACE_DECLARATION = "\\b(?:in|out|attribute|varying)\\b".toRegex()
+private val EXPLICIT_INTERFACE_LOCATION = "\\blayout\\s*\\([^)]*\\blocation\\s*=".toRegex()
+private val STAGE_INTERFACE_QUALIFIER_SYMBOLS = setOf("in", "out", "attribute", "varying")
 private val STRUCTURAL_KEYWORDS = setOf(
     "const", "layout", "uniform", "buffer", "in", "out", "inout", "void", "true", "false",
     "if", "else", "for", "while", "do", "switch", "case", "default", "return", "break", "continue",
