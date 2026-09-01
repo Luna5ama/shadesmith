@@ -92,7 +92,10 @@ internal object IrisCorpusMetadataRegistry {
                 !directive.macroFunctionLike &&
                 (
                     directive.macroName?.startsWith("SETTING_") == true ||
-                        IRIS_OPTION_DOMAIN_COMMENT.containsMatchIn(directive.exactText)
+                        (
+                            directive.kind == PreprocessorDirectiveKind.DEFINE &&
+                                IRIS_OPTION_DOMAIN_COMMENT.containsMatchIn(directive.exactText)
+                            )
                     )
         }.forEach { directive ->
             result += IrisRegistryMetadataSlice(

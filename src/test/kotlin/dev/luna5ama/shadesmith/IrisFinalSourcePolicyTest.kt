@@ -93,6 +93,7 @@ class IrisFinalSourcePolicyTest {
             append(title)
             append(text)
             appendLine("#define INTERNAL_HELPER 1")
+            appendLine("//#define INTERNAL_DISABLED const //[placeholder]")
             appendLine("void main() {}")
         }
         val policy = IrisCorpusMetadataRegistry.plan(
@@ -115,6 +116,7 @@ class IrisFinalSourcePolicyTest {
         assertContains(processed.source, title)
         assertContains(processed.source, text)
         assertFalse("INTERNAL_HELPER" in processed.source)
+        assertFalse("INTERNAL_DISABLED" in processed.source)
     }
 
     @Test
