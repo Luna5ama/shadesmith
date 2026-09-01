@@ -693,7 +693,7 @@ internal object IrisShaderContractExtractor {
             }
             .toList()
         val discoveredHostDeclarations = HOST_CONST_START.findAll(source)
-            .filter { lexical.isTopLevelCode(it.range.first) && isHostDeclarationName(it.groupValues[1]) }
+            .filter { lexical.isCode(it.range.first) && isHostDeclarationName(it.groupValues[1]) }
             .map { match ->
                 val semicolon = lexical.findCodeCharacter(';', match.range.last + 1)
                     ?: throw IllegalArgumentException(
@@ -2411,7 +2411,7 @@ internal fun irisHostRegistryDeclarations(
     val lines = ContractLineMap(source)
     val lexical = ContractLexicalMap(source)
     return HOST_CONST_START.findAll(source).filter { match ->
-        lexical.isTopLevelCode(match.range.first) && isHostDeclarationName(match.groupValues[1])
+        lexical.isCode(match.range.first) && isHostDeclarationName(match.groupValues[1])
     }.map { match ->
         val name = match.groupValues[1]
         val semicolon = lexical.findCodeCharacter(';', match.range.last + 1)

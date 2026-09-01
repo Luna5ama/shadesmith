@@ -762,6 +762,27 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
+    fun correlatedConditionalScopesDoNotHideFollowingDispatchContract() {
+        val dispatch = "const ivec3 workGroups = ivec3(5120, 1, 1);"
+        val source = """
+            #version 460 compatibility
+            //#define SETTING_HELPER
+            #ifdef SETTING_HELPER
+            void helper() {
+            #endif
+            #ifdef SETTING_HELPER
+            }
+            #endif
+            layout(local_size_x = 1) in;
+            $dispatch
+            void main() {}
+        """.trimIndent() + "\n"
+        val plan = ShaderCompilerCopyPlanner.plan(source, "correlated-dispatch.csh")
+
+        assertTrue(plan.irisContracts.contracts.any { dispatch in it.exactText })
+    }
+
+    @Test
     fun optimizedAwayStructuralFunctionDoesNotForceSourcePreservation() = withWorkspace { workspace ->
         val source = optimizedAwayStructuralFunction()
         val result = optimizeStructural(workspace, "dead-function.csh", source, ShaderStage.COMPUTE)
