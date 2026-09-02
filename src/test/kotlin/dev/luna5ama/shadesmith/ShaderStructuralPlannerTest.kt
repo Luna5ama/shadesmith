@@ -516,7 +516,7 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
-    fun optimizedAwayStructuralEntityDropsItsMultilineMacroDependency() = withWorkspace { workspace ->
+    fun liveStructuralEntityKeepsItsMultilineMacroDependencyWhileDeadEntityDrops() = withWorkspace { workspace ->
         val source = """
             #version 460 compatibility
             #define SETTING_MODE 0 //[0 1 2]
@@ -551,7 +551,8 @@ class ShaderStructuralPlannerTest {
         val result = optimizeStructural(workspace, "multiline-macro.csh", source, ShaderStage.COMPUTE)
 
         assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
-        assertFalse(result.source.contains("#define OPTIONAL_VALUE"))
+        assertContains(result.source, "#define OPTIONAL_VALUE(value) (\\")
+        assertContains(result.source, "float optionalValue() { return OPTIONAL_VALUE(1.0); }")
         assertFalse(result.source.contains("float unusedCallback()"), result.source)
         assertEquals(2, result.finalValidationInvocations.size)
     }

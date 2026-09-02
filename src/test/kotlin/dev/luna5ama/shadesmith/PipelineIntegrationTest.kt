@@ -322,9 +322,9 @@ class PipelineIntegrationTest {
 
         assertEquals(ShaderProcessingMode.SPIRV_ROUND_TRIP, result.processingMode, result.fallbackReason)
         val emitted = result.file.code
-        assertFalse(emitted.contains("#define printString"))
-        assertFalse(emitted.contains("void printValue"))
-        assertFalse(emitted.contains("uint[] characters"))
+        assertContains(emitted, "#define printString(string) { \\")
+        assertContains(emitted, "void printValue() { printString((_t)); }")
+        assertEquals(1, Regex("(?m)^#define printString").findAll(emitted).count())
         assertFalse(Regex("(?m)^i < characters\\.length\\(\\);").containsMatchIn(emitted))
         assertFalse(Regex("(?m)^\\+\\+i\\) printChar").containsMatchIn(emitted))
     }

@@ -16,13 +16,12 @@ import kotlin.test.assertTrue
 
 class SpirvToolchainTest {
     @Test
-    fun optimizerPassContractUsesTheMeasuredGpuSequenceWithoutRegressingRedundancyElimination() {
+    fun optimizerPassContractPreservesDriverFunctionBoundariesWithoutRegressingRedundancyElimination() {
         val expected = listOf(
             "--preserve-bindings",
             "--preserve-interface",
             "--preserve-spec-constants",
             "--eliminate-dead-branches",
-            "--inline-entry-points-exhaustive",
             "--eliminate-dead-functions",
             "--eliminate-dead-code-aggressive",
             "--private-to-local",
@@ -56,7 +55,8 @@ class SpirvToolchainTest {
         )
 
         assertEquals(expected, SpirvToolchain.OPTIMIZER_PASSES)
-        assertEquals(expected.filterNot { it == "--inline-entry-points-exhaustive" }, SpirvToolchain.CROSS_ADAPTER_PASSES)
+        assertEquals(expected, SpirvToolchain.CROSS_ADAPTER_PASSES)
+        assertFalse("--inline-entry-points-exhaustive" in SpirvToolchain.OPTIMIZER_PASSES)
         assertTrue(
             SpirvToolchain.OPTIMIZER_PASSES.none {
                 it in setOf("--redundancy-elimination", "--merge-return", "--if-conversion", "-O", "-Os")
@@ -187,7 +187,7 @@ class SpirvToolchainTest {
     }
 
     @Test
-    fun crossAdapterOptimizerKeepsNativeRestorationCallsOutOfInlining() = withWorkspace { workspace ->
+    fun everyFinalGlslOptimizerKeepsDriverVisibleFunctionBoundaries() = withWorkspace { workspace ->
         val input = workspace.resolve("input module.spv")
         val output = workspace.resolve("output module.spv")
         val toolchain = SpirvToolchain(workspace)
@@ -199,6 +199,9 @@ class SpirvToolchainTest {
             invocation.command.drop(1).dropLast(3),
         )
         assertFalse("--inline-entry-points-exhaustive" in invocation.command)
+
+        val regularInvocation = toolchain.optimizeInvocation(ShaderStage.COMPUTE, input, output)
+        assertFalse("--inline-entry-points-exhaustive" in regularInvocation.command)
     }
 
     @Test

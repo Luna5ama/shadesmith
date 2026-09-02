@@ -473,7 +473,6 @@ internal class SpirvToolchain(
             "--preserve-interface",
             "--preserve-spec-constants",
             "--eliminate-dead-branches",
-            "--inline-entry-points-exhaustive",
             "--eliminate-dead-functions",
             "--eliminate-dead-code-aggressive",
             "--private-to-local",
@@ -505,7 +504,7 @@ internal class SpirvToolchain(
             "--cfg-cleanup",
             "--simplify-instructions",
         )
-        val CROSS_ADAPTER_PASSES = OPTIMIZER_PASSES.filterNot { it == "--inline-entry-points-exhaustive" }
+        val CROSS_ADAPTER_PASSES = OPTIMIZER_PASSES
 
         private val LOG_NAME_INVALID_CHAR = "[^A-Za-z0-9._-]".toRegex()
     }

@@ -84,6 +84,64 @@ class SpirvOptimizerTest {
     }
 
     @Test
+    fun keepsComputeCallGraphAvailableToTheFinalOpenGlCompiler() = withWorkspace { workspace ->
+        val source = """
+            #version 460 compatibility
+            layout(local_size_x = 8, local_size_y = 8) in;
+            layout(rgba32f) uniform image2D target;
+            float transformSample(float value) {
+                return value * value + sin(value);
+            }
+            float accumulateSample(float value) {
+                return transformSample(value) + transformSample(value + 1.0);
+            }
+            void main() {
+                ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+                float value = accumulateSample(float(pixel.x + pixel.y));
+                imageStore(target, pixel, vec4(value));
+            }
+        """.trimIndent() + "\n"
+
+        val result = SpirvOptimizer(workspace).optimize(
+            SpirvOptimizationRequest("driver-call-graph.csh", ShaderStage.COMPUTE, source),
+        )
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertContains(result.source, "transformSample(")
+        assertContains(result.source, "accumulateSample(")
+        assertTrue(Regex("accumulateSample\\([^)]*\\)").findAll(result.source).count() >= 2)
+    }
+
+    @Test
+    fun keepsComputeDriverFunctionShellWhileUsingOptimizedEntryPoint() = withWorkspace { workspace ->
+        val source = """
+            #version 460 compatibility
+            layout(local_size_x = 1) in;
+            layout(rgba32f) uniform image2D target;
+            float retainedHelper(float value) {
+                float sourceNamedIntermediate = value * value;
+                return sourceNamedIntermediate + 1.0;
+            }
+            void main() {
+                float value = retainedHelper(2.0);
+                if (false) value += 7.0;
+                imageStore(target, ivec2(0), vec4(value));
+            }
+        """.trimIndent() + "\n"
+
+        val result = SpirvOptimizer(workspace).optimize(
+            SpirvOptimizationRequest("driver-function-shell.csh", ShaderStage.COMPUTE, source),
+        )
+
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertContains(result.source, "float retainedHelper(float value) {")
+        assertContains(result.source, "float sourceNamedIntermediate = value * value;")
+        assertContains(result.source, "retainedHelper(")
+        assertFalse("if (false) value += 7.0;" in result.source)
+        assertTrue(result.finalValidationInvocations.isNotEmpty())
+    }
+
+    @Test
     fun compilesSubgroupOperationsWithOpenGlSemanticsAtSpirv13() = withWorkspace { workspace ->
         val result = SpirvOptimizer(workspace).optimize(
             SpirvOptimizationRequest("subgroup.csh", ShaderStage.COMPUTE, fixture("subgroup.csh")),
