@@ -694,18 +694,10 @@ internal object SpirvFinalEmitter {
             return preserved(request, processed.reason)
         }
         val processedSource = (processed as IrisFinalSourceProcessing.Processed).source
-        val finalSource = when {
-            request.sourceName.substringAfterLast('/').substringAfterLast('\\') in
-                DRIVER_STABLE_INTERFACE_ORDER_SHADER_NAMES -> {
-                restoreSourceStageInterfaceOrder(request.source, processedSource)
-            }
-            request.stage in DRIVER_STABLE_SOURCE_SHELL_STAGES -> {
-                when (val shell = restoreDriverStableSourceShell(request, processedSource, modules)) {
-                    is ShaderStructuralRestoration.Restored -> shell.source
-                    is ShaderStructuralRestoration.Preserved -> return preserved(request, shell.reason)
-                }
-            }
-            else -> processedSource
+        val finalSource = if (request.stage in RASTER_PIPELINE_STAGES) {
+            restoreSourceStageInterfaceOrder(request.source, processedSource)
+        } else {
+            processedSource
         }
         finalLiveIncludeGuardDependencyIssue(request.sourceName, request.source, finalSource)?.let { issue ->
             return preserved(request, issue)
@@ -726,32 +718,99 @@ internal object SpirvFinalEmitter {
         }
     }
 
-    private fun restoreSourceStageInterfaceOrder(originalSource: String, source: String): String {
-        val sourceOrder = sourceStructuralEntities(originalSource)
+    internal fun restoreSourceStageInterfaceOrder(originalSource: String, source: String): String {
+        val sourceDeclarations = sourceStructuralEntities(originalSource)
             .filter(::isReorderableStageInterface)
             .sortedBy { it.range.first }
-            .mapNotNull(StructuralEntity::symbol)
-            .distinct()
-            .withIndex()
-            .associate { (index, symbol) -> symbol to index }
-        if (sourceOrder.isEmpty()) return source
+        val uniqueSourceDeclarations = sourceDeclarations.groupBy(StructuralEntity::symbol)
+            .values
+            .filter { declarations -> declarations.size == 1 && declarations.single().symbol != null }
+            .map(List<StructuralEntity>::single)
+        val sourceOrder = uniqueSourceDeclarations.withIndex().associate { (index, declaration) ->
+            requireNotNull(declaration.symbol) to index
+        }
+        if (sourceOrder.size < 2) return source
 
         val declarations = structuralEntities(source)
             .filter(::isReorderableStageInterface)
+            .filter { it.symbol in sourceOrder }
             .sortedBy { it.range.first }
-        if (declarations.size < 2 || declarations.any { it.symbol !in sourceOrder }) return source
+        if (declarations.size < 2) return source
         val declarationsBySymbol = declarations.groupBy(StructuralEntity::symbol)
         if (declarationsBySymbol.values.any { it.size != 1 }) return source
+        val outputOwnership = conditionalOwnership(source, declarations.map { it.range.first }) ?: return source
 
-        val ordered = declarations.sortedBy { sourceOrder.getValue(requireNotNull(it.symbol)) }
-        if (ordered == declarations) return source
-
-        val insertionOffset = declarations.first().range.first
-        val declarationSource = ordered.joinToString(separator = "\n", postfix = "\n") { declaration ->
-            source.substring(declaration.range).trim()
+        val replacements = declarations.groupBy { declaration ->
+            outputOwnership.getValue(declaration.range.first)
+        }.values.flatMap { ownedDeclarations ->
+            val ordered = ownedDeclarations.sortedBy { sourceOrder.getValue(requireNotNull(it.symbol)) }
+            ownedDeclarations.zip(ordered).filter { (slot, declaration) -> slot !== declaration }
         }
-        val stripped = removeRanges(source, declarations.map(StructuralEntity::range))
-        return stripped.substring(0, insertionOffset) + declarationSource + stripped.substring(insertionOffset)
+        if (replacements.isEmpty()) return source
+
+        return replacements.sortedByDescending { (slot, _) -> slot.range.first }
+            .fold(source) { result, (slot, declaration) ->
+                result.replaceRange(slot.range, source.substring(declaration.range))
+            }
+    }
+
+    private fun conditionalOwnership(source: String, offsets: List<Int>): Map<Int, List<Pair<Int, Int>>>? {
+        data class LocatedDirective(val directive: PreprocessorDirective, val offset: Int)
+        data class ConditionalFrame(val id: Int, var branch: Int, val includeGuard: Boolean)
+
+        val directives = runCatching { PreprocessorProtection.protect(source, "<stage-interface-order>").directives }
+            .getOrNull() ?: return null
+        val includeGuards = directives.mapIndexedNotNull { index, opener ->
+            val next = directives.getOrNull(index + 1)
+            opener.conditionalId?.takeIf {
+                opener.kind == PreprocessorDirectiveKind.IFNDEF &&
+                    opener.macroName != null &&
+                    next?.kind == PreprocessorDirectiveKind.DEFINE &&
+                    next.macroName == opener.macroName &&
+                    next.conditionalDepth == opener.conditionalDepth + 1
+            }
+        }.toSet()
+        var searchOffset = 0
+        val located = directives.map { directive ->
+            val offset = source.indexOf(directive.exactText, searchOffset)
+            if (offset < 0) return null
+            searchOffset = offset + directive.exactText.length
+            LocatedDirective(directive, offset)
+        }
+        val frames = mutableListOf<ConditionalFrame>()
+        val ownership = mutableMapOf<Int, List<Pair<Int, Int>>>()
+        var directiveIndex = 0
+        offsets.sorted().forEach { offset ->
+            while (directiveIndex < located.size && located[directiveIndex].offset < offset) {
+                val directive = located[directiveIndex].directive
+                when (directive.kind) {
+                    PreprocessorDirectiveKind.IF,
+                    PreprocessorDirectiveKind.IFDEF,
+                    PreprocessorDirectiveKind.IFNDEF,
+                    -> {
+                        val id = requireNotNull(directive.conditionalId)
+                        frames += ConditionalFrame(id, directive.index, id in includeGuards)
+                    }
+
+                    PreprocessorDirectiveKind.ELIF,
+                    PreprocessorDirectiveKind.ELSE,
+                    -> {
+                        if (frames.lastOrNull()?.id != directive.conditionalId) return null
+                        frames.last().branch = directive.index
+                    }
+
+                    PreprocessorDirectiveKind.ENDIF -> {
+                        if (frames.lastOrNull()?.id != directive.conditionalId) return null
+                        frames.removeLast()
+                    }
+
+                    else -> Unit
+                }
+                directiveIndex++
+            }
+            ownership[offset] = frames.filterNot(ConditionalFrame::includeGuard).map { it.id to it.branch }
+        }
+        return ownership
     }
 
     private fun isReorderableStageInterface(entity: StructuralEntity): Boolean =
@@ -759,122 +818,6 @@ internal object SpirvFinalEmitter {
             entity.symbol !in STAGE_INTERFACE_QUALIFIER_SYMBOLS &&
             STAGE_INTERFACE_DECLARATION.containsMatchIn(entity.canonical) &&
             !EXPLICIT_INTERFACE_LOCATION.containsMatchIn(entity.canonical)
-
-    private fun restoreDriverStableSourceShell(
-        request: SpirvOptimizationRequest,
-        optimizedSource: String,
-        modules: List<SpirvModuleResult>,
-    ): ShaderStructuralRestoration {
-        val sourceFunctions = (
-            sourceStructuralEntities(request.source) +
-                scanSourceFunctions(request.source) +
-                scanNamedSourceFunctions(request.source)
-            ).filter { it.kind == StructuralEntityKind.FUNCTION }.distinctBy(StructuralEntity::range)
-        val sourceEntries = sourceFunctions.filter { it.identity == "function:main()" }
-        if (sourceEntries.isEmpty()) return ShaderStructuralRestoration.Restored(optimizedSource)
-        if (sourceEntries.size != 1) {
-            return ShaderStructuralRestoration.Preserved(
-                "${request.sourceName}: driver-stable source shell has ${sourceEntries.size} source main functions",
-            )
-        }
-
-        val optimizedEntities = structuralEntities(optimizedSource)
-        val optimizedFunctions = optimizedEntities.filter { it.kind == StructuralEntityKind.FUNCTION }
-        val optimizedEntries = optimizedFunctions.filter { it.identity == "function:main()" }
-        if (optimizedEntries.size != 1) {
-            return ShaderStructuralRestoration.Preserved(
-                "${request.sourceName}: driver-stable source shell has ${optimizedEntries.size} optimized main functions",
-            )
-        }
-
-        val sourceFunctionNames = sourceFunctions.mapNotNullTo(hashSetOf(), StructuralEntity::symbol)
-        val optimizedFunctionsByName = optimizedFunctions.filter { it.symbol != null }
-            .groupBy { requireNotNull(it.symbol) }
-        val selectedFunctions = linkedSetOf(optimizedEntries.single())
-        val pendingFunctions = ArrayDeque(optimizedEntries.single().references)
-        val visitedFunctionNames = linkedSetOf<String>()
-        while (pendingFunctions.isNotEmpty()) {
-            val name = pendingFunctions.removeFirst()
-            if (!visitedFunctionNames.add(name) || name in sourceFunctionNames) continue
-            optimizedFunctionsByName[name].orEmpty().forEach { function ->
-                if (selectedFunctions.add(function)) function.references.forEach(pendingFunctions::addLast)
-            }
-        }
-
-        val sourceEntities = sourceStructuralEntities(request.source)
-        val sourceSymbols = sourceEntities.flatMapTo(hashSetOf()) { entity -> entity.declaredSymbols() }
-        sourceSymbols += sourceFunctionNames
-        sourceSymbols += sourceMacroDefinitions(request.source).keys
-        val optimizedDeclarations = optimizedEntities.filter { it.kind == StructuralEntityKind.DECLARATION }
-        val optimizedDeclarationsByName = optimizedDeclarations.flatMap { declaration ->
-            declaration.declaredSymbols().map { symbol -> symbol to declaration }
-        }.groupBy({ it.first }, { it.second })
-        val selectedDeclarations = linkedSetOf<StructuralEntity>()
-        val pendingDeclarations = ArrayDeque(selectedFunctions.flatMap(StructuralEntity::references))
-        val visitedDeclarationNames = linkedSetOf<String>()
-        while (pendingDeclarations.isNotEmpty()) {
-            val name = pendingDeclarations.removeFirst()
-            if (!visitedDeclarationNames.add(name) || name in sourceSymbols) continue
-            val candidates = optimizedDeclarationsByName[name].orEmpty().distinctBy(StructuralEntity::range)
-            if (candidates.size > 1) {
-                return ShaderStructuralRestoration.Preserved(
-                    "${request.sourceName}: driver-stable source shell dependency $name is ambiguous " +
-                        "(${candidates.size} optimized declarations)",
-                )
-            }
-            candidates.singleOrNull()?.let { declaration ->
-                if (selectedDeclarations.add(declaration)) {
-                    declaration.references.forEach(pendingDeclarations::addLast)
-                }
-            }
-        }
-
-        val optimizedMain = optimizedSource.substring(optimizedEntries.single().range).trimEnd()
-        val dependencies = buildString {
-            selectedDeclarations.sortedBy { it.range.first }.forEach { declaration ->
-                append(optimizedSource.substring(declaration.range).trimEnd())
-                appendLine()
-            }
-            selectedFunctions.filterNot { it.identity == "function:main()" }
-                .sortedBy { it.range.first }.forEach { function ->
-                    append(optimizedSource.substring(function.range).trimEnd())
-                    appendLine()
-                }
-        }
-        val sourceMain = sourceEntries.single()
-        var shell = request.source.replaceRange(
-            sourceMain.range,
-            buildString {
-                if (dependencies.isNotBlank()) {
-                    append(dependencies.trimEnd())
-                    appendLine()
-                    appendLine()
-                }
-                append(optimizedMain)
-            },
-        )
-        shell = ensureForwardFunctionDeclarations(shell)
-        val bridgeSettings = modules.flatMap(SpirvModuleResult::bridgeSettings)
-            .distinctBy(ShaderSetting::name)
-            .sortedBy(ShaderSetting::name)
-        val completed = when (
-            val result = SpirvSettingBridge.completeRestoredSettings(shell, emptyList(), bridgeSettings)
-        ) {
-            is SpirvSettingBridgeRestoration.Restored -> result
-            is SpirvSettingBridgeRestoration.Preserved -> return ShaderStructuralRestoration.Preserved(result.reason)
-        }
-        val placed = when (
-            val result = SpirvSettingBridge.placeAfterDefinitions(
-                completed.source,
-                completed.settings,
-                modules.first().irisContracts.contracts,
-            )
-        ) {
-            is SpirvSettingBridgeRestoration.Restored -> result.source
-            is SpirvSettingBridgeRestoration.Preserved -> return ShaderStructuralRestoration.Preserved(result.reason)
-        }
-        return ShaderStructuralRestoration.Restored(placed)
-    }
 
     private fun preserved(request: SpirvOptimizationRequest, reason: String): SpirvFinalEmission {
         return SpirvFinalEmission(
@@ -4777,13 +4720,13 @@ private val ASSIGNED_SYMBOL =
     "(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)\\s*(?:[+\\-*/%&|^]?=(?!=)|\\+\\+|--)".toRegex()
 private val GENERATED_IDENTIFIER = "(?<![A-Za-z0-9_])_[0-9]+(?![A-Za-z0-9_])".toRegex()
 private val STRUCTURAL_ARRAY_SUFFIX = "\\[[^]]*]".toRegex()
-private val DRIVER_STABLE_INTERFACE_ORDER_SHADER_NAMES = setOf(
-    "shadow_cutout.gsh",
-    "shadow_cutout.fsh",
-    "shadow_water.gsh",
-    "shadow_water.fsh",
+private val RASTER_PIPELINE_STAGES = setOf(
+    ShaderStage.VERTEX,
+    ShaderStage.TESSELLATION_CONTROL,
+    ShaderStage.TESSELLATION_EVALUATION,
+    ShaderStage.GEOMETRY,
+    ShaderStage.FRAGMENT,
 )
-private val DRIVER_STABLE_SOURCE_SHELL_STAGES = setOf(ShaderStage.GEOMETRY, ShaderStage.FRAGMENT)
 private val STAGE_INTERFACE_DECLARATION = "\\b(?:in|out|attribute|varying)\\b".toRegex()
 private val EXPLICIT_INTERFACE_LOCATION = "\\blayout\\s*\\([^)]*\\blocation\\s*=".toRegex()
 private val STAGE_INTERFACE_QUALIFIER_SYMBOLS = setOf("in", "out", "attribute", "varying")

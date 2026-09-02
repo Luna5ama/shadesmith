@@ -504,7 +504,7 @@ class SpirvOptimizerTest {
     }
 
     @Test
-    fun restoresAnonymousBlocksExactlyAndLinksStagesAfterOptimization() = withWorkspace { workspace ->
+    fun restoresLiveAnonymousBlocksAndLinksStagesAfterOptimization() = withWorkspace { workspace ->
         val optimizer = SpirvOptimizer(workspace.resolve("optimizer"))
         val vertex = optimizer.optimize(
             SpirvOptimizationRequest(
@@ -524,7 +524,7 @@ class SpirvOptimizerTest {
         assertContains(vertex, "readonly buffer GlobalData")
         assertContains(vertex, "sharedCoord = globalValue.xy;")
         assertFalse(Regex("""\b_[0-9]+\s*\.""").containsMatchIn(vertex))
-        assertContains(fragment, "readonly buffer GlobalData")
+        assertFalse("readonly buffer GlobalData" in fragment)
         assertFalse(Regex("""}\s+_[0-9]+\s*;""").containsMatchIn(fragment))
 
         val linkDirectory = workspace.resolve("linked")
@@ -557,134 +557,207 @@ class SpirvOptimizerTest {
     }
 
     @Test
-    fun preservesUnmeasuredGraphicsDeclarationShellWhileOptimizingEntryFunction() = withWorkspace { workspace ->
+    fun preservesEveryRasterStageInterfaceOrderWithoutRetainingWholeSourceShell() = withWorkspace { workspace ->
         val fixtures = listOf(
             Triple(
-                "driver-shell.fsh",
-                ShaderStage.FRAGMENT,
-                """
-                    #version 460 compatibility
-                    uniform sampler2D retainedShellSampler;
-                    layout(location = 0) out vec4 fragColor;
-                    void main() {
-                        vec4 color = vec4(1.0);
-                        if (false) color = texture(retainedShellSampler, vec2(0.0));
-                        fragColor = color;
-                    }
-                """.trimIndent() + "\n",
+                "raster-order.vsh",
+                ShaderStage.VERTEX,
+                Pair(
+                    """
+                        #version 460 compatibility
+                        layout(location = 0) in vec3 position;
+                        out vec2 vertexUv;
+                        out vec3 vertexNormal;
+                        out vec4 vertexExtra;
+                        const int removedShellMarker = 7;
+                        void main() {
+                            vertexUv = position.xy;
+                            vertexNormal = position;
+                            vertexExtra = vec4(position, 1.0);
+                            gl_Position = vertexExtra;
+                            if (false) gl_Position.x += float(removedShellMarker);
+                        }
+                    """.trimIndent() + "\n",
+                    listOf("out vec2 vertexUv;", "out vec3 vertexNormal;", "out vec4 vertexExtra;"),
+                ),
             ),
             Triple(
-                "driver-shell.gsh",
+                "raster-order.tcs",
+                ShaderStage.TESSELLATION_CONTROL,
+                Pair(
+                    """
+                        #version 460 compatibility
+                        layout(vertices = 3) out;
+                        in vec2 vertexUv[];
+                        in vec3 vertexNormal[];
+                        in vec4 vertexExtra[];
+                        out vec2 controlUv[];
+                        out vec3 controlNormal[];
+                        out vec4 controlExtra[];
+                        const int removedShellMarker = 7;
+                        void main() {
+                            controlUv[gl_InvocationID] = vertexUv[gl_InvocationID];
+                            controlNormal[gl_InvocationID] = vertexNormal[gl_InvocationID];
+                            controlExtra[gl_InvocationID] = vertexExtra[gl_InvocationID];
+                            gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;
+                            if (gl_InvocationID == 0) {
+                                gl_TessLevelOuter[0] = 1.0;
+                                gl_TessLevelOuter[1] = 1.0;
+                                gl_TessLevelOuter[2] = 1.0;
+                                gl_TessLevelInner[0] = 1.0;
+                            }
+                            if (false) gl_out[gl_InvocationID].gl_Position.x += float(removedShellMarker);
+                        }
+                    """.trimIndent() + "\n",
+                    listOf(
+                        "in vec2 vertexUv[];",
+                        "in vec3 vertexNormal[];",
+                        "in vec4 vertexExtra[];",
+                        "out vec2 controlUv[];",
+                        "out vec3 controlNormal[];",
+                        "out vec4 controlExtra[];",
+                    ),
+                ),
+            ),
+            Triple(
+                "raster-order.tes",
+                ShaderStage.TESSELLATION_EVALUATION,
+                Pair(
+                    """
+                        #version 460 compatibility
+                        layout(triangles, equal_spacing, ccw) in;
+                        in vec2 controlUv[];
+                        in vec3 controlNormal[];
+                        in vec4 controlExtra[];
+                        out vec2 evalUv;
+                        out vec3 evalNormal;
+                        out vec4 evalExtra;
+                        const int removedShellMarker = 7;
+                        void main() {
+                            evalUv = controlUv[0] * gl_TessCoord.x + controlUv[1] * gl_TessCoord.y + controlUv[2] * gl_TessCoord.z;
+                            evalNormal = controlNormal[0] * gl_TessCoord.x + controlNormal[1] * gl_TessCoord.y + controlNormal[2] * gl_TessCoord.z;
+                            evalExtra = controlExtra[0] * gl_TessCoord.x + controlExtra[1] * gl_TessCoord.y + controlExtra[2] * gl_TessCoord.z;
+                            gl_Position = gl_in[0].gl_Position * gl_TessCoord.x + gl_in[1].gl_Position * gl_TessCoord.y + gl_in[2].gl_Position * gl_TessCoord.z;
+                            if (false) gl_Position.x += float(removedShellMarker);
+                        }
+                    """.trimIndent() + "\n",
+                    listOf(
+                        "in vec2 controlUv[];",
+                        "in vec3 controlNormal[];",
+                        "in vec4 controlExtra[];",
+                        "out vec2 evalUv;",
+                        "out vec3 evalNormal;",
+                        "out vec4 evalExtra;",
+                    ),
+                ),
+            ),
+            Triple(
+                "raster-order.gsh",
                 ShaderStage.GEOMETRY,
-                """
-                    #version 460 compatibility
-                    const int retainedShellMarker = 7;
-                    layout(points) in;
-                    layout(points, max_vertices = 1) out;
-                    void main() {
-                        gl_Position = gl_in[0].gl_Position;
-                        if (false) gl_Position.x += float(retainedShellMarker);
-                        EmitVertex();
-                        EndPrimitive();
-                    }
-                """.trimIndent() + "\n",
+                Pair(
+                    """
+                        #version 460 compatibility
+                        layout(points) in;
+                        layout(points, max_vertices = 1) out;
+                        in vec2 evalUv[];
+                        in vec3 evalNormal[];
+                        in vec4 evalExtra[];
+                        out vec2 fragUv;
+                        out vec3 fragNormal;
+                        out vec4 fragExtra;
+                        const int removedShellMarker = 7;
+                        void main() {
+                            fragUv = evalUv[0];
+                            fragNormal = evalNormal[0];
+                            fragExtra = evalExtra[0];
+                            gl_Position = gl_in[0].gl_Position;
+                            if (false) gl_Position.x += float(removedShellMarker);
+                            EmitVertex();
+                            EndPrimitive();
+                        }
+                    """.trimIndent() + "\n",
+                    listOf(
+                        "in vec2 evalUv[];",
+                        "in vec3 evalNormal[];",
+                        "in vec4 evalExtra[];",
+                        "out vec2 fragUv;",
+                        "out vec3 fragNormal;",
+                        "out vec4 fragExtra;",
+                    ),
+                ),
+            ),
+            Triple(
+                "raster-order.fsh",
+                ShaderStage.FRAGMENT,
+                Pair(
+                    """
+                        #version 460 compatibility
+                        uniform sampler2D removedShellSampler;
+                        in vec2 fragUv;
+                        in vec3 fragNormal;
+                        in vec4 fragExtra;
+                        layout(location = 3) out vec4 lateTarget;
+                        layout(location = 0) out vec4 earlyTarget;
+                        void main() {
+                            vec4 color = vec4(fragUv, fragNormal.x, fragExtra.x);
+                            if (false) color += texture(removedShellSampler, vec2(0.0));
+                            earlyTarget = color;
+                            lateTarget = color;
+                        }
+                    """.trimIndent() + "\n",
+                    listOf("in vec2 fragUv;", "in vec3 fragNormal;", "in vec4 fragExtra;"),
+                ),
             ),
         )
 
-        fixtures.forEach { (name, stage, source) ->
+        fixtures.forEach { (name, stage, fixture) ->
+            val (source, declarations) = fixture
             val result = SpirvOptimizer(workspace.resolve(stage.glslangName)).optimize(
                 SpirvOptimizationRequest(name, stage, source),
             )
 
             assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
-            if (stage == ShaderStage.FRAGMENT) {
-                assertContains(result.source, "uniform sampler2D retainedShellSampler;")
-                assertFalse("texture(retainedShellSampler" in result.source)
-            } else {
-                assertContains(result.source, "const int retainedShellMarker = 7;")
-                assertFalse("float(retainedShellMarker)" in result.source)
-            }
+            assertFalse("removedShell" in result.source)
+            assertOrdered(result.source, *declarations.toTypedArray())
             assertContains(result.source, "void main()\n{")
         }
     }
 
     @Test
-    fun preservesGraphicsStageInterfaceOrderWithoutRetainingWholeSourceShell() = withWorkspace { workspace ->
-        val fixtures = listOf(
-            Triple(
-                "shadow_cutout.fsh",
-                ShaderStage.FRAGMENT,
-                """
-                    #version 460 compatibility
-                    uniform sampler2D removedShellSampler;
-                    in vec2 fragTexcoord;
-                    in vec2 fragScreenPos;
-                    flat in uint fragMetadata;
-                    layout(location = 3) out vec4 lateTarget;
-                    layout(location = 0) out vec4 earlyTarget;
-                    void main() {
-                        vec4 color = vec4(fragTexcoord, fragScreenPos.x + float(fragMetadata), 1.0);
-                        if (false) color += texture(removedShellSampler, vec2(0.0));
-                        earlyTarget = color;
-                        lateTarget = color;
-                    }
-                """.trimIndent() + "\n",
-            ),
-            Triple(
-                "shadow_water.gsh",
-                ShaderStage.GEOMETRY,
-                """
-                    #version 460 compatibility
-                    layout(points) in;
-                    layout(points, max_vertices = 1) out;
-                    in vec2 vertTexcoord[];
-                    in vec2 vertScreenPos[];
-                    flat in uint vertMetadata[];
-                    out vec2 fragTexcoord;
-                    out vec2 fragScreenPos;
-                    flat out uint fragMetadata;
-                    const int removedShellMarker = 7;
-                    void main() {
-                        fragTexcoord = vertTexcoord[0];
-                        fragScreenPos = vertScreenPos[0];
-                        fragMetadata = vertMetadata[0];
-                        gl_Position = vec4(vertScreenPos[0], float(vertMetadata[0] & 1u), 1.0);
-                        if (false) gl_Position.x += float(removedShellMarker);
-                        EmitVertex();
-                        EndPrimitive();
-                    }
-                """.trimIndent() + "\n",
-            ),
+    fun preservesStageInterfaceOrderWithinPreprocessorOwnershipBoundaries() {
+        val original = """
+            #version 460 compatibility
+            out vec2 alwaysFirst;
+            #if defined(SETTING_BRANCH)
+            out vec3 branchFirst;
+            out vec4 branchSecond;
+            #else
+            out float elseValue;
+            #endif
+            out uint alwaysLast;
+            void main() {}
+        """.trimIndent() + "\n"
+        val decompiled = """
+            #version 460 compatibility
+            out uint alwaysLast;
+            #if defined(SETTING_BRANCH)
+            out vec4 branchSecond;
+            out vec3 branchFirst;
+            #else
+            out float elseValue;
+            #endif
+            out vec2 alwaysFirst;
+            void main() {}
+        """.trimIndent() + "\n"
+
+        val restored = SpirvFinalEmitter.restoreSourceStageInterfaceOrder(original, decompiled)
+
+        assertOrdered(restored, "out vec2 alwaysFirst;", "out uint alwaysLast;")
+        assertOrdered(restored, "out vec3 branchFirst;", "out vec4 branchSecond;")
+        assertContains(
+            restored,
+            "#if defined(SETTING_BRANCH)\nout vec3 branchFirst;\nout vec4 branchSecond;\n#else\nout float elseValue;\n#endif",
         )
-
-        fixtures.forEach { (name, stage, source) ->
-            val result = SpirvOptimizer(workspace.resolve(stage.glslangName)).optimize(
-                SpirvOptimizationRequest(name, stage, source),
-            )
-
-            assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
-            if (stage == ShaderStage.FRAGMENT) {
-                assertFalse("removedShellSampler" in result.source)
-                assertOrdered(
-                    result.source,
-                    "in vec2 fragTexcoord;",
-                    "in vec2 fragScreenPos;",
-                    "flat in uint fragMetadata;",
-                )
-            } else {
-                assertFalse("removedShellMarker" in result.source)
-                assertOrdered(
-                    result.source,
-                    "in vec2 vertTexcoord[];",
-                    "in vec2 vertScreenPos[];",
-                    "flat in uint vertMetadata[];",
-                    "out vec2 fragTexcoord;",
-                    "out vec2 fragScreenPos;",
-                    "flat out uint fragMetadata;",
-                )
-            }
-            assertContains(result.source, "void main()\n{")
-        }
     }
 
     @Test
