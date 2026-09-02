@@ -695,9 +695,6 @@ internal object SpirvFinalEmitter {
         }
         val processedSource = (processed as IrisFinalSourceProcessing.Processed).source
         val finalSource = when {
-            request.stage == ShaderStage.COMPUTE -> {
-                restoreComputeDriverFunctionBodies(request.source, processedSource)
-            }
             request.stage in RASTER_PIPELINE_STAGES -> {
                 restoreSourceStageInterfaceOrder(request.source, processedSource)
             }
@@ -822,28 +819,6 @@ internal object SpirvFinalEmitter {
             entity.symbol !in STAGE_INTERFACE_QUALIFIER_SYMBOLS &&
             STAGE_INTERFACE_DECLARATION.containsMatchIn(entity.canonical) &&
             !EXPLICIT_INTERFACE_LOCATION.containsMatchIn(entity.canonical)
-
-    private fun restoreComputeDriverFunctionBodies(originalSource: String, optimizedSource: String): String {
-        val sourceFunctions = (
-            sourceStructuralEntities(originalSource) +
-                scanSourceFunctions(originalSource) +
-                scanNamedSourceFunctions(originalSource)
-            ).filter { it.kind == StructuralEntityKind.FUNCTION && it.identity != "function:main()" }
-            .distinctBy(StructuralEntity::range)
-            .groupBy(StructuralEntity::identity)
-        val optimizedFunctions = (
-            structuralEntities(optimizedSource) +
-                scanSourceFunctions(optimizedSource) +
-                scanNamedSourceFunctions(optimizedSource)
-            ).filter { it.kind == StructuralEntityKind.FUNCTION && it.identity != "function:main()" }
-            .distinctBy(StructuralEntity::range)
-        val replacements = optimizedFunctions.mapNotNull { optimized ->
-            val source = sourceFunctions[optimized.identity]?.singleOrNull() ?: return@mapNotNull null
-            optimized.range to originalSource.substring(source.range)
-        }
-        return replacements.sortedByDescending { (range, _) -> range.first }
-            .fold(optimizedSource) { result, (range, replacement) -> result.replaceRange(range, replacement) }
-    }
 
     private fun preserved(request: SpirvOptimizationRequest, reason: String): SpirvFinalEmission {
         return SpirvFinalEmission(

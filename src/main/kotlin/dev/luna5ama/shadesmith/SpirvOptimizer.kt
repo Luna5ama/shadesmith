@@ -292,7 +292,10 @@ internal class SpirvOptimizer(
         this.workingDirectory.createDirectories()
     }
 
-    fun optimize(request: SpirvOptimizationRequest): SpirvOptimizationResult {
+    fun optimize(
+        request: SpirvOptimizationRequest,
+        profile: SpirvOptimizationProfile = SpirvOptimizationProfile.DEFAULT,
+    ): SpirvOptimizationResult {
         require(request.sourceName.isNotBlank()) { "Shader source name cannot be blank" }
         val requestDirectory = artifactDirectory(request.sourceName, request.stage, "request", request.source)
         requestDirectory.createDirectories()
@@ -317,7 +320,7 @@ internal class SpirvOptimizer(
             }
             listOf(SpirvCompilerModule("main", request.source))
         }
-        val results = optimizeModules(request, modules, requestDirectory, explicitModules)
+        val results = optimizeModules(request, modules, requestDirectory, explicitModules, profile)
         val emission = phase(request, SpirvRoundTripPhase.RESTORE, requestDirectory) {
             SpirvFinalEmitter.emit(request, results)
         }
@@ -374,15 +377,19 @@ internal class SpirvOptimizer(
         modules: List<SpirvCompilerModule>,
         requestDirectory: Path,
         generatedCompilerSource: Boolean,
+        profile: SpirvOptimizationProfile,
     ): List<SpirvModuleResult> {
         val executor = moduleExecutor ?: return modules.map { module ->
-            optimizeModule(request, module, requestDirectory, generatedCompilerSource)
+            optimizeModule(request, module, requestDirectory, generatedCompilerSource, profile)
         }
         val completion = ExecutorCompletionService<IndexedValue<SpirvModuleResult>>(executor)
         val futures = modules.mapIndexed { index, module ->
             completion.submit(
                 Callable {
-                    IndexedValue(index, optimizeModule(request, module, requestDirectory, generatedCompilerSource))
+                    IndexedValue(
+                        index,
+                        optimizeModule(request, module, requestDirectory, generatedCompilerSource, profile),
+                    )
                 },
             )
         }
@@ -416,6 +423,7 @@ internal class SpirvOptimizer(
         module: SpirvCompilerModule,
         requestDirectory: Path,
         generatedCompilerSource: Boolean,
+        profile: SpirvOptimizationProfile,
     ): SpirvModuleResult {
         val moduleDirectory = requestDirectory.resolve(
             "${safeName(module.name)}-${shortHash("${module.name}\u0000${module.source}")}",
@@ -481,9 +489,9 @@ internal class SpirvOptimizer(
 
         val optimizedSpirv = moduleDirectory.resolve("optimized.spv")
         val optimizeInvocation = if (plannedNativeContract?.requiresCompilerAdapter == true) {
-            toolchain.optimizeCrossAdapterInvocation(request.stage, originalSpirv, optimizedSpirv)
+            toolchain.optimizeCrossAdapterInvocation(request.stage, originalSpirv, optimizedSpirv, profile)
         } else {
-            toolchain.optimizeInvocation(request.stage, originalSpirv, optimizedSpirv)
+            toolchain.optimizeInvocation(request.stage, originalSpirv, optimizedSpirv, profile)
         }
         phase(request, SpirvRoundTripPhase.OPTIMIZE, moduleDirectory, moduleSourceName) {
             toolchain.execute(optimizeInvocation)
@@ -529,6 +537,7 @@ internal class SpirvOptimizer(
                 request.stage,
                 crossOriginalSpirv,
                 crossOptimizedSpirv,
+                profile,
             )
             phase(request, SpirvRoundTripPhase.OPTIMIZE, moduleDirectory, moduleSourceName) {
                 toolchain.execute(requireNotNull(crossOptimizeInvocation))
