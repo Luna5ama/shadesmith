@@ -2630,8 +2630,6 @@ internal object SpirvFinalEmitter {
                 dependencies += TargetDependencies(target, blocks.sortedBy { block -> block.sourceRange.first })
             }
         }
-        if (dependencies.isEmpty()) return ShaderStructuralRestoration.Restored(restoredSource)
-
         val selectedBlocks = dependencies.flatMap(TargetDependencies::blocks)
             .distinctBy(DependencyBlock::sourceRange)
         val selectedDefinitions = selectedBlocks.flatMap { block ->
@@ -2704,6 +2702,52 @@ internal object SpirvFinalEmitter {
         }
 
         var result = restoredSource
+        val uniqueSourceDefinitions = reachableCodeAndMacroIdentifiers(result)
+            .mapNotNull { sourceDefinitions[it]?.singleOrNull() }
+        val originalOwnership = conditionalOwnership(originalSource, uniqueSourceDefinitions.map { it.offset }).orEmpty()
+        val currentDefinitions = sourceMacroDefinitions(result)
+        val currentOffsets = uniqueSourceDefinitions.flatMap { currentDefinitions[it.name].orEmpty() }.map { it.offset }
+        val currentOwnership = conditionalOwnership(result, currentOffsets).orEmpty()
+        val includeGuardNames = sourceIncludeGuards(originalSource, sourceName).mapTo(hashSetOf()) { it.name }
+        val includeGuardIds = PreprocessorProtection.protect(result, sourceName).directives
+            .filter { it.kind == PreprocessorDirectiveKind.IFNDEF && it.macroName in includeGuardNames }
+            .mapNotNullTo(hashSetOf()) { it.conditionalId }
+        val firstReferences = DECLARATION_IDENTIFIER.findAll(maskStructuralCode(result)).groupingBy(MatchResult::value)
+            .fold(Int.MAX_VALUE) { offset, match -> minOf(offset, match.range.first) }.toMutableMap()
+        val pendingReferences = ArrayDeque(firstReferences.keys.filter(sourceDefinitions::containsKey))
+        while (pendingReferences.isNotEmpty()) {
+            val name = pendingReferences.removeFirst()
+            val offset = firstReferences.getValue(name)
+            sourceDefinitions[name].orEmpty().forEach { definition ->
+                DECLARATION_IDENTIFIER.findAll(definition.value).map(MatchResult::value).forEach { dependency ->
+                    if (dependency in sourceDefinitions && offset < firstReferences.getOrDefault(dependency, Int.MAX_VALUE)) {
+                        firstReferences[dependency] = offset
+                        pendingReferences += dependency
+                    }
+                }
+            }
+        }
+        val misplacedRanges = mutableListOf<IntRange>()
+        val relocatedDefinitions = uniqueSourceDefinitions.filter { definition ->
+            if (originalOwnership[definition.offset]?.isEmpty() != true) return@filter false
+            val current = currentDefinitions[definition.name].orEmpty()
+            if (current.isEmpty() || current.any { currentOwnership[it.offset].orEmpty().any { it.first in includeGuardIds } }) {
+                return@filter false
+            }
+            val firstReference = firstReferences.getOrDefault(definition.name, Int.MAX_VALUE)
+            if (current.any { currentOwnership[it.offset]?.isEmpty() == true && it.offset < firstReference }) {
+                return@filter false
+            }
+            val matching = current.filter { it.value.trim() == definition.value.trim() }
+            matching.forEach { misplacedRanges += it.offset until it.offset + it.exactText.length }
+            matching.isNotEmpty()
+        }
+        if (relocatedDefinitions.isNotEmpty()) {
+            result = removeRanges(result, misplacedRanges)
+            val offset = VERSION_LINE.find(result)?.range?.last?.plus(1) ?: 0
+            val text = relocatedDefinitions.sortedBy { it.offset }.joinToString("\n") { it.exactText.trimEnd() }
+            result = result.substring(0, offset) + "\n$text\n" + result.substring(offset)
+        }
         dependencies.forEach dependencyLoop@{ dependency ->
             val targetMatches = occurrences(result, dependency.target.matchText)
             if (targetMatches.size != 1) {

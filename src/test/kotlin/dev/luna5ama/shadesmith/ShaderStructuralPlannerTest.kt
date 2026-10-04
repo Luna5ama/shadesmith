@@ -1053,6 +1053,61 @@ class ShaderStructuralPlannerTest {
     }
 
     @Test
+    fun unconditionalMacroCannotRemainInsideAnUnrelatedHostBranch() {
+        val original = """
+            #version 460 compatibility
+            #ifdef HOST_DISTANT
+            uniform float distantFar;
+            #endif
+            #define GRID_SIZE 64
+            uint cells[GRID_SIZE];
+            layout(local_size_x = 1) in;
+            void main() { cells[0] = 1u; }
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            #ifdef HOST_DISTANT
+            #define GRID_SIZE 64
+            uniform float distantFar;
+            #endif
+            uint cells[GRID_SIZE];
+            layout(local_size_x = 1) in;
+            void main() { cells[0] = 1u; }
+        """.trimIndent() + "\n"
+        val result = assertIs<ShaderStructuralRestoration.Restored>(
+            restoreDirectiveMacroDependencies(original, restored),
+        ).source
+        assertTrue(result.indexOf("#define GRID_SIZE 64") < result.indexOf("#ifdef HOST_DISTANT"))
+        assertEquals(1, Regex("#define GRID_SIZE\\b").findAll(result).count())
+        assertEquals(result, assertIs<ShaderStructuralRestoration.Restored>(
+            restoreDirectiveMacroDependencies(original, result),
+        ).source)
+    }
+
+    @Test
+    fun restoredFunctionMacroDependencyPrecedesItsFirstUse() {
+        val original = """
+            #version 460 compatibility
+            #define INVALID_SLOT 0xffffffffu
+            uint lookupSlot() { return INVALID_SLOT; }
+            layout(local_size_x = 1) in;
+            void main() { uint slot = lookupSlot(); }
+        """.trimIndent() + "\n"
+        val restored = """
+            #version 460 compatibility
+            uint lookupSlot() { return INVALID_SLOT; }
+            layout(local_size_x = 1) in;
+            void main() { uint slot = lookupSlot(); }
+            #define INVALID_SLOT 0xffffffffu
+        """.trimIndent() + "\n"
+        val result = assertIs<ShaderStructuralRestoration.Restored>(
+            restoreDirectiveMacroDependencies(original, restored),
+        ).source
+        assertTrue(result.indexOf("#define INVALID_SLOT") < result.indexOf("uint lookupSlot"))
+        assertEquals(1, Regex("#define INVALID_SLOT\\b").findAll(result).count())
+    }
+
+    @Test
     fun liveIncludeGuardDependencyRestoresGuardDefinitionBeforeHostMetadata() {
         val original = """
             #version 460 compatibility
