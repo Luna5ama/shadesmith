@@ -486,6 +486,7 @@ internal object ShaderStructuralPlanner {
         stage: ShaderStage,
         compileFeedback: ShaderStructuralCompileFeedback? = null,
         activation: ProgramActivationContract? = null,
+        resourceMarkers: List<TextureResourceMarker> = emptyList(),
     ): ShaderStructuralPlanningResult {
         if (!requiresPlanning(basePlan)) {
             return ShaderStructuralPlanningResult.Preserved(
@@ -544,6 +545,8 @@ internal object ShaderStructuralPlanner {
         val structuralSymbolsBySetting = preprocessorMaterializedSettings.associateWith { setting ->
             nodes.filter { setting in it.settings }.flatMapTo(sortedSetOf()) { it.symbols }
         }
+        val macrosByName = basePlan.macros.associateBy(ShaderMacroDependency::name)
+        val resourceSymbols = resourceMarkers.associate { it.identifier to it.sourceIdentifier }
         val coupledConditionals = basePlan.conditionals.filter {
             it.disposition in setOf(
                 ShaderConditionalDisposition.CONTROL_FLOW_STATEMENT,
@@ -551,7 +554,16 @@ internal object ShaderStructuralPlanner {
                 ShaderConditionalDisposition.CONTROL_FLOW_FUNCTION,
             )
         }.mapNotNull { conditional ->
-            val symbols = structuralIdentifiers(conditional.exactSlice)
+            val symbols = structuralIdentifiers(conditional.exactSlice).toMutableSet()
+            val pending = ArrayDeque(symbols)
+            while (pending.isNotEmpty()) {
+                val symbol = pending.removeFirst()
+                val dependencies = macrosByName[symbol]?.dependencies.orEmpty() +
+                    listOfNotNull(resourceSymbols[symbol])
+                dependencies.forEach { dependency ->
+                    if (symbols.add(dependency)) pending.addLast(dependency)
+                }
+            }
             val dependencies = conditional.settingDependencies.filterTo(sortedSetOf()) { setting ->
                 setting in preprocessorMaterializedSettings &&
                     symbols.intersect(structuralSymbolsBySetting[setting].orEmpty()).isNotEmpty()
@@ -1435,6 +1447,13 @@ private class StructuralSourceModel(
             StructuralReplacement(range.first, range.last + 1, "$indent#if $condition$ending")
         }
         result = applyStructuralReplacements(result, presenceDirectiveReplacements)
+        val definedReplacements = STRUCTURAL_DEFINED_MACRO.findAll(maskStructuralCommentsAndStrings(result))
+            .mapNotNull { match ->
+                val name = match.groupValues[1].ifEmpty { match.groupValues[2] }
+                if (name !in fixedSettings || settingsByCanonical[name]?.presenceToggle != true) return@mapNotNull null
+                StructuralReplacement(match.range.first, match.range.last + 1, name)
+            }.toList()
+        result = applyStructuralReplacements(result, definedReplacements)
         val lexical = maskStructuralCommentsAndStrings(result)
         val tokenReplacements = STRUCTURAL_IDENTIFIER.findAll(lexical).mapNotNull { match ->
             aliases[match.value]?.let { alias ->

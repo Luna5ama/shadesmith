@@ -14,6 +14,63 @@ import kotlin.test.assertTrue
 
 class ShaderStructuralPlannerTest {
     @Test
+    fun couplesProbeResourceAccessToItsConditionalSourceDeclaration() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_GUIDING
+            layout(rg32ui, binding = 1) uniform uimage2D guideMarker;
+            #if defined(SETTING_GUIDING)
+            layout(rg32ui, binding = 0) uniform uimage2D guideImage;
+            #endif
+            #define STORE_GUIDE(x) imageStore(guideMarker, x, uvec4(1u))
+            layout(local_size_x = 1) in;
+            void main() {
+            #if defined SETTING_GUIDING
+                STORE_GUIDE(ivec2(gl_GlobalInvocationID.xy));
+            #endif
+            }
+        """.trimIndent()
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(
+                ShaderCompilerCopyPlanner.plan(source, "probe-image.csh"),
+                ShaderStage.COMPUTE,
+                resourceMarkers = listOf(
+                    TextureResourceMarker(
+                        "guideMarker", "guideImage", "guide", TextureMarkerAccess.WRITE, TextureMarkerKind.IMAGE,
+                    ),
+                ),
+            ),
+        ).plan
+        val disabled = planned.rows.single { it.assignment["SETTING_GUIDING"] == "false" }
+        val enabled = planned.rows.single { it.assignment["SETTING_GUIDING"] == "true" }
+        assertContains(requireNotNull(disabled.compilerPlan.compilerSource), "#define SM_STRUCT_SETTING_GUIDING 0")
+        assertContains(requireNotNull(enabled.compilerPlan.compilerSource), "#define SM_STRUCT_SETTING_GUIDING 1")
+        assertFalse(requireNotNull(disabled.compilerPlan.compilerSource).contains("defined(SM_STRUCT_SETTING_GUIDING)"))
+        assertFalse(requireNotNull(disabled.compilerPlan.compilerSource).contains("defined SM_STRUCT_SETTING_GUIDING"))
+    }
+
+    @Test
+    fun couplesMacroResourceAccessToItsConditionalDeclaration() = withWorkspace { workspace ->
+        val source = """
+            #version 460 compatibility
+            #define SETTING_GUIDING
+            #ifdef SETTING_GUIDING
+            layout(rg32ui, binding = 0) uniform uimage2D guideImage;
+            #endif
+            #define STORE_GUIDE(x) imageStore(guideImage, x, uvec4(1u))
+            layout(local_size_x = 1) in;
+            void main() {
+            #ifdef SETTING_GUIDING
+                STORE_GUIDE(ivec2(gl_GlobalInvocationID.xy));
+            #endif
+            }
+        """.trimIndent() + "\n"
+        val result = optimizeStructural(workspace, "macro-image.csh", source, ShaderStage.COMPUTE)
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertEquals(2, result.finalValidationInvocations.size)
+    }
+
+    @Test
     fun activationRecognizesDisabledBooleanPresenceSettings() {
         val source = """
             #version 460 compatibility

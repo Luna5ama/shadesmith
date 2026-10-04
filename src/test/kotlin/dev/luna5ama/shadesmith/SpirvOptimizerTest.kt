@@ -34,11 +34,30 @@ class SpirvOptimizerTest {
             val request = SpirvOptimizationRequest("$sampler.csh", ShaderStage.COMPUTE, source)
             val nativeSource = source.replace("#define sourceSampler $sampler\n", "").replace("sourceSampler", sampler)
             val result = SpirvOptimizer(workspace.resolve(sampler)).optimize(request.copy(source = nativeSource))
-            val emitted = result.source.replace(Regex("(?m)^uniform sampler2D $sampler;\\s*"), "")
+            val emitted = result.source.replace(Regex("(?m)^uniform sampler2D $sampler;\\s*"), "") + "\n" +
+                "#ifndef INCLUDE_LATE_SAMPLER\n#define INCLUDE_LATE_SAMPLER\nuniform sampler2D sourceSampler;\n#endif\n"
             val processed = IrisFinalSourceProcessor.process(request, emitted, result.modules)
             assertTrue(processed is IrisFinalSourceProcessing.Processed, processed.toString())
             assertContains(processed.source, "uniform sampler2D $sampler;")
+            assertTrue(processed.source.indexOf("uniform sampler2D $sampler;") < processed.source.indexOf("void main"))
         }
+    }
+
+    @Test
+    fun restoresAnonymousBufferReferencedThroughItsMember() = withWorkspace { workspace ->
+        val source = """
+            #version 460 compatibility
+            layout(std430, binding = 0) buffer ReservoirData { uint reservoirs[]; };
+            layout(local_size_x = 1) in;
+            void main() { reservoirs[0] += 1u; }
+        """.trimIndent() + "\n"
+        val request = SpirvOptimizationRequest("anonymous-buffer.csh", ShaderStage.COMPUTE, source)
+        val result = SpirvOptimizer(workspace).optimize(request)
+        val emitted = result.source.replace(Regex("layout[^;]*buffer ReservoirData\\s*\\{[^}]*};\\s*"), "")
+        val processed = IrisFinalSourceProcessor.process(request.copy(source = emitted), emitted, result.modules)
+        assertTrue(processed is IrisFinalSourceProcessing.Processed, "$processed\n${result.modules.single().source}")
+        assertContains(processed.source, "buffer ReservoirData")
+        assertTrue(processed.source.indexOf("buffer ReservoirData") < processed.source.indexOf("void main"))
     }
 
     @Test

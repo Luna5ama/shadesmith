@@ -3573,8 +3573,11 @@ internal object SpirvFinalEmitter {
                 ?: return@mapNotNull null
             typeName to entity
         }.groupBy({ it.first }, { it.second })
+        val firstReferences = DECLARATION_IDENTIFIER.findAll(masked).groupingBy(MatchResult::value)
+            .fold(Int.MAX_VALUE) { offset, match -> minOf(offset, match.range.first) }
         fun requiresRestoration(name: String): Boolean =
-            outputTypes[name].isNullOrEmpty() || outputTypes.getValue(name).any { it.range.first > insertionOffset }
+            outputTypes[name].isNullOrEmpty() ||
+                firstReferences.getOrDefault(name, Int.MAX_VALUE) < outputTypes.getValue(name).minOf { it.range.first }
         val referenced = DECLARATION_IDENTIFIER.findAll(masked).mapTo(linkedSetOf(), MatchResult::value)
         val pending = ArrayDeque(
             referenced.filter { name -> requiresRestoration(name) && sourceTypes[name]?.size == 1 },

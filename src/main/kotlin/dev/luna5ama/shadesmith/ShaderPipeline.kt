@@ -321,7 +321,12 @@ internal class ShaderPipeline(
                 decision.binding,
             )
         }
-        return when (val structural = ShaderStructuralPlanner.plan(plan, entryPoint.stage, activation = activation)) {
+        return when (val structural = ShaderStructuralPlanner.plan(
+            plan,
+            entryPoint.stage,
+            activation = activation,
+            resourceMarkers = probe.markers,
+        )) {
             is ShaderStructuralPlanningResult.Preserved -> error(structural.reason)
             is ShaderStructuralPlanningResult.Planned -> {
                 ShaderPreparation.Structural(

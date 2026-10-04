@@ -361,7 +361,7 @@ internal object IrisFinalSourceProcessor {
     ): String {
         val entities = sourceStructuralEntities(source)
         if (entities.isEmpty()) return source
-        val coreEntities = modules.flatMap { sourceStructuralEntities(it.liveSource) }
+        val coreEntities = modules.flatMap { sourceStructuralEntities(it.coreSource) }
         val outputFunctionReferences = entities.filter { it.kind == StructuralEntityKind.FUNCTION }
             .flatMapTo(hashSetOf(), StructuralEntity::references)
         val coreFunctionReferences = coreEntities.filter { it.kind == StructuralEntityKind.FUNCTION }
@@ -382,7 +382,8 @@ internal object IrisFinalSourceProcessor {
             buildList {
                 entity.symbol?.let { add(it to entity) }
                 val exact = source.substring(entity.range)
-                if (entity.kind == StructuralEntityKind.DECLARATION && BLOCK_DECLARATION.containsMatchIn(exact)) {
+                if (entity.kind == StructuralEntityKind.DECLARATION && '{' in exact &&
+                    !SOURCE_TYPE_DECLARATION.containsMatchIn(entity.canonical)) {
                     blockMemberNames(exact).forEach { add(it to entity) }
                 }
             }
@@ -457,10 +458,18 @@ internal object IrisFinalSourceProcessor {
             .filter { it.kind == StructuralEntityKind.DECLARATION }
             .groupBy { entity -> Triple(entity.canonical, entity.symbol, conditionalPath(entity.range.first)) }
             .values.flatMapTo(mutableListOf()) { duplicates -> duplicates.drop(1).map(StructuralEntity::range) }
-        val originalResources = sourceStructuralEntities(original).filter { entity ->
+        val unconditionalDeclarations = entities.filter {
+            it.kind == StructuralEntityKind.DECLARATION && conditionalPath(it.range.first).isEmpty()
+        }.groupBy { it.canonical to it.symbol }
+        entities.filter { it.kind == StructuralEntityKind.DECLARATION && conditionalPath(it.range.first).isNotEmpty() }
+            .filter { entity ->
+                unconditionalDeclarations[entity.canonical to entity.symbol].orEmpty().any { it.range.first < entity.range.first }
+            }.forEach { removals += it.range }
+        fun resourceDeclaration(entity: StructuralEntity): Boolean =
             entity.kind == StructuralEntityKind.DECLARATION &&
-                RESOURCE_DECLARATION.containsMatchIn(entity.canonical)
-        }
+                (RESOURCE_DECLARATION.containsMatchIn(entity.canonical) ||
+                    ('{' in entity.canonical && !SOURCE_TYPE_DECLARATION.containsMatchIn(entity.canonical)))
+        val originalResources = sourceStructuralEntities(original).filter(::resourceDeclaration)
         val aliases = directives.filter { located ->
             located.directive.kind == PreprocessorDirectiveKind.DEFINE &&
                 !located.directive.macroFunctionLike && located.directive.macroName != null
@@ -480,17 +489,17 @@ internal object IrisFinalSourceProcessor {
             BLOCK_RESOURCE_NAME.find(entity.canonical)?.groupValues?.get(1)
                 ?: entity.symbol?.let(::resolvedSymbol)
         val originalResourcesByKey = originalResources.groupBy { resourceKey(it) }
-        entities.filter { entity ->
-            entity.kind == StructuralEntityKind.DECLARATION &&
-                RESOURCE_DECLARATION.containsMatchIn(entity.canonical)
-        }.groupBy(::resourceKey).forEach { (key, group) ->
+        val firstFunction = entities.firstOrNull { it.kind == StructuralEntityKind.FUNCTION }?.range?.first ?: source.length
+        entities.filter(::resourceDeclaration).groupBy(::resourceKey).forEach { (key, group) ->
             val originals = originalResourcesByKey[key].orEmpty()
             if (originals.isNotEmpty() && group.size > originals.size) {
                 val remainingPreferred = originals.groupingBy(StructuralEntity::semantic).eachCount().toMutableMap()
                 val retained = linkedSetOf<StructuralEntity>()
+                group.filter { it.range.first < firstFunction && conditionalPath(it.range.first).isEmpty() }
+                    .take(originals.size).forEach(retained::add)
                 group.forEach { entity ->
                     val remaining = remainingPreferred[entity.semantic] ?: 0
-                    if (remaining > 0) {
+                    if (remaining > 0 && retained.size < originals.size) {
                         retained += entity
                         remainingPreferred[entity.semantic] = remaining - 1
                     }
@@ -681,21 +690,35 @@ internal object IrisFinalSourceProcessor {
             val original: Boolean,
         )
 
-        val declared = sourceStructuralEntities(source).mapNotNullTo(hashSetOf()) { it.symbol }
+        val declared = sourceStructuralEntities(source).flatMapTo(hashSetOf()) { entity ->
+            listOfNotNull(entity.symbol) + if ('{' in entity.canonical &&
+                !SOURCE_TYPE_DECLARATION.containsMatchIn(entity.canonical)) {
+                blockMemberNames(entity.canonical)
+            } else emptyList()
+        }
         val originalCandidates = sourceStructuralEntities(original).map { Candidate(original, it, true) }
         val moduleCandidates = modules.flatMap { module ->
             sourceStructuralEntities(module.liveSource).map { Candidate(module.liveSource, it, false) }
         }.filter { candidate ->
-            candidate.entity.symbol?.matches(GENERATED_LIVE_SYMBOL) == true ||
-                RESOURCE_DECLARATION.containsMatchIn(candidate.entity.canonical) ||
+            (candidate.entity.symbol?.matches(GENERATED_LIVE_SYMBOL) == true &&
+                !RESOURCE_DECLARATION.containsMatchIn(candidate.entity.canonical)) ||
                 SOURCE_TYPE_DECLARATION.containsMatchIn(candidate.entity.canonical)
+        } + modules.flatMap { module ->
+            sourceStructuralEntities(module.source).filter { RESOURCE_DECLARATION.containsMatchIn(it.canonical) }
+                .map { Candidate(module.source, it, false) }
         }
         val candidates = (originalCandidates + moduleCandidates).filter { candidate ->
             candidate.entity.kind == StructuralEntityKind.DECLARATION &&
                 candidate.entity.symbol != null &&
                 candidate.entity.symbol !in IMPLICIT_RUNTIME_BUILTINS &&
                 !COMPILER_ONLY_IDENTIFIER.containsMatchIn(candidate.entity.canonical)
-        }.groupBy { requireNotNull(it.entity.symbol) }
+        }.flatMap { candidate ->
+            val names = listOf(requireNotNull(candidate.entity.symbol)) +
+                if (RESOURCE_DECLARATION.containsMatchIn(candidate.entity.canonical)) {
+                    blockMemberNames(candidate.entity.canonical)
+                } else emptyList()
+            names.map { it to candidate }
+        }.groupBy({ it.first }, { it.second })
         if (candidates.isEmpty()) return IrisFinalSourceProcessing.Processed(source)
         val references = (
             identifiers(source) + locateDirectives(source).flatMap { identifiers(it.directive.exactText) }
@@ -729,7 +752,7 @@ internal object IrisFinalSourceProcessor {
             ordered += selected.getValue(symbol)
         }
         selected.keys.sorted().forEach(::visit)
-        val insertion = ordered.joinToString("\n") { candidate ->
+        val insertion = ordered.distinctBy { it.entity.identity }.joinToString("\n") { candidate ->
             candidate.source.substring(candidate.entity.range).trim()
         } + "\n"
         val firstFunction = sourceStructuralEntities(source)
@@ -913,7 +936,6 @@ internal object IrisFinalSourceProcessor {
     private val IDENTIFIER = "[A-Za-z_][A-Za-z0-9_]*".toRegex()
     private val LOCAL_SIZE_LAYOUT = "\\blocal_size_[xyz](?:_id)?\\b".toRegex()
     private val LIVE_STAGE_INTERFACE_DECLARATION = "\\b(?:in|out)\\b".toRegex()
-    private val BLOCK_DECLARATION = "\\b(?:uniform|buffer)\\b[^{;]*\\{".toRegex()
     private val BLOCK_RESOURCE_NAME = "\\b(?:uniform|buffer)[\\t ]+([A-Za-z_][A-Za-z0-9_]*)[\\t ]*\\{".toRegex()
     private val SOURCE_TYPE_DECLARATION = "^struct[\\t ]+[A-Za-z_][A-Za-z0-9_]*\\b".toRegex()
     private val RESOURCE_DECLARATION = "\\b(?:uniform|buffer)\\b".toRegex()

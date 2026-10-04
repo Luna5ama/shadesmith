@@ -446,6 +446,65 @@ class IrisFinalSourcePolicyTest {
     }
 
     @Test
+    fun retainsBufferMembersWhenStorageQualifiersUseAMacro() {
+        val source = """
+            #version 460 compatibility
+            #define STORAGE restrict readonly buffer
+            layout(std430, binding = 0) STORAGE ReservoirData { uint reservoirs[]; };
+            uint readReservoir() { return reservoirs[0]; }
+            void main() { uint value = readReservoir(); }
+        """.trimIndent() + "\n"
+        val processed = assertIs<IrisFinalSourceProcessing.Processed>(
+            IrisFinalSourceProcessor.process(
+                SpirvOptimizationRequest("macro-buffer.csh", ShaderStage.COMPUTE, source),
+                source,
+                emptyList(),
+            ),
+        )
+        assertContains(processed.source, "STORAGE ReservoirData { uint reservoirs[]; };")
+        assertContains(processed.source, "#define STORAGE restrict readonly buffer")
+    }
+
+    @Test
+    fun keepsConditionalTypeInItsBranchWhenAllUsesFollowTheDeclaration() {
+        val source = """
+            #version 460 compatibility
+            //#define SETTING_GUIDING
+            void unrelated() {}
+            #ifdef SETTING_GUIDING
+            struct GuideReservoir { vec3 radiance; };
+            GuideReservoir guideReservoir() { return GuideReservoir(vec3(1.0)); }
+            #endif
+            void main() {}
+        """.trimIndent() + "\n"
+        assertEquals(source, SpirvFinalEmitter.restoreMissingSourceTypeDeclarations(
+            SpirvOptimizationRequest("conditional-type.csh", ShaderStage.COMPUTE, source),
+            source,
+        ))
+    }
+
+    @Test
+    fun removesConditionalConstantAlreadyDeclaredBeforeTheBranch() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_GUIDING
+            const uint STATS_PER_SLOT = 2u;
+            #ifdef SETTING_GUIDING
+            const uint STATS_PER_SLOT = 2u;
+            #endif
+            void main() { uint index = STATS_PER_SLOT; }
+        """.trimIndent() + "\n"
+        val processed = assertIs<IrisFinalSourceProcessing.Processed>(
+            IrisFinalSourceProcessor.process(
+                SpirvOptimizationRequest("conditional-constant.csh", ShaderStage.COMPUTE, source),
+                source,
+                emptyList(),
+            ),
+        )
+        assertEquals(1, "const uint STATS_PER_SLOT".toRegex().findAll(processed.source).count())
+    }
+
+    @Test
     fun restoresRuntimeEntryBeforeRemovingCompilerOnlyCompatibilityBranch() {
         val original = """
             #version 460 compatibility
