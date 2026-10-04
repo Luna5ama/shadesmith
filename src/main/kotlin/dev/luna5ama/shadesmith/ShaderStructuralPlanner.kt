@@ -609,7 +609,24 @@ internal object ShaderStructuralPlanner {
             )
         }
 
+        val functions = sourceStructuralEntities(basePlan.originalSource)
+            .filter { it.kind == StructuralEntityKind.FUNCTION && it.symbol != null }
+            .groupBy { requireNotNull(it.symbol) }
+        val reachableNames = linkedSetOf("main")
+        val pendingFunctions = ArrayDeque(reachableNames)
+        while (pendingFunctions.isNotEmpty()) {
+            functions[pendingFunctions.removeFirst()].orEmpty().forEach { function ->
+                function.references.filter { it in functions && reachableNames.add(it) }.forEach(pendingFunctions::addLast)
+            }
+        }
+        val functionRanges = reachableNames.flatMap { functions[it].orEmpty() }.map { it.range }
+        val sourceLines = StructuralLineMap(basePlan.originalSource).lines
+        val entryDependencies = coupledConditionals.filter { (conditional, _) ->
+            val offset = sourceLines[conditional.sourceLine - 1].range.first
+            functionRanges.any { offset in it }
+        }.flatMapTo(sortedSetOf()) { it.second }
         val hiddenDependencies = mutableListOf<Set<String>>()
+        if (entryDependencies.isNotEmpty()) hiddenDependencies += entryDependencies
         repeat(settings.size.coerceAtLeast(1)) {
             val graph = buildGraph(nodes, settings, hiddenDependencies)
             val assignments = coverageAssignments(graph, settings)?.filterNot { assignment ->

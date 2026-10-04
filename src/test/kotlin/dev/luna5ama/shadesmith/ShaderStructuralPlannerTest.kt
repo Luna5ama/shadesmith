@@ -14,6 +14,49 @@ import kotlin.test.assertTrue
 
 class ShaderStructuralPlannerTest {
     @Test
+    fun combinesIndependentInterfaceChangesUsedByTheSameEntry() = withWorkspace { workspace ->
+        val source = """
+            #version 460 compatibility
+            //#define SETTING_A
+            //#define SETTING_B
+            #ifdef SETTING_A
+            flat out uint outputA;
+            #else
+            flat out float outputA;
+            #endif
+            #ifdef SETTING_B
+            flat out uint outputB;
+            #else
+            flat out float outputB;
+            #endif
+            void writeA() {
+            #ifdef SETTING_A
+                outputA = 1u;
+            #else
+                outputA = 1.0;
+            #endif
+            }
+            void writeB() {
+            #ifdef SETTING_B
+                outputB = 2u;
+            #else
+                outputB = 2.0;
+            #endif
+            }
+            void main() { gl_Position = vec4(0.0); writeA(); writeB(); }
+        """.trimIndent() + "\n"
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(ShaderCompilerCopyPlanner.plan(source, "combined.vsh"), ShaderStage.VERTEX),
+        ).plan
+        assertEquals(1, planned.graph.components.size)
+        assertEquals(4, planned.rows.size)
+        assertTrue(planned.rows.any { it.assignment.values.all { value -> value == "true" } })
+        val result = optimizeStructural(workspace, "combined.vsh", source, ShaderStage.VERTEX)
+        assertEquals(SpirvEmissionMode.OPTIMIZED, result.emissionMode, result.fallbackReason)
+        assertEquals(4, result.finalValidationInvocations.size)
+    }
+
+    @Test
     fun couplesProbeResourceAccessToItsConditionalSourceDeclaration() = withWorkspace { workspace ->
         val source = """
             #version 460 compatibility
