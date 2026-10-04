@@ -21,39 +21,6 @@ import kotlin.test.assertTrue
 
 class PipelineIntegrationTest {
     @Test
-    fun configuredShaderPreservationEmitsExactSourceWithoutToolProcesses() = withWorkspace { workspace ->
-        val input = workspace.resolve("input").createDirectories()
-        val artifacts = workspace.resolve("artifacts")
-        val source = """
-            #version 460 compatibility
-            layout(local_size_x = 1) in;
-            void main() {}
-        """.trimIndent()
-        input.resolve("shadow_cutout.csh").writeText(source)
-        input.resolve("shadesmith.json").writeText(
-            """
-                {
-                    "preserveShaders": ["shadow_cutout.csh"]
-                }
-            """.trimIndent(),
-        )
-        val ioContext = IOContext(input, workspace.resolve("output"))
-
-        val result = context(ioContext) {
-            ShaderPipeline(artifacts, cacheIdentityProvider = { null }).optimize(
-                listOf(requireNotNull(ioContext.readInputRoot("shadow_cutout.csh"))),
-            )
-        }.single()
-
-        assertEquals(ShaderProcessingMode.PRESERVED_STRUCTURAL, result.processingMode)
-        assertEquals(source, result.file.code)
-        assertEquals(0, result.processCount)
-        assertContains(result.fallbackReason.orEmpty(), "preserveShaders")
-        assertContains(artifacts.resolve("boundaries.tsv").readText(), "shadow_cutout.csh")
-        assertContains(artifacts.resolve("outputs.tsv").readText(), "explicitly preserved")
-    }
-
-    @Test
     fun shadersPropertiesProgramPredicateParticipatesInRootCacheIdentity() = withWorkspace { workspace ->
         val input = workspace.resolve("input").createDirectories()
         val output = workspace.resolve("output")

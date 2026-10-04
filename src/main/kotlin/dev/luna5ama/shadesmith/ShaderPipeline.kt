@@ -17,24 +17,6 @@ internal enum class ShaderProcessingMode {
     PRESERVED_STRUCTURAL,
 }
 
-internal const val NO_SSA_REWRITE_DIRECTIVE = "// shadesmith: optimizer no-ssa-rewrite"
-
-internal fun requestedOptimizationProfile(source: String): SpirvOptimizationProfile {
-    return if (source.lineSequence().any { it.trim() == NO_SSA_REWRITE_DIRECTIVE }) {
-        SpirvOptimizationProfile.NO_SSA_REWRITE
-    } else {
-        SpirvOptimizationProfile.DEFAULT
-    }
-}
-
-private fun SpirvOptimizationProfile.structuralConvergence(): SpirvOptimizationProfile = when (this) {
-    SpirvOptimizationProfile.DEFAULT -> SpirvOptimizationProfile.STRUCTURAL_CONVERGENCE
-    SpirvOptimizationProfile.NO_SSA_REWRITE -> SpirvOptimizationProfile.STRUCTURAL_CONVERGENCE_NO_SSA
-    SpirvOptimizationProfile.STRUCTURAL_CONVERGENCE,
-    SpirvOptimizationProfile.STRUCTURAL_CONVERGENCE_NO_SSA,
-    -> this
-}
-
 internal data class OptimizedShaderFile(
     val file: ShaderFile,
     val stage: ShaderStage,
@@ -308,17 +290,6 @@ internal class ShaderPipeline(
                 ),
             )
         }
-        if (sourceName in ioContext.config.preserveShaders) {
-            return ShaderPreparation.Completed(
-                file,
-                entryPoint.stage,
-                preservedStructural(
-                    file,
-                    entryPoint.stage,
-                    "$sourceName: explicitly preserved by shadesmith.json preserveShaders",
-                ),
-            )
-        }
         val activation = ioContext.programActivations.contractFor(file.path.nameWithoutExtension)
         val planContract = buildString {
             appendLine(ROOT_DERIVED_PLAN_CONTRACT)
@@ -392,7 +363,6 @@ internal class ShaderPipeline(
                         source = preparation.file.code,
                         finalSourcePolicy = finalSourcePolicy,
                     ),
-                    requestedOptimizationProfile(preparation.file.code),
                 ),
             )
             is ShaderPreparation.CompilerCopy -> {
@@ -412,7 +382,6 @@ internal class ShaderPipeline(
                             compilerModules = listOf(module),
                             finalSourcePolicy = finalSourcePolicy,
                         ),
-                        requestedOptimizationProfile(preparation.file.code),
                     ),
                 )
             }
@@ -443,7 +412,6 @@ internal class ShaderPipeline(
                                         structuralPlan = preparation.plan,
                                         finalSourcePolicy = finalSourcePolicy,
                                     ),
-                                    requestedOptimizationProfile(preparation.file.code),
                                 ),
                             )
                         } catch (e: SpirvRoundTripException) {
@@ -468,16 +436,15 @@ internal class ShaderPipeline(
     private fun optimizeStructuralWithConvergenceRetry(
         optimizer: SpirvOptimizer,
         request: SpirvOptimizationRequest,
-        profile: SpirvOptimizationProfile,
     ): SpirvOptimizationResult {
         val initial = try {
-            optimizer.optimize(request, profile)
+            optimizer.optimize(request)
         } catch (exception: SpirvRoundTripException) {
             if (!recoverableStructuralRoundTrip(exception)) throw exception
-            return optimizer.optimize(request, profile.structuralConvergence())
+            return optimizer.optimize(request, SpirvOptimizationProfile.STRUCTURAL_CONVERGENCE)
         }
         if (initial.emissionMode == SpirvEmissionMode.OPTIMIZED) return initial
-        return optimizer.optimize(request, profile.structuralConvergence())
+        return optimizer.optimize(request, SpirvOptimizationProfile.STRUCTURAL_CONVERGENCE)
     }
 
     context(ioContext: IOContext)

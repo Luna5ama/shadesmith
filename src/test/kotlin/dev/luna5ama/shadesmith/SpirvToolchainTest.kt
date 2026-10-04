@@ -63,34 +63,10 @@ class SpirvToolchainTest {
             },
             SpirvToolchain.STRUCTURAL_CONVERGENCE_PASSES,
         )
-        assertEquals(expected.size - 2, SpirvToolchain.NO_SSA_REWRITE_PASSES.size)
-        assertFalse("--ssa-rewrite" in SpirvToolchain.NO_SSA_REWRITE_PASSES)
-        assertEquals(
-            expected.count { it == "--eliminate-dead-code-aggressive" },
-            SpirvToolchain.NO_SSA_REWRITE_PASSES.count { it == "--eliminate-dead-code-aggressive" },
-        )
-        assertEquals(
-            SpirvToolchain.NO_SSA_REWRITE_PASSES.toMutableList().apply {
-                add(indexOf("--eliminate-dead-functions"), "--inline-entry-points-exhaustive")
-            },
-            SpirvToolchain.STRUCTURAL_CONVERGENCE_NO_SSA_PASSES,
-        )
         assertTrue(
             SpirvToolchain.OPTIMIZER_PASSES.none {
                 it in setOf("--redundancy-elimination", "--merge-return", "--if-conversion", "-O", "-Os")
             },
-        )
-    }
-
-    @Test
-    fun sourceDirectiveSelectsNoSsaProfileWithoutMatchingIncidentalText() {
-        assertEquals(
-            SpirvOptimizationProfile.NO_SSA_REWRITE,
-            requestedOptimizationProfile("#version 460\n  $NO_SSA_REWRITE_DIRECTIVE  \nvoid main() {}"),
-        )
-        assertEquals(
-            SpirvOptimizationProfile.DEFAULT,
-            requestedOptimizationProfile("#version 460\n// $NO_SSA_REWRITE_DIRECTIVE later\nvoid main() {}"),
         )
     }
 
@@ -240,24 +216,6 @@ class SpirvToolchainTest {
             SpirvOptimizationProfile.STRUCTURAL_CONVERGENCE,
         )
         assertTrue("--inline-entry-points-exhaustive" in convergenceInvocation.command)
-
-        val noSsaInvocation = toolchain.optimizeInvocation(
-            ShaderStage.COMPUTE,
-            input,
-            output,
-            SpirvOptimizationProfile.NO_SSA_REWRITE,
-        )
-        assertFalse("--ssa-rewrite" in noSsaInvocation.command)
-        assertFalse("--inline-entry-points-exhaustive" in noSsaInvocation.command)
-
-        val noSsaConvergenceInvocation = toolchain.optimizeInvocation(
-            ShaderStage.COMPUTE,
-            input,
-            output,
-            SpirvOptimizationProfile.STRUCTURAL_CONVERGENCE_NO_SSA,
-        )
-        assertFalse("--ssa-rewrite" in noSsaConvergenceInvocation.command)
-        assertTrue("--inline-entry-points-exhaustive" in noSsaConvergenceInvocation.command)
     }
 
     @Test

@@ -99,9 +99,7 @@ internal data class SpirvInvocation(
 
 internal enum class SpirvOptimizationProfile {
     DEFAULT,
-    NO_SSA_REWRITE,
     STRUCTURAL_CONVERGENCE,
-    STRUCTURAL_CONVERGENCE_NO_SSA,
 }
 
 internal data class SpirvToolResult(
@@ -522,30 +520,19 @@ internal class SpirvToolchain(
             "--simplify-instructions",
         )
         val CROSS_ADAPTER_PASSES = OPTIMIZER_PASSES
-        val NO_SSA_REWRITE_PASSES = withoutSsaRewrite(OPTIMIZER_PASSES)
         val STRUCTURAL_CONVERGENCE_PASSES = OPTIMIZER_PASSES.toMutableList().apply {
-            add(indexOf("--eliminate-dead-functions"), "--inline-entry-points-exhaustive")
-        }.toList()
-        val STRUCTURAL_CONVERGENCE_NO_SSA_PASSES = NO_SSA_REWRITE_PASSES.toMutableList().apply {
             add(indexOf("--eliminate-dead-functions"), "--inline-entry-points-exhaustive")
         }.toList()
 
         private fun optimizerPasses(profile: SpirvOptimizationProfile): List<String> = when (profile) {
             SpirvOptimizationProfile.DEFAULT -> OPTIMIZER_PASSES
-            SpirvOptimizationProfile.NO_SSA_REWRITE -> NO_SSA_REWRITE_PASSES
             SpirvOptimizationProfile.STRUCTURAL_CONVERGENCE -> STRUCTURAL_CONVERGENCE_PASSES
-            SpirvOptimizationProfile.STRUCTURAL_CONVERGENCE_NO_SSA -> STRUCTURAL_CONVERGENCE_NO_SSA_PASSES
         }
 
         private fun crossAdapterPasses(profile: SpirvOptimizationProfile): List<String> = when (profile) {
             SpirvOptimizationProfile.DEFAULT -> CROSS_ADAPTER_PASSES
-            SpirvOptimizationProfile.NO_SSA_REWRITE -> NO_SSA_REWRITE_PASSES
             SpirvOptimizationProfile.STRUCTURAL_CONVERGENCE -> STRUCTURAL_CONVERGENCE_PASSES
-            SpirvOptimizationProfile.STRUCTURAL_CONVERGENCE_NO_SSA -> STRUCTURAL_CONVERGENCE_NO_SSA_PASSES
         }
-
-        private fun withoutSsaRewrite(passes: List<String>): List<String> =
-            passes.filterNot { it == "--ssa-rewrite" }
 
         private val LOG_NAME_INVALID_CHAR = "[^A-Za-z0-9._-]".toRegex()
     }

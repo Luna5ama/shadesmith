@@ -61,5 +61,4 @@ data class FixedSizedTexture(
 data class Config(
     val screen: Map<String, TextureFormat> = emptyMap(),
     val fixed: Map<String, FixedSizedTexture> = emptyMap(),
-    val preserveShaders: Set<String> = emptySet(),
 )
