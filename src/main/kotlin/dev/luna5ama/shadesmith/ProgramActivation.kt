@@ -177,6 +177,8 @@ private fun evaluateActivationExpression(
 private fun String.asProgramLong(): Long? {
     val value = trim().removeSuffix("u").removeSuffix("U")
     return when {
+        value == "true" -> 1L
+        value == "false" -> 0L
         value.startsWith("0x", ignoreCase = true) -> value.substring(2).toLongOrNull(16)
         else -> value.toLongOrNull()
     }

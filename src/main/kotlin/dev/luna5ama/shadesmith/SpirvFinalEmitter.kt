@@ -3567,7 +3567,7 @@ internal object SpirvFinalEmitter {
                 ?: return@mapNotNull null
             typeName to entity
         }.groupBy({ it.first }, { it.second })
-        val outputTypes = outputEntities.mapNotNull { entity ->
+        val outputTypes = sourceStructuralEntities(source).mapNotNull { entity ->
             if (entity.kind != StructuralEntityKind.DECLARATION) return@mapNotNull null
             val typeName = STRUCT_DECLARATION_NAME.find(entity.canonical)?.groupValues?.get(1)
                 ?: return@mapNotNull null

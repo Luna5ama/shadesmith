@@ -14,6 +14,38 @@ import kotlin.test.assertTrue
 
 class ShaderStructuralPlannerTest {
     @Test
+    fun activationRecognizesDisabledBooleanPresenceSettings() {
+        val source = """
+            #version 460 compatibility
+            #define SETTING_GUIDING
+            #define SETTING_CACHE
+            #if defined(SETTING_GUIDING) && defined(SETTING_CACHE)
+            layout(std430, binding = 0) buffer GuideData { uint data[]; };
+            uint guideIndex() { return 0u; }
+            #endif
+            layout(local_size_x = 1) in;
+            void main() { data[guideIndex()] = 1u; }
+        """.trimIndent()
+        val activation = ProgramActivationIndex.parse("""
+            #if defined(SETTING_GUIDING) && defined(SETTING_CACHE)
+            program.prepare5.enabled = true
+            #else
+            program.prepare5.enabled = false
+            #endif
+        """.trimIndent()).contractFor("prepare5")
+        val planned = assertIs<ShaderStructuralPlanningResult.Planned>(
+            ShaderStructuralPlanner.plan(
+                ShaderCompilerCopyPlanner.plan(source, "prepare5.csh"),
+                ShaderStage.COMPUTE,
+                activation = activation,
+            ),
+        ).plan
+        assertEquals(1, planned.rows.size)
+        assertEquals(mapOf("SETTING_GUIDING" to "true", "SETTING_CACHE" to "true"), planned.rows.single().assignment)
+        assertContains(planned.rows.single().compilerPlan.compilerCandidateSource, "uint guideIndex()")
+    }
+
+    @Test
     fun independentStructuralComponentsUseCoverageRowsInsteadOfCartesianProduct() = withWorkspace { workspace ->
         val base = ShaderCompilerCopyPlanner.plan(independentResources(), "independent.csh")
 

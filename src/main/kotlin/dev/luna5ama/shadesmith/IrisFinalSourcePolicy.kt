@@ -687,6 +687,7 @@ internal object IrisFinalSourceProcessor {
             sourceStructuralEntities(module.liveSource).map { Candidate(module.liveSource, it, false) }
         }.filter { candidate ->
             candidate.entity.symbol?.matches(GENERATED_LIVE_SYMBOL) == true ||
+                RESOURCE_DECLARATION.containsMatchIn(candidate.entity.canonical) ||
                 SOURCE_TYPE_DECLARATION.containsMatchIn(candidate.entity.canonical)
         }
         val candidates = (originalCandidates + moduleCandidates).filter { candidate ->

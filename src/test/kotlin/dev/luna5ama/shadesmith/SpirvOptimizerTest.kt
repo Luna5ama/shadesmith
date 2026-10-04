@@ -21,6 +21,27 @@ import kotlin.test.assertTrue
 
 class SpirvOptimizerTest {
     @Test
+    fun restoresLiveHostSamplerDeclarationsAfterAliasExpansion() = withWorkspace { workspace ->
+        listOf("colortex10", "shadowcolor5").forEach { sampler ->
+            val source = """
+                #version 460 compatibility
+                #define sourceSampler $sampler
+                uniform sampler2D sourceSampler;
+                layout(rgba16f, binding = 0) uniform image2D target;
+                layout(local_size_x = 1) in;
+                void main() { imageStore(target, ivec2(0), texelFetch(sourceSampler, ivec2(0), 0)); }
+            """.trimIndent() + "\n"
+            val request = SpirvOptimizationRequest("$sampler.csh", ShaderStage.COMPUTE, source)
+            val nativeSource = source.replace("#define sourceSampler $sampler\n", "").replace("sourceSampler", sampler)
+            val result = SpirvOptimizer(workspace.resolve(sampler)).optimize(request.copy(source = nativeSource))
+            val emitted = result.source.replace(Regex("(?m)^uniform sampler2D $sampler;\\s*"), "")
+            val processed = IrisFinalSourceProcessor.process(request, emitted, result.modules)
+            assertTrue(processed is IrisFinalSourceProcessing.Processed, processed.toString())
+            assertContains(processed.source, "uniform sampler2D $sampler;")
+        }
+    }
+
+    @Test
     fun preservesUnreferencedIrisDispatchMetadataInFinalSource() = withWorkspace { workspace ->
         val cases = listOf(
             "const ivec3 workGroups = ivec3(5120, 1, 1);",

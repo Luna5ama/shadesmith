@@ -416,6 +416,36 @@ class IrisFinalSourcePolicyTest {
     }
 
     @Test
+    fun movesGuardedSourceTypeWithoutDuplicatingItsDefinition() {
+        val original = """
+            #version 460 compatibility
+            #ifndef INCLUDE_RESERVOIR
+            #define INCLUDE_RESERVOIR
+            struct Reservoir { vec3 radiance; };
+            #endif
+            void main() { Reservoir value; }
+        """.trimIndent() + "\n"
+        val emitted = """
+            #version 460 compatibility
+            void consume(Reservoir value) {}
+            #ifndef INCLUDE_RESERVOIR
+            #define INCLUDE_RESERVOIR
+            struct Reservoir { vec3 radiance; };
+            #endif
+            void main() { Reservoir value; consume(value); }
+        """.trimIndent() + "\n"
+        val processed = assertIs<IrisFinalSourceProcessing.Processed>(
+            IrisFinalSourceProcessor.process(
+                SpirvOptimizationRequest("guarded-type.csh", ShaderStage.COMPUTE, original),
+                emitted,
+                emptyList(),
+            ),
+        )
+        assertEquals(1, "struct Reservoir".toRegex().findAll(processed.source).count())
+        assertTrue(processed.source.indexOf("struct Reservoir") < processed.source.indexOf("void consume"))
+    }
+
+    @Test
     fun restoresRuntimeEntryBeforeRemovingCompilerOnlyCompatibilityBranch() {
         val original = """
             #version 460 compatibility
