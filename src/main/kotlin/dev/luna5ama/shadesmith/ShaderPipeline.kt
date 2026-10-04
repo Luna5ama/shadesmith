@@ -14,7 +14,6 @@ import kotlin.io.path.writeText
 internal enum class ShaderProcessingMode {
     SPIRV_ROUND_TRIP,
     PRESERVED_HOST_INTEGRATION,
-    PRESERVED_STRUCTURAL,
 }
 
 internal data class OptimizedShaderFile(
@@ -323,14 +322,7 @@ internal class ShaderPipeline(
             )
         }
         return when (val structural = ShaderStructuralPlanner.plan(plan, entryPoint.stage, activation = activation)) {
-            is ShaderStructuralPlanningResult.Preserved -> {
-                ShaderPreparation.Completed(
-                    file,
-                    entryPoint.stage,
-                    preservedStructural(file, entryPoint.stage, structural.reason, activation.predicate),
-                    decision.binding,
-                )
-            }
+            is ShaderStructuralPlanningResult.Preserved -> error(structural.reason)
             is ShaderStructuralPlanningResult.Planned -> {
                 ShaderPreparation.Structural(
                     file,
@@ -388,41 +380,24 @@ internal class ShaderPipeline(
             is ShaderPreparation.Structural -> {
                 val candidates = materializations.map { it.moduleOrThrow() }
                 when (val finalized = preparation.plan.deduplicate(candidates)) {
-                    is ShaderStructuralMaterializationResult.Preserved -> {
-                        preservedStructural(
+                    is ShaderStructuralMaterializationResult.Preserved -> error(finalized.reason)
+                    is ShaderStructuralMaterializationResult.Materialized -> {
+                        optimizedFile(
                             preparation.file,
                             preparation.stage,
-                            finalized.reason,
                             preparation.activationPredicate,
-                        )
-                    }
-                    is ShaderStructuralMaterializationResult.Materialized -> {
-                        try {
-                            optimizedFile(
-                                preparation.file,
-                                preparation.stage,
-                                preparation.activationPredicate,
-                                optimizeStructuralWithConvergenceRetry(
-                                    optimizer,
-                                    SpirvOptimizationRequest(
-                                        sourceName = sourceName(preparation.file),
-                                        stage = preparation.stage,
-                                        source = preparation.file.code,
-                                        compilerModules = finalized.modules.map { it.module },
-                                        structuralPlan = preparation.plan,
-                                        finalSourcePolicy = finalSourcePolicy,
-                                    ),
+                            optimizeStructuralWithConvergenceRetry(
+                                optimizer,
+                                SpirvOptimizationRequest(
+                                    sourceName = sourceName(preparation.file),
+                                    stage = preparation.stage,
+                                    source = preparation.file.code,
+                                    compilerModules = finalized.modules.map { it.module },
+                                    structuralPlan = preparation.plan,
+                                    finalSourcePolicy = finalSourcePolicy,
                                 ),
-                            )
-                        } catch (e: SpirvRoundTripException) {
-                            if (!recoverableStructuralRoundTrip(e)) throw e
-                            preservedStructural(
-                                preparation.file,
-                                preparation.stage,
-                                structuralRoundTripFallbackReason(preparation.file, e),
-                                preparation.activationPredicate,
-                            )
-                        }
+                            ),
+                        )
                     }
                 }
             }
@@ -584,14 +559,13 @@ internal class ShaderPipeline(
         activationPredicate: String,
         result: SpirvOptimizationResult,
     ): OptimizedShaderFile {
+        check(result.emissionMode == SpirvEmissionMode.OPTIMIZED) {
+            "${sourceName(file)}: ${result.fallbackReason}"
+        }
         return OptimizedShaderFile(
             file = file.copy(code = result.source),
             stage = stage,
-            processingMode = if (result.emissionMode == SpirvEmissionMode.OPTIMIZED) {
-                ShaderProcessingMode.SPIRV_ROUND_TRIP
-            } else {
-                ShaderProcessingMode.PRESERVED_STRUCTURAL
-            },
+            processingMode = ShaderProcessingMode.SPIRV_ROUND_TRIP,
             textureAccess = result.modules
                 .map { it.textureAccess }
                 .fold(
@@ -617,43 +591,11 @@ internal class ShaderPipeline(
         )
     }
 
-    private fun preservedStructural(
-        file: ShaderFile,
-        stage: ShaderStage,
-        reason: String,
-        activationPredicate: String = "unconstrained",
-    ): OptimizedShaderFile {
-        return OptimizedShaderFile(
-            file = file,
-            stage = stage,
-            processingMode = ShaderProcessingMode.PRESERVED_STRUCTURAL,
-            textureAccess = TextureAccessAnalyzer.fromOptimizedSource(file.code),
-            moduleCount = 0,
-            fallbackReason = reason,
-            activationPredicate = activationPredicate,
-        )
-    }
-
     private fun recoverableStructuralRoundTrip(exception: SpirvRoundTripException): Boolean {
         val causes = generateSequence<Throwable>(exception) { it.cause }.toList()
         if (causes.any { it is InterruptedException }) return false
         val tool = causes.filterIsInstance<SpirvToolException>().firstOrNull()
         return tool?.exitCode != null || tool == null
-    }
-
-    private fun structuralRoundTripFallbackReason(
-        file: ShaderFile,
-        exception: SpirvRoundTripException,
-    ): String {
-        val detail = generateSequence<Throwable>(exception) { it.cause }
-            .last()
-            .message
-            .orEmpty()
-            .lineSequence()
-            .firstOrNull()
-            .orEmpty()
-        return "${sourceName(file)}: structural module round-trip failed closed during " +
-            "${exception.phase.displayName}: $detail"
     }
 
     private fun describeFailure(file: ShaderFile, exception: Exception): ShaderPipelineFailure {

@@ -177,7 +177,7 @@ class PipelineIntegrationTest {
     }
 
     @Test
-    fun invalidStructuralSignatureFailsClosedToExactSource() = withWorkspace { workspace ->
+    fun invalidStructuralSignatureDoesNotPublishUnprocessedSource() = withWorkspace { workspace ->
         val input = workspace.resolve("input")
         val output = workspace.resolve("output")
         val artifacts = workspace.resolve("artifacts")
@@ -203,26 +203,27 @@ class PipelineIntegrationTest {
         )
         val ioContext = IOContext(input, output)
 
-        val result = context(ioContext) {
-            ShaderPipeline(
-                artifacts,
-                capabilityProvider = {
-                    OpenGlSpirvCapabilities("test", true, artifacts.resolve("capabilities"))
-                },
-                cacheIdentityProvider = { null },
-            ).optimize(
-                listOf(
-                    requireNotNull(ioContext.readInputRoot("composite.csh")),
-                    requireNotNull(ioContext.readInputRoot("final.fsh")),
-                ),
-            )
-        }.single { it.file.path.name == "composite.csh" }
+        val failure = assertFailsWith<SpirvRoundTripException> {
+            context(ioContext) {
+                ShaderPipeline(
+                    artifacts,
+                    capabilityProvider = {
+                        OpenGlSpirvCapabilities("test", true, artifacts.resolve("capabilities"))
+                    },
+                    cacheIdentityProvider = { null },
+                ).optimize(
+                    listOf(
+                        requireNotNull(ioContext.readInputRoot("composite.csh")),
+                        requireNotNull(ioContext.readInputRoot("final.fsh")),
+                    ),
+                )
+            }
+        }
 
-        assertEquals(ShaderProcessingMode.PRESERVED_STRUCTURAL, result.processingMode)
-        assertEquals(source, result.file.code)
-        assertContains(result.fallbackReason.orEmpty(), "structural module round-trip failed closed")
-        assertContains(result.fallbackReason.orEmpty(), "OpenGL SPIR-V compilation")
-        assertContains(artifacts.resolve("boundaries.tsv").readText(), "composite.csh")
+        assertContains(failure.message.orEmpty(), "composite.csh")
+        assertContains(failure.message.orEmpty(), "OpenGL SPIR-V compilation")
+        assertContains(artifacts.resolve("failures.tsv").readText(), "composite.csh")
+        assertFalse(artifacts.resolve("outputs.tsv").exists())
     }
 
     @Test

@@ -51,8 +51,8 @@ include-expanded input.
 Preprocessor regions that cannot coexist in one legal module are structural. Settings are grouped only when they share
 structural dependencies, rows are deduplicated by ABI/capability signature, and each root is limited to 32 structural
 modules. If restored structural modules do not share one optimized semantic body, or an exact contract anchor cannot be
-recovered, Shadesmith records the reason and conservatively preserves the include-expanded root instead of guessing an
-AST merge. Suffixless host fragments without a standalone `#version`/`main` contract are also preserved explicitly.
+recovered, processing fails with retained diagnostics and leaves previous output intact. Standalone shaders must pass
+the round trip; suffixless host fragments without a `#version`/`main` contract are preserved explicitly.
 
 `workGroups`, `workGroupsRender`, buffer and shadow host constants, buffer-format comment directives, and
 `DRAWBUFFERS`/`RENDERTARGETS` comments are source contracts: their original bytes and ordering are restored after the
