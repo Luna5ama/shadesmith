@@ -14,10 +14,11 @@ import kotlin.test.assertTrue
 
 class ShaderStructuralPlannerTest {
     @Test
-    fun couplesProbeResourceAccessToItsConditionalSourceDeclaration() {
+    fun couplesProbeResourceAccessToItsConditionalSourceDeclaration() = withWorkspace { workspace ->
         val source = """
             #version 460 compatibility
             #define SETTING_GUIDING
+            #define SETTING_DEBUG 1 //[0 1]
             layout(rg32ui, binding = 1) uniform uimage2D guideMarker;
             #if defined(SETTING_GUIDING)
             layout(rg32ui, binding = 0) uniform uimage2D guideImage;
@@ -25,7 +26,7 @@ class ShaderStructuralPlannerTest {
             #define STORE_GUIDE(x) imageStore(guideMarker, x, uvec4(1u))
             layout(local_size_x = 1) in;
             void main() {
-            #if defined SETTING_GUIDING
+            #if defined SETTING_GUIDING && SETTING_DEBUG > 0
                 STORE_GUIDE(ivec2(gl_GlobalInvocationID.xy));
             #endif
             }
@@ -47,6 +48,7 @@ class ShaderStructuralPlannerTest {
         assertContains(requireNotNull(enabled.compilerPlan.compilerSource), "#define SM_STRUCT_SETTING_GUIDING 1")
         assertFalse(requireNotNull(disabled.compilerPlan.compilerSource).contains("defined(SM_STRUCT_SETTING_GUIDING)"))
         assertFalse(requireNotNull(disabled.compilerPlan.compilerSource).contains("defined SM_STRUCT_SETTING_GUIDING"))
+        optimizeAll(workspace, source, ShaderStage.COMPUTE, materialize(workspace, source, planned))
     }
 
     @Test

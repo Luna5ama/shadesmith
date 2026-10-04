@@ -1451,7 +1451,7 @@ private class StructuralSourceModel(
             .mapNotNull { match ->
                 val name = match.groupValues[1].ifEmpty { match.groupValues[2] }
                 if (name !in fixedSettings || settingsByCanonical[name]?.presenceToggle != true) return@mapNotNull null
-                StructuralReplacement(match.range.first, match.range.last + 1, name)
+                StructuralReplacement(match.range.first, match.range.last + 1, "($name != 0)")
             }.toList()
         result = applyStructuralReplacements(result, definedReplacements)
         val lexical = maskStructuralCommentsAndStrings(result)
