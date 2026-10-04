@@ -1506,6 +1506,38 @@ class ShaderCompilerCopyTest {
         assertFalse("#include" in expanded)
     }
 
+    @Test
+    fun conditionalIncludesDoNotSuppressOtherBranchesOrLaterUnconditionalIncludes() = withWorkspace { workspace ->
+        val input = workspace.resolve("input")
+        Files.createDirectories(input)
+        input.resolve("root.csh").writeText(
+            """
+                #version 460 compatibility
+                #ifdef SETTING_FEATURE
+                #include "guarded.glsl"
+                #else
+                #include "guarded.glsl"
+                #endif
+                #include "guarded.glsl"
+                #include "guarded.glsl"
+                void main() {}
+            """.trimIndent(),
+        )
+        input.resolve("guarded.glsl").writeText(
+            "#ifndef INCLUDE_guarded\n#define INCLUDE_guarded\n#include \"nested.glsl\"\n#endif\n",
+        )
+        input.resolve("nested.glsl").writeText(
+            "#ifndef INCLUDE_nested\n#define INCLUDE_nested\nconst float value = 1.0;\n#endif\n",
+        )
+        val ioContext = IOContext(input, workspace.resolve("output"))
+        val expanded = context(ioContext) {
+            resolveIncludes(listOf(requireNotNull(ioContext.readInputRoot("root.csh")))).single().code
+        }
+        assertEquals(3, "#define INCLUDE_guarded".toRegex().findAll(expanded).count())
+        assertEquals(3, "#define INCLUDE_nested".toRegex().findAll(expanded).count())
+        assertFalse("#include" in expanded)
+    }
+
     private fun withWorkspace(block: (Path) -> Unit) {
         val workspace = Files.createTempDirectory("shadesmith compiler copy test ")
         try {

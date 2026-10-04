@@ -42,7 +42,7 @@ internal class OpenGlSpirvCapabilityProbe(
             append('\u0000')
             append(PROBE_CONTRACT)
         }
-        return memoryCache.computeIfAbsent(identity) {
+        return memoryCache.computeIfAbsent("$identity\u0000$workingDirectory") {
             runProbe(identity)
         }
     }
