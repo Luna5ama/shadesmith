@@ -15,7 +15,7 @@ private val PREPROCESSOR_CONDITIONAL_REGEX =
 private val UNIFORM_REGEX =
     """^\s*uniform\s+($IDENTIFIER_REGEX_STR)\s+($IDENTIFIER_REGEX_STR)\s*;.*$""".toRegex(RegexOption.MULTILINE)
 
-private val FUNC_EXCLUDE_PREFIX = listOf("colors2", "voxy_emitFragment")
+private val FUNC_EXCLUDE_PREFIX = listOf("colors_", "voxy_emitFragment")
 
 fun cleanUnused(file: ShaderFile): ShaderFile {
     var newCode = file.code
