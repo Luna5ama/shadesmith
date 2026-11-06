@@ -16,16 +16,16 @@ private object LabPBRMetal {
 }
 
 private fun BlockScope.nameContainsAny(vararg substrings: String): Boolean =
-    substrings.any { baseState.name.contains(it) }
+    substrings.any { baseState.blockID.contains(it) }
 
 private fun BlockScope.nameEqualsAny(vararg names: String): Boolean =
-    names.any { baseState.name == it }
+    names.any { baseState.blockID == it }
 
 private fun BlockScope.nameStartsWithAny(vararg prefixes: String): Boolean =
-    prefixes.any { baseState.name.startsWith("${it}_") }
+    prefixes.any { baseState.blockID.startsWith("${it}_") }
 
 private fun BlockScope.materialPBR(): MaterialPBR {
-    val name = baseState.name
+    val name = baseState.blockID
     return when {
         nameEqualsAny("air", "cave_air", "void_air", "structure_void") ->
             MaterialPBR(1.0f, 1.0f)
@@ -187,6 +187,28 @@ object SmallFoliageFlag: PBRProvider<PBRValue.Bool> {
     }
 }
 
+object FullCubeFlag : PBRProvider<PBRValue.Bool> {
+    override val defaultValue: PBRValue.Bool = PBRValue.Bool(false)
+    override fun BlockScope.provide(): Sequence<Pair<BlockState, PBRValue.Bool>> = sequence {
+        if (nameEquals("lava")) {
+            yield(baseState to PBRValue.Bool(true))
+        } else {
+            yield(baseState to PBRValue.Bool(property.isFullCube))
+        }
+    }
+}
+
+class BlockModelID(private val modelIds: Map<BlockState, UInt>) : PBRProvider<PBRValue.UInt32> {
+    override val defaultValue: PBRValue.UInt32 = PBRValue.UInt32(0u)
+
+    override fun BlockScope.provide(): Sequence<Pair<BlockState, PBRValue.UInt32>> = sequence {
+        val value = PBRValue.UInt32(modelIds[baseState] ?: 0u)
+        yield(baseState to value)
+        if (nameEquals(BlockNames.ShortGrass)) {
+            yield(BlockState("grass") to value)
+        }
+    }
+}
 
 object Emissive : PBRProvider<PBRValue.UInt4> {
     override val defaultValue: PBRValue.UInt4 = PBRValue.UInt4(0u)

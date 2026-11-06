@@ -20,6 +20,7 @@ sealed interface PBRValue<T, R> {
 
     data class UInt4(override val value: UByte) : Identity<UByte>
     data class UInt8(override val value: UByte) : Identity<UByte>
+    data class UInt32(override val value: UInt) : Identity<UInt>
     data class Unorm4(override val value: Float) : PBRValue<Float, UByte> {
         override val rawData: UByte
             get() = (value * 15.0f).roundToInt().coerceIn(0, 15).toUByte()
@@ -37,9 +38,9 @@ sealed interface PBRValue<T, R> {
 }
 
 class BlockScope(val baseState: BlockState, val property: BlockProperty) {
-    fun nameEndsWith(vararg suffixes: String): Boolean = suffixes.any { baseState.name.endsWith(it) }
-    fun nameEquals(vararg names: String): Boolean = names.any { baseState.name == it }
-    fun nameContains(vararg substrings: String): Boolean = substrings.any { baseState.name.contains(it) }
+    fun nameEndsWith(vararg suffixes: String): Boolean = suffixes.any { baseState.blockID.endsWith(it) }
+    fun nameEquals(vararg names: String): Boolean = names.any { baseState.blockID == it }
+    fun nameContains(vararg substrings: String): Boolean = substrings.any { baseState.blockID.contains(it) }
 }
 
 interface PBRProvider<P : PBRValue<*, *>> {
@@ -49,6 +50,12 @@ interface PBRProvider<P : PBRValue<*, *>> {
 
 context(scope: BlockScope)
 fun <P : PBRValue<*, *>> PBRProvider<P>.provide() = with(scope) {
-    if (baseState.name.isEmpty()) sequenceOf(baseState to defaultValue)
+    if (baseState.blockID.isEmpty()) sequenceOf(baseState to defaultValue)
     else provide()
 }.toMap()
+
+context(scope: BlockScope)
+@Suppress("UNCHECKED_CAST")
+fun PBRProvider<out PBRValue<*, *>>.provideErased(): Map<BlockState, PBRValue<*, *>> {
+    return (this as PBRProvider<PBRValue<*, *>>).provide()
+}

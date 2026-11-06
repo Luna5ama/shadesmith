@@ -6,77 +6,178 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.file.Path
+import java.util.zip.ZipFile
 import kotlin.io.path.bufferedWriter
 import kotlin.io.path.createDirectories
 import kotlin.io.path.outputStream
 
 context(ioContext: IOContext)
-fun generateHardcodedPBR() {
-    println("Generating hardcoded PBR data...")
+fun generateHardcodedPBR() = generateHardcodedPBR(acquireLatestMinecraftAssets())
+
+context(ioContext: IOContext)
+internal fun generateHardcodedPBR(assets: MinecraftAssets) {
+    println("Generating hardcoded PBR data from Minecraft ${assets.versionId}...")
     val blockPropertiesPath = ioContext.inputPath.resolve("block.properties")
     val texturesPath = ioContext.inputPath.resolve("textures")
 
-    // Read all blocks from blocklist.json
-    println("Loading block list...")
-    val blockListJson = loadBlockList()
-    val blocks = parseBlocks(blockListJson)
-    println("Loaded ${blocks.size} unique block types")
-
-    // Generate PBR data for all blocks
-    println("Generating PBR data for blocks...")
-    val blockStateToPBRData = mutableMapOf<BlockState, List<LUTData>>()
-
-    for ((minecraftId, statePropertyMap) in blocks) {
-        // For each block type, we need to pass each state separately to the assembler
-        for ((blockState, property) in statePropertyMap) {
-            val pbrData = PBRAssemblerImpl.provide(blockState, property)
-            for ((state, data) in pbrData) {
-                blockStateToPBRData[state] = data
-            }
-        }
+    println("Loading block list and vanilla block models...")
+    val blocks = parseBlocks(loadBlockList()).toMutableMap()
+    val bundledBlockIDs = blocks.keys.mapTo(hashSetOf(), BlockState::blockID)
+    ZipFile(assets.clientJar.toFile()).use { zip ->
+        zip.entries().asSequence()
+            .filterNot { it.isDirectory }
+            .map { it.name }
+            .filter { it.startsWith("assets/minecraft/blockstates/") && it.endsWith(".json") }
+            .map { it.removePrefix("assets/minecraft/blockstates/").removeSuffix(".json") }
+            .filter { it.isNotEmpty() && '/' !in it }
+            .sorted()
+            .filterNot { it in bundledBlockIDs }
+            .forEach { blocks[BlockState(it)] = BlockProperty(blockID = it) }
     }
-    println("Generated PBR data for ${blockStateToPBRData.size} block states")
+    val models = BlockModels.load(assets.clientJar, blocks)
+    val modelPalette = buildBlockModelPalette(models)
+    val generation = preparePBRGeneration(blocks, models, modelPalette)
+    println("Generated PBR data for ${generation.blockStateToMaterialId.size} block states")
+    println("Created palette with ${generation.palette.size} material IDs")
 
-    // Create palette by deduplicating PBR data
-    println("Creating palette...")
-    val pbrDataToPalette = mutableMapOf<List<LUTData>, Int>()
-    val reservedMaterialIDs = listOf(
-        listOf("water", "flowing_water")
-    )
-
-    val reserved = reservedMaterialIDs.asSequence()
-        .withIndex()
-        .flatMap { (index, blockNames) -> blockNames.map { BlockState(it) to (index + 1) } }
-        .toMap()
-    val blockStateToMaterialId = reserved.toMutableMap()
-    var nextMaterialId = reservedMaterialIDs.size
-
-    for ((state, data) in blockStateToPBRData) {
-        if (state in blockStateToMaterialId) {
-            continue // Skip reserved IDs
-        }
-        val materialId = pbrDataToPalette.getOrPut(data) {
-            ++nextMaterialId
-        }
-        blockStateToMaterialId[state] = materialId
-    }
-    val palette = pbrDataToPalette.toList() +
-            reserved.entries
-                .distinctBy { it.value }
-                .map { (state, id) -> blockStateToPBRData[state]!! to id }
-    println("Created palette with ${pbrDataToPalette.size} unique material IDs")
-
-    // Write block.properties
     println("Writing block.properties...")
-    writeBlockProperties(blockPropertiesPath, blockStateToMaterialId)
-
-    // Write LUT files
+    writeBlockProperties(blockPropertiesPath, generation.blockStateToMaterialId)
     println("Writing LUT files...")
-    writeLUTFiles(texturesPath, palette)
+    writeLUTFiles(
+        texturesPath,
+        generation.palette.map { (data, materialId) -> data.take(2) to materialId },
+        generation.defaultPBRData.take(2)
+    )
+    writeBlockModelLUT(texturesPath.resolve("pbr_lut_2.bin"), generation.modelMetadataByMaterialId)
+
+    val blockModelGLSL = generateBlockModelGLSL(modelPalette, assets)
+    writeBlockModelOutputs(blockModelGLSL)
+    println(
+        "Generated block models: ${blockModelGLSL.counts.states} states, " +
+            "${blockModelGLSL.counts.geometries} geometries, ${blockModelGLSL.counts.quads} quads"
+    )
     println("Hardcoded PBR generation complete!")
+
+    println("PBR layout:")
+    generation.layout.forEach { entry ->
+        println("Texture ${entry.index}: format=${entry.format}")
+        val pad = entry.fields.maxOf { it.field.length }
+        entry.fields.forEach { field ->
+            print("\t")
+            print("${field.field}:".padEnd(pad + 1))
+            print("encoding=${field.encoding},".padEnd(12))
+            print('\t')
+            print("bitOffset=${field.bitOffset},\t")
+            print("bitWidth=${field.bitWidth},\t")
+            print("signed=${field.signed}")
+            println()
+        }
+    }
 }
 
+internal data class PBRGeneration(
+    val blockStateToMaterialId: Map<BlockState, Int>,
+    val palette: List<Pair<List<LUTData>, Int>>,
+    val defaultPBRData: List<LUTData>,
+    val modelMetadataByMaterialId: Map<Int, List<UInt>>,
+    val layout: PBRLayout
+)
+
+internal fun preparePBRGeneration(
+    properties: Map<BlockState, BlockProperty>,
+    models: BlockModelsResult,
+    modelPalette: BlockModelPalette
+): PBRGeneration {
+    val expandedProperties = expandBlockProperties(properties, models)
+    val assembler = PBRAssembler(defaultPBRFields(modelPalette.modelIdByState.mapValues { (_, rows) -> rows[63] }))
+    val blockStateToPBRData = linkedMapOf<BlockState, List<LUTData>>()
+    for ((state, property) in expandedProperties.entries.sortedWith(compareBy({ it.key.blockID }, { selectorKey(it.key.states) }))) {
+        for ((providedState, data) in assembler.provide(state, property)) {
+            val previous = blockStateToPBRData.putIfAbsent(providedState, data)
+            require(previous == null || previous == data) { "Conflicting PBR data for block state $providedState" }
+        }
+    }
+
+    val blockStateToMaterialId = linkedMapOf<BlockState, Int>()
+    var nextMaterialId = 1
+    for (state in blockStateToPBRData.keys.sortedWith(compareBy({ it.blockID }, { selectorKey(it.states) }))) {
+        blockStateToMaterialId[state] = if (state.blockID == "water" || state.blockID == "flowing_water") {
+            1
+        } else {
+            ++nextMaterialId
+        }
+    }
+    require((blockStateToMaterialId.values.maxOrNull() ?: 0) < 16384) {
+        "Hardcoded PBR material IDs exceed the 16384-entry voxel material capacity"
+    }
+
+    val materialIdToPBRData = sortedMapOf<Int, List<LUTData>>()
+    for ((state, materialId) in blockStateToMaterialId) {
+        val data = blockStateToPBRData.getValue(state)
+        val previous = materialIdToPBRData.putIfAbsent(materialId, data)
+        require(previous == null || previous == data) {
+            "Material ID $materialId is assigned to block states with different PBR data"
+        }
+    }
+    val emptyModelMetadata = List(64) { 0u }
+    val modelMetadataByMaterialId = sortedMapOf<Int, List<UInt>>()
+    for ((state, materialId) in blockStateToMaterialId) {
+        val metadata = modelPalette.modelIdByState[state] ?: emptyModelMetadata
+        val previous = modelMetadataByMaterialId.putIfAbsent(materialId, metadata)
+        require(previous == null || previous == metadata) {
+            "Material ID $materialId is assigned to block states with different model geometry"
+        }
+    }
+    return PBRGeneration(
+        blockStateToMaterialId = blockStateToMaterialId,
+        palette = materialIdToPBRData.map { (materialId, data) -> data to materialId },
+        defaultPBRData = assembler.defaultData,
+        modelMetadataByMaterialId = modelMetadataByMaterialId,
+        layout = assembler.layout
+    )
+}
+
+private fun expandBlockProperties(
+    properties: Map<BlockState, BlockProperty>,
+    models: BlockModelsResult
+): Map<BlockState, BlockProperty> {
+    val supportedByBlock = models.supported.groupBy { it.state.blockID }
+    val unsupportedByBlock = models.unsupported.groupBy(UnsupportedGeometry::blockID)
+    val result = linkedMapOf<BlockState, BlockProperty>()
+    for ((blockID, blockProperties) in properties.entries.groupBy { it.key.blockID }.toSortedMap()) {
+        val expanded = mutableListOf<Pair<BlockState, BlockProperty>>()
+        supportedByBlock[blockID]?.forEach { expanded += it.state to it.property }
+        unsupportedByBlock[blockID]?.forEach { unsupported ->
+            for ((state, property) in blockProperties) {
+                val selector = mergeSelectors(state.states, unsupported.selector) ?: continue
+                // Model ID 0 has no precise intersection geometry. Keep visible unsupported
+                // states conservative instead of dropping them from the voxel tree.
+                expanded += BlockState(blockID, selector) to property.copy(isFullCube = true)
+            }
+        }
+        val states = expanded.ifEmpty { blockProperties.map { it.key to it.value } }
+        for ((state, property) in states) {
+            val previous = result.putIfAbsent(state, property)
+            require(previous == null || previous == property) { "Conflicting expanded block state: $state" }
+        }
+    }
+    return result
+}
+
+private fun mergeSelectors(left: Map<String, String>, right: Map<String, String>): Map<String, String>? {
+    val result = left.toSortedMap()
+    for ((property, value) in right) {
+        if (result[property]?.let { it != value } == true) return null
+        result[property] = value
+    }
+    return result
+}
+
+private fun selectorKey(selector: Map<String, String>) =
+    selector.toSortedMap().entries.joinToString(",") { "${it.key}=${it.value}" }
 private fun loadBlockList(): JsonArray {
     val resourceStream = object {}.javaClass.getResourceAsStream("/blockdata/blocklist.json")
         ?: error("Could not find blocklist.json in resources")
@@ -84,88 +185,47 @@ private fun loadBlockList(): JsonArray {
     return Json.parseToJsonElement(jsonText).jsonArray
 }
 
-private fun loadBlockNameMapping(): Map<String, String> {
-    val resourceStream = object {}.javaClass.getResourceAsStream("/blockdata/list_of_block_by_version.csv")
-        ?: error("Could not find list_of_block_by_version.csv in resources")
-    val mapping = mutableMapOf<String, String>()
-    resourceStream.bufferedReader().useLines { lines ->
-        lines.drop(1).forEach { line ->
-            val parts = line.split(',')
-            if (parts.size >= 2) {
-                val displayName = parts[0].trim()
-                val minecraftId = parts[1].trim()
-                mapping[displayName] = minecraftId
-            }
+private fun parseBlocks(blockListJson: JsonArray): Map<BlockState, BlockProperty> {
+    return blockListJson.asSequence()
+        .flatMap {
+            val jsonObject = it.jsonObject
+            BlockProperty.fromJsonObject(jsonObject).toList()
         }
-    }
-    return mapping
-}
-
-private fun parseBlocks(blockListJson: JsonArray): Map<String, Map<BlockState, BlockProperty>> {
-    val blocks = mutableMapOf<String, MutableMap<BlockState, BlockProperty>>()
-    val nameMapping = loadBlockNameMapping()
-
-    for (element in blockListJson) {
-        val jsonObject = element.jsonObject
-        // BlockProperty.fromJsonObject returns Map<BlockState, BlockProperty>
-        val blockStateProperties = BlockProperty.fromJsonObject(jsonObject)
-
-        // Convert each BlockState's variant name to Minecraft ID using the CSV mapping
-        for ((blockState, property) in blockStateProperties) {
-            val variantDisplayName = blockState.name
-
-            // Clean up "No Translation Key: " prefix if present
-            val cleanedName = if (variantDisplayName.startsWith("No Translation Key: ")) {
-                variantDisplayName.substring("No Translation Key: ".length)
-            } else {
-                variantDisplayName
-            }
-
-            val minecraftId = nameMapping[cleanedName] ?: run {
-                val name = cleanedName.lowercase().replace(" ", "_").replace("-", "_")
-                println("No Minecraft ID found for block state '$variantDisplayName', falling back to guessed name '$name'")
-                name
-            }
-
-            // Create a new BlockState with the Minecraft ID instead of display name
-            val minecraftBlockState = BlockState(minecraftId, blockState.states)
-
-            blocks.getOrPut(minecraftId) { mutableMapOf() }[minecraftBlockState] = property
-        }
-    }
-
-    return blocks
+        .toMap()
 }
 
 
 private fun writeBlockProperties(path: Path, blockStateToMaterialId: Map<BlockState, Int>) {
     path.parent?.createDirectories()
 
-    val materialIdToStates = mutableMapOf<Int, MutableList<BlockState>>()
-    for ((state, materialId) in blockStateToMaterialId) {
-        materialIdToStates.getOrPut(materialId) { mutableListOf() }.add(state)
-    }
+    val materialIdToStates = blockStateToMaterialId.entries
+        .groupingBy { it.value }
+        .fold(listOf<BlockState>()) { states, entry -> states + entry.key }
 
     path.bufferedWriter().use { writer ->
         writer.write("# Generated hardcoded PBR material IDs\n")
         writer.write("# Material ID to block states mapping\n\n")
 
-        for ((materialId, states) in materialIdToStates.entries.sortedBy { it.key }) {
-            val blockIds = states.joinToString(" ") { state ->
-                buildString {
-                    append(state.name)
-                    if (state.states.isNotEmpty()) {
-                        append(":")
-                        append(state.states.entries.joinToString(":") { "${it.key}=${it.value}" })
-                    }
-                }
-            }
+        for ((materialId, states) in materialIdToStates.toList().sortedBy { it.first }) {
+            val blockIds = states.joinToString(" ", transform = ::blockStateKey)
             writer.write("block.$materialId = $blockIds\n")
         }
     }
 }
 
-private fun writeLUTFiles(texturesPath: Path, pbrDataToPalette: List<Pair<List<LUTData>, Int>>) {
+private fun blockStateKey(state: BlockState) = buildString {
+    append(state.blockID)
+    if (state.states.isNotEmpty()) {
+        append(":")
+        append(state.states.entries.joinToString(":") { "${it.key}=${it.value}" })
+    }
+}
+
+private fun writeLUTFiles(
+    texturesPath: Path,
+    pbrDataToPalette: List<Pair<List<LUTData>, Int>>,
+    defaultPBRData: List<LUTData>
+) {
     texturesPath.createDirectories()
 
     if (pbrDataToPalette.isEmpty()) {
@@ -211,8 +271,7 @@ private fun writeLUTFiles(texturesPath: Path, pbrDataToPalette: List<Pair<List<L
 
         // Create a buffer for the entire LUT (1D texture)
         val textureData = ByteArray((maxMaterialId + 1) * bytesPerEntry)
-        val prepended =
-            pbrDataToPalette + (PBRAssemblerImpl.provide(BlockState(""), BlockProperty()).first().second to 0)
+        val prepended = pbrDataToPalette + (defaultPBRData to 0)
 
         // Fill in the data for each material ID
         for ((dataList, materialId) in prepended) {
@@ -231,4 +290,16 @@ private fun writeLUTFiles(texturesPath: Path, pbrDataToPalette: List<Pair<List<L
 
         println("Wrote LUT $lutIndex: format=$lutFormat, size=${maxMaterialId + 1} entries, ${textureData.size} bytes")
     }
+}
+
+private fun writeBlockModelLUT(path: Path, metadataByMaterialId: Map<Int, List<UInt>>) {
+    val maxMaterialId = metadataByMaterialId.keys.maxOrNull() ?: 0
+    val buffer = ByteBuffer.allocate((maxMaterialId + 1) * 64 * Int.SIZE_BYTES).order(ByteOrder.LITTLE_ENDIAN)
+    for ((materialId, rows) in metadataByMaterialId) {
+        require(rows.size == 64) { "Block model metadata must contain 64 cull-mask rows" }
+        buffer.position(materialId * 64 * Int.SIZE_BYTES)
+        rows.forEach { buffer.putInt(it.toInt()) }
+    }
+    path.outputStream().use { it.write(buffer.array()) }
+    println("Wrote LUT 2: format=R32UI, size=${maxMaterialId + 1}x64 entries, ${buffer.capacity()} bytes")
 }
