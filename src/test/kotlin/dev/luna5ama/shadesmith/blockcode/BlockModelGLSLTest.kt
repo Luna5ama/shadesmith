@@ -21,6 +21,29 @@ import kotlin.test.assertTrue
 
 class BlockModelGLSLTest {
     @Test
+    fun `keeps model ranges within 2048 quad rows`() {
+        val models = (0 until 34).map { index ->
+            val x = 0.1 + index * 0.001
+            val faces = List(63) { face ->
+                val z = 0.1 + face * 0.01
+                quad(vertex(x, 0.2, z), vertex(0.8, 0.2, z),
+                    vertex(0.8, 0.8, z), vertex(x, 0.8, z))
+            }
+            model(BlockState("row_$index"), faces)
+        }
+        val palette = buildBlockModelPalette(BlockModelsResult(models, emptyList()))
+        val offsets = palette.modelIdByState.values.map { rows ->
+            val metadata = rows[63]
+            val offset = ((metadata shr 9) and 0xFFFFu).toInt()
+            val count = ((metadata shr 25) and 0x3Fu).toInt()
+            assertTrue(offset % 2048 + count <= 2048)
+            offset
+        }
+        assertEquals(2048, offsets[32])
+        assertEquals(4096 * 32 * 4, generateBlockModelGLSL(palette, assets()).quadData.size)
+    }
+
+    @Test
     fun `builds 64 pre-culled metadata rows and deduplicates filtered geometry`() {
         val bits = listOf(1u, 2u, 4u, 8u, 16u, 32u)
         val alwaysQuad = quad(
@@ -100,7 +123,7 @@ class BlockModelGLSLTest {
         val quadOffset = ((metadata shr BLOCK_MODEL_ROTATION_BITS) and 0xFFFFu).toInt()
         val bytes = generated.quadData.slice(quadOffset * 8 until quadOffset * 8 + 8)
 
-        assertEquals(paddedQuadTextureByteCount(1), generated.quadData.size)
+        assertEquals(4096 * 32 * 4, generated.quadData.size)
         assertEquals(8, bytes.size)
         assertTrue(generated.quadData.drop(8).all { it == 0.toByte() })
         val encodedSource = palette.geometries.single().single()
@@ -139,7 +162,7 @@ class BlockModelGLSLTest {
 
         val shader = generated.shader
         assertEquals(4, Regex("texelFetch\\(usam_blockModelQuads").findAll(shader).count())
-        assertTrue(shader.contains("ivec2 texelCoord = ivec2(int((modelData >> 8u) & 0x7FFEu), int((modelData >> 23u) & 3u));"))
+        assertTrue(shader.contains("ivec2 texelCoord = ivec2(int(bitfieldExtract(modelData, 9, 11) << 1u), int(bitfieldExtract(modelData, 20, 5)));"))
         assertTrue(shader.contains("texelCoord.x += 2;"))
         assertTrue(shader.contains("texelCoord + ivec2(1, 0)"))
         assertTrue(shader.contains("vec2 halfSize"))
@@ -271,7 +294,7 @@ class BlockModelGLSLTest {
                     ((metadata shr 9) and 0xFFFFu) + ((metadata shr 25) and BLOCK_MODEL_QUAD_COUNT_MASK)
                 }
             }.toInt()
-            assertEquals(paddedQuadTextureByteCount(expectedQuadCount), quadBytes.size)
+            assertEquals(4096 * 32 * 4, quadBytes.size)
             assertTrue(quadBytes.drop(expectedQuadCount * 8).all { it == 0.toByte() })
             assertEquals(1u, (decode(flagsLut, stoneId) shr 4) and 1u)
             Files.walk(temporary).use { paths ->
@@ -390,7 +413,7 @@ class BlockModelGLSLTest {
             )
         }
         assertEquals(2, palette.geometries.size)
-        assertTrue(first.shader.contains("ivec2 texelCoord = ivec2(int((modelData >> 8u) & 0x7FFEu), int((modelData >> 23u) & 3u));"))
+        assertTrue(first.shader.contains("ivec2 texelCoord = ivec2(int(bitfieldExtract(modelData, 9, 11) << 1u), int(bitfieldExtract(modelData, 20, 5)));"))
         assertTrue(first.shader.contains("uint quadCount = (modelData >> 25u) & 0x3Fu;"))
         assertTrue(first.shader.contains("bool axisAligned = (modelData & 0x80000000u) != 0u;"))
         assertTrue(first.shader.contains("_voxel_unrotateBlockModelVector"))
@@ -401,7 +424,7 @@ class BlockModelGLSLTest {
         assertEquals(1, Regex("_voxel_unrotateBlockModelVector").findAll(modelFunction).count())
         assertEquals(1, modelFunction.lineSequence().count { it.trimStart().startsWith("return ") })
         assertFalse(modelFunction.contains("modelID"))
-        assertEquals(paddedQuadTextureByteCount(palette.quads.size), first.quadData.size)
+        assertEquals(4096 * 32 * 4, first.quadData.size)
         assertFalse(first.shader.contains("switch"))
         assertFalse(first.shader.contains("0.499999"))
         assertTrue(palette.geometries.flatten().any { quad ->
@@ -678,12 +701,6 @@ class BlockModelGLSLTest {
     private fun decodeUNorm(value: Byte) = value.toUByte().toDouble() / 255.0
 
     private fun decodeSignedUNorm(value: Byte) = value.toUByte().toDouble() / 126.0 - 1.0
-
-    private fun paddedQuadTextureByteCount(quadCount: Int): Int {
-        val bytes = quadCount * 8
-        val rowBytes = 32768 * 4
-        return (bytes + rowBytes - 1) / rowBytes * rowBytes
-    }
 
     private fun vertex(x: Double, y: Double, z: Double) = GeometryVertex(x, y, z)
     private operator fun GeometryVertex.plus(other: GeometryVertex) = vertex(x + other.x, y + other.y, z + other.z)

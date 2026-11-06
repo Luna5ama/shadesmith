@@ -22,9 +22,10 @@ internal const val BLOCK_MODEL_ROTATION_BITS = 9
 internal const val BLOCK_MODEL_ROTATION_MASK = 0x1FFu
 internal const val BLOCK_MODEL_AXIS_ALIGNED_BIT = 0x80000000u
 internal const val BLOCK_MODEL_QUAD_COUNT_MASK = 0x3Fu
-internal const val BLOCK_MODEL_QUAD_TEXTURE_WIDTH = 32768
+internal const val BLOCK_MODEL_QUAD_TEXTURE_WIDTH = 4096
+internal const val BLOCK_MODEL_QUAD_TEXTURE_HEIGHT = 32
 private const val BLOCK_MODEL_QUADS_PER_TEXTURE_ROW = BLOCK_MODEL_QUAD_TEXTURE_WIDTH / 2
-private const val BLOCK_MODEL_QUAD_TEXTURE_ROW_BYTES = BLOCK_MODEL_QUAD_TEXTURE_WIDTH * 4
+private const val BLOCK_MODEL_QUAD_TEXTURE_BYTES = BLOCK_MODEL_QUAD_TEXTURE_WIDTH * BLOCK_MODEL_QUAD_TEXTURE_HEIGHT * 4
 
 internal data class BlockModelPalette(
     val modelIdByState: Map<BlockState, List<UInt>>,
@@ -277,7 +278,7 @@ internal fun generateBlockModelGLSL(
         appendLine("    uint rotation = modelData & 0x1FFu;")
         appendLine("    uint quadCount = (modelData >> 25u) & 0x3Fu;")
         appendLine("    bool axisAligned = (modelData & 0x80000000u) != 0u;")
-        appendLine("    ivec2 texelCoord = ivec2(int((modelData >> 8u) & 0x7FFEu), int((modelData >> 23u) & 3u));")
+        appendLine("    ivec2 texelCoord = ivec2(int(bitfieldExtract(modelData, 9, 11) << 1u), int(bitfieldExtract(modelData, 20, 5)));")
         appendLine("    rayOrigin -= vec3(0.5);")
         appendLine("    _voxel_rotateBlockModelRay(rotation, rayOrigin, rayDir);")
         appendLine("    rayOrigin += vec3(0.5);")
@@ -342,6 +343,7 @@ private fun encodeBlockModelQuads(
     quads: List<GeometryQuad>, compactAxisAlignedQuads: List<Boolean>
 ): List<Byte> = buildList(quads.size * 8) {
     require(quads.size == compactAxisAlignedQuads.size)
+    require(quads.size * 8 <= BLOCK_MODEL_QUAD_TEXTURE_BYTES) { "Block model quads exceed the 4096x32 texture capacity" }
     for ((index, quad) in quads.withIndex()) {
         val origin = GeometryVertex(
             quad.vertices.sumOf(GeometryVertex::x) / quad.vertices.size,
@@ -388,7 +390,7 @@ private fun encodeBlockModelQuads(
         add(halfSizeU.uNormByte(RoundingMode.CEILING))
         add(halfSizeV.uNormByte(RoundingMode.CEILING))
     }
-    repeat((BLOCK_MODEL_QUAD_TEXTURE_ROW_BYTES - size % BLOCK_MODEL_QUAD_TEXTURE_ROW_BYTES) % BLOCK_MODEL_QUAD_TEXTURE_ROW_BYTES) {
+    repeat(BLOCK_MODEL_QUAD_TEXTURE_BYTES - size) {
         add(0)
     }
 }
