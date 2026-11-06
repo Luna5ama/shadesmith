@@ -4,7 +4,6 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 class PBRLayoutTest {
     private val fields = defaultPBRFields()
@@ -14,7 +13,7 @@ class PBRLayoutTest {
     fun `plans compact packed layout with minimal textures`() {
         val layout = planPBRLayout(fields)
 
-        assertEquals(2, layout.size)
+        assertEquals(3, layout.size)
         val material = layout[0]
         assertEquals("R32UI", material.format.name)
         assertEquals(fields.take(6).map { it.name }, material.fields.map { it.field })
@@ -23,10 +22,15 @@ class PBRLayoutTest {
         assertEquals(List(6) { false }, material.fields.map { it.signed })
         val flags = layout[1]
         assertEquals("R32UI", flags.format.name)
-        assertEquals(fields.drop(6).map { it.name }, flags.fields.map { it.field })
+        assertEquals(fields.drop(6).dropLast(1).map { it.name }, flags.fields.map { it.field })
         assertEquals(listOf(0, 4, 5), flags.fields.map { it.bitOffset })
         assertEquals(listOf(4, 1, 1), flags.fields.map { it.bitWidth })
         assertEquals(listOf(true, false, false), flags.fields.map { it.signed })
+        val model = layout[2]
+        assertEquals("R32UI", model.format.name)
+        assertEquals(listOf("blockModel"), model.fields.map { it.field })
+        assertEquals(listOf(0), model.fields.map { it.bitOffset })
+        assertEquals(listOf(32), model.fields.map { it.bitWidth })
     }
 
     @Test
@@ -37,10 +41,11 @@ class PBRLayoutTest {
         ).toList()
 
         val row = rows.single { it.first == BlockState(BlockNames.EndRod) }.second
-        assertEquals(2, row.size)
+        assertEquals(3, row.size)
         assertEquals("R32UI", row[0].format.name)
         assertEquals(0xF0E47F90u, decodePackedUInt(row[0]))
         assertEquals(0xEu, decodePackedUInt(row[1]))
+        assertEquals(0u, decodePackedUInt(row[2]))
     }
 
     @Test
@@ -55,14 +60,27 @@ class PBRLayoutTest {
     }
 
     @Test
+    fun `block model id uses a dedicated r32ui texture`() {
+        val state = BlockState("partial")
+        val property = BlockProperty(blockID = "partial", luminance = 9)
+        val baseline = PBRAssembler(defaultPBRFields()).provide(state, property).single().second
+        val modeled = PBRAssembler(defaultPBRFields(mapOf(state to 37u))).provide(state, property).single().second
+
+        assertEquals(baseline.dropLast(1).map(::decodePackedUInt), modeled.dropLast(1).map(::decodePackedUInt))
+        assertEquals(0u, decodePackedUInt(baseline.last()))
+        assertEquals(37u, decodePackedUInt(modeled.last()))
+    }
+
+    @Test
     fun `assembler emits alias states from provider output`() {
-        val rows = assembler.provide(
-            BlockState(BlockNames.ShortGrass),
+        val state = BlockState(BlockNames.ShortGrass)
+        val rows = PBRAssembler(defaultPBRFields(mapOf(state to 37u))).provide(
+            state,
             BlockProperty(blockID = BlockNames.ShortGrass)
         ).toList()
 
-        assertTrue(rows.any { it.first == BlockState("grass") })
-        assertTrue(rows.any { it.first == BlockState(BlockNames.ShortGrass) })
+        assertEquals(37u, decodePackedUInt(rows.single { it.first == BlockState("grass") }.second.last()))
+        assertEquals(37u, decodePackedUInt(rows.single { it.first == state }.second.last()))
     }
 
     @Test

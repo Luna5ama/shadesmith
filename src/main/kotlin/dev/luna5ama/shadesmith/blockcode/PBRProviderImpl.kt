@@ -198,6 +198,17 @@ object FullCubeFlag : PBRProvider<PBRValue.Bool> {
     }
 }
 
+class BlockModelID(private val modelIds: Map<BlockState, UInt>) : PBRProvider<PBRValue.UInt32> {
+    override val defaultValue: PBRValue.UInt32 = PBRValue.UInt32(0u)
+
+    override fun BlockScope.provide(): Sequence<Pair<BlockState, PBRValue.UInt32>> = sequence {
+        val value = PBRValue.UInt32(modelIds[baseState] ?: 0u)
+        yield(baseState to value)
+        if (nameEquals(BlockNames.ShortGrass)) {
+            yield(BlockState("grass") to value)
+        }
+    }
+}
 
 object Emissive : PBRProvider<PBRValue.UInt4> {
     override val defaultValue: PBRValue.UInt4 = PBRValue.UInt4(0u)
