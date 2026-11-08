@@ -32,15 +32,60 @@ fun cleanUnused(file: ShaderFile): ShaderFile {
         val funcInfo = FUNCTION_HEADER_REGEX.findAll(newCode).map {
             val (_, funcName) = it.destructured
             val endIndex = run {
+                data class DepthState(val depth: Int, val conditions: Map<String, Boolean>)
                 data class ConditionalFrame(
-                    val branchStartDepths: Set<Int>,
-                    val branchEndDepths: MutableSet<Int>
+                    var remainingStates: MutableSet<DepthState>,
+                    val branchEndStates: MutableSet<DepthState>,
+                    var hasElse: Boolean = false,
                 )
 
                 val conditionalStack = ArrayDeque<ConditionalFrame>()
-                var depths = mutableSetOf(1)
+                var depths = mutableSetOf(DepthState(1, emptyMap()))
                 var index = it.range.last + 1
                 val directives = PREPROCESSOR_CONDITIONAL_REGEX.findAll(newCode, index).iterator()
+
+                fun splitByCondition(
+                    states: Set<DepthState>,
+                    key: String,
+                    requiredValue: Boolean,
+                ): Pair<MutableSet<DepthState>, MutableSet<DepthState>> {
+                    val matching = mutableSetOf<DepthState>()
+                    val remaining = mutableSetOf<DepthState>()
+                    for (state in states) {
+                        val value = state.conditions[key]
+                        if (value == null) {
+                            matching.add(state.copy(conditions = state.conditions + (key to requiredValue)))
+                            remaining.add(state.copy(conditions = state.conditions + (key to !requiredValue)))
+                        } else if (value == requiredValue) {
+                            matching.add(state)
+                        } else {
+                            remaining.add(state)
+                        }
+                    }
+                    return matching to remaining
+                }
+
+                fun condition(directive: MatchResult): Pair<String, Boolean> {
+                    val command = directive.groupValues[1]
+                    val expression = directive.value.substringAfter('#').trim().removePrefix(command).trim()
+                    if (command == "ifdef" || command == "ifndef") {
+                        val name = expression.removeSurrounding("(", ")")
+                        return "defined:$name" to (command == "ifdef")
+                    }
+
+                    val normalized = expression.replace(Regex("\\s+"), "")
+                    val defined = Regex("(!?)defined\\(?($IDENTIFIER_REGEX_STR)\\)?").matchEntire(normalized)
+                    if (defined != null) {
+                        val (_, negation, name) = defined.groupValues
+                        return "defined:$name" to negation.isEmpty()
+                    }
+
+                    val negatedIdentifier = Regex("!($IDENTIFIER_REGEX_STR)").matchEntire(normalized)
+                    if (negatedIdentifier != null) {
+                        return "expression:${negatedIdentifier.groupValues[1]}" to false
+                    }
+                    return "expression:$normalized" to true
+                }
 
                 while (index < newCode.length) {
                     val directive = if (directives.hasNext()) directives.next() else null
@@ -48,36 +93,53 @@ fun cleanUnused(file: ShaderFile): ShaderFile {
 
                     while (index < boundary) {
                         when (newCode[index++]) {
-                            '{' -> depths = depths.mapTo(mutableSetOf()) { it + 1 }
-                            '}' -> depths = depths.mapTo(mutableSetOf()) { it - 1 }
+                            '{' -> depths = depths.mapTo(mutableSetOf()) { it.copy(depth = it.depth + 1) }
+                            '}' -> depths = depths.mapTo(mutableSetOf()) { it.copy(depth = it.depth - 1) }
                         }
-                        if (depths.size == 1 && depths.contains(0)) return@run index
+                        if (depths.isNotEmpty() && depths.all { it.depth == 0 }) return@run index
                     }
 
                     if (directive == null) break
 
                     when (directive.groupValues[1]) {
-                        "if", "ifdef", "ifndef" -> conditionalStack.addLast(
-                            ConditionalFrame(depths.toSet(), mutableSetOf())
-                        )
+                        "if", "ifdef", "ifndef" -> {
+                            val (key, requiredValue) = condition(directive)
+                            val (matching, remaining) = splitByCondition(depths, key, requiredValue)
+                            conditionalStack.addLast(ConditionalFrame(remaining, mutableSetOf()))
+                            depths = matching
+                        }
 
                         "elif", "else" -> {
                             val frame = conditionalStack.lastOrNull()
                                 ?: error("Unexpected #${directive.groupValues[1]} in function $funcName")
-                            frame.branchEndDepths.addAll(depths)
-                            depths = frame.branchStartDepths.toMutableSet()
+                            frame.branchEndStates.addAll(depths)
+                            if (directive.groupValues[1] == "else") {
+                                depths = frame.remainingStates
+                                frame.remainingStates = mutableSetOf()
+                                frame.hasElse = true
+                            } else {
+                                val (key, requiredValue) = condition(directive)
+                                val (matching, remaining) = splitByCondition(
+                                    frame.remainingStates,
+                                    key,
+                                    requiredValue,
+                                )
+                                frame.remainingStates = remaining
+                                depths = matching
+                            }
                         }
 
                         "endif" -> {
                             val frame = conditionalStack.removeLastOrNull()
                                 ?: error("Unexpected #endif in function $funcName")
-                            frame.branchEndDepths.addAll(depths)
-                            depths = frame.branchEndDepths.toMutableSet()
+                            frame.branchEndStates.addAll(depths)
+                            if (!frame.hasElse) frame.branchEndStates.addAll(frame.remainingStates)
+                            depths = frame.branchEndStates
                         }
                     }
 
                     index = directive.range.last + 1
-                    if (depths.size == 1 && depths.contains(0)) return@run index
+                    if (depths.isNotEmpty() && depths.all { it.depth == 0 }) return@run index
                 }
 
                 error("Unbalanced function body for $funcName")
